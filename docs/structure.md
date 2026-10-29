@@ -26,33 +26,47 @@ workspace dependency edge once. Cargo already rejects crate dependency cycles.
 
 ## Instance-specific literals
 
-The check scans every tracked Rust source and `Cargo.toml` in the repository,
-including root packages, build scripts, integration tests, and relocated modules.
-Local checks also include non-ignored untracked sources so newly added files are
-checked before staging. The explicit exclusions are `xtask/tests/fixtures/`, Git
-metadata, and generated `target/` directories. Symlinks fail closed rather than
-allowing sources to escape the scan. Historical scans use the exact Git tree's file
-inventory, blob contents, and executable file modes; export attributes and checkout
-filters cannot omit or rewrite the evidence.
+The check scans all tracked text files, including Cargo configuration and files
+consumed by `include_str!`, `include_bytes!`, and `include!`, regardless of extension.
+Text means valid UTF-8 without NUL bytes; other files are treated as binary and
+skipped. Local checks also include non-ignored untracked files before staging.
+The explicit exclusions are `docs/`, `*.md`, files named `LICENSE`, and
+`xtask/tests/fixtures/`. Generated files normally stay outside the Git inventory;
+tracked files under `target/` are still scanned. Symlinks fail closed. Historical
+scans use the exact Git tree's inventory, blob contents, and executable modes;
+export attributes and checkout filters cannot omit or rewrite the evidence.
 
 Each finding reports its relative file, line, column, and category. The categories
 are IPv4 and IPv6 literals outside the RFC 5737 and RFC 3849 documentation ranges,
 absolute home-directory paths (Unix account homes, the root account's home, and
 Windows drive-qualified user profiles), email addresses, and HTTP or HTTPS URL
 literals with case-insensitive schemes. Sentence punctuation does not hide IPv6.
-Rust sources are tokenized with `ra-ap-rustc_lexer`. Only string-literal contents
-(including byte, C, and raw strings), comment text (including nested comments), and
-the shebang line are scanned. Literal suffixes are consumed with their token;
-identifiers, paths, numbers, and character literals are never scanned. Cargo
-manifests are scanned as text. Home paths must begin an absolute path token;
-relative directory components do not count.
+IPv4 dotted-quads are checked across full Rust source text, including code and
+bare macro input, so `stringify!` and `doc = stringify!` cannot hide contiguous
+addresses. Rust sources are also tokenized with `ra-ap-rustc_lexer`: IPv6, home
+paths, email addresses, and URLs are checked only in string-literal contents
+(including byte, C, and raw strings), comments, and shebang text. Literal suffixes
+are consumed with their token. Other text files use the plain-text scanner for
+all categories. Home paths must begin an absolute path token; relative directory
+components do not count.
 
 Only the exact canonical HTTPS repository URL derived from origin is exempt, and
 only as the value of `package.repository` or `workspace.package.repository` in a
 `Cargo.toml`. Homepage URLs, dependency URLs, comments, source strings, and URLs
-with a different path or suffix still count. No general URL or domain allowlist is
-provided. The scanner checks literal text; review still enforces public-repository
-hygiene for values assembled at runtime.
+with a different path or suffix still count. The exact generated crates.io registry
+source field in the root `Cargo.lock` is also exempt; comments and altered source
+URLs are not. There is no general URL or domain allowlist. Other matching URLs,
+including issue links in allowance entries, count.
+
+The threat model is **accidental leaks in committed text**. This is an unexpanded
+source-text check, not a constant evaluator: it does not decode escapes, expand
+macros, or evaluate constants. Deliberate reconstruction with `concat!`, split
+fragments, escape sequences, computed values, or other compile-time/runtime
+assembly is out of scope and must be caught by review. Binary files and inputs
+outside the tracked/non-ignored local inventory are not inspected. The documented
+exclusions remain excluded even when referenced by an include macro; review must
+check those uses.
+
 Do not publish machine names, hostnames, home-directory paths, usernames, emails,
 private repository names, internal issue details, or information about a contributor's
 host. Use generic product language and documentation addresses in examples.
@@ -93,8 +107,8 @@ entry automatically. Its `amount` funds only its named debt metric. New entries
 supply their own count coverage; old spare capacity cannot fund new debt, and no
 separate allowance-for-allowances entries are accepted. The count is still reported,
 baselines still only fall, and an existing entry still cannot be edited. For
-example, one new literal finding needs one issue-linked `instance_literals` entry
-with amount 1. The initial change needs no allowances.
+example, one new literal plus its allowance's issue URL needs one
+`instance_literals` entry with amount 2. The initial change needs no allowances.
 
 ## Local and CI checks
 

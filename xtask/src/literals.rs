@@ -13,9 +13,10 @@ pub fn scan(
     for relative in files {
         let name = relative.to_string_lossy().replace('\\', "/");
         if name.starts_with("xtask/tests/fixtures/")
-            || relative
-                .components()
-                .any(|c| c.as_os_str() == "target" || c.as_os_str() == ".git")
+            || name.starts_with("docs/")
+            || relative.extension().is_some_and(|ext| ext == "md")
+            || relative.file_name().is_some_and(|file| file == "LICENSE")
+            || relative.components().any(|c| c.as_os_str() == ".git")
         {
             continue;
         }
@@ -23,9 +24,6 @@ pub fn scan(
         let manifest = relative
             .file_name()
             .is_some_and(|file| file == "Cargo.toml");
-        if !rust && !manifest {
-            continue;
-        }
         let path = root.join(relative);
         let mut ancestor = root.to_path_buf();
         for component in relative.components() {
@@ -42,22 +40,48 @@ pub fn scan(
         if !metadata.is_file() {
             return Err(format!("source scan requires a regular file: {name}"));
         }
-        let source = fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
-        let spans = if rust {
-            crate::rust_text::ranges(&source)
-        } else {
-            std::iter::once(0..source.len()).collect()
+        let bytes = fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
+        let Ok(source) = std::str::from_utf8(&bytes) else {
+            continue;
         };
+        if source.contains('\0') {
+            continue;
+        }
+        let mut spans: Vec<_> = if rust {
+            crate::rust_text::ranges(source)
+                .into_iter()
+                .map(|span| (span, false))
+                .collect()
+        } else {
+            std::iter::once((0..source.len(), false)).collect()
+        };
+        if rust {
+            spans.push((0..source.len(), true));
+        }
         let metadata_spans = if manifest {
-            canonical_repository_spans(&source, repository)?
+            canonical_repository_spans(source, repository)?
+        } else if relative == Path::new("Cargo.lock") {
+            registry_spans(source)?
         } else {
             vec![]
         };
-        for span in spans {
+        for (span, ipv4_only) in &spans {
             let mut offset = span.start;
-            for line in source[span].split_inclusive('\n') {
-                for (column, category) in in_line(line) {
+            for line in source[span.clone()].split_inclusive('\n') {
+                let candidates = if *ipv4_only {
+                    ipv4_in_line(line)
+                } else {
+                    in_line(line)
+                };
+                for (column, category) in candidates {
                     let position = offset + column;
+                    if *ipv4_only
+                        && spans
+                            .iter()
+                            .any(|(text, only)| !only && text.contains(&position))
+                    {
+                        continue;
+                    }
                     if category == "URL literal"
                         && metadata_spans.iter().any(|span| span.contains(&position))
                     {
@@ -160,17 +184,11 @@ pub fn in_line(line: &str) -> Vec<(usize, &'static str)> {
             }
         }
     }
-    for (column, token) in tokens(line, |c| c.is_ascii_digit() || c == '.') {
-        let candidate = token.trim_matches('.');
-        if bounded(line, column, token.len())
-            && !ipv6_spans.iter().any(|span| span.contains(&column))
-            && candidate
-                .parse::<Ipv4Addr>()
-                .is_ok_and(|ip| !documentation(ip.into()))
-        {
-            findings.push((column, "IPv4 literal"));
-        }
-    }
+    findings.extend(
+        ipv4_in_line(line)
+            .into_iter()
+            .filter(|(column, _)| !ipv6_spans.iter().any(|span| span.contains(column))),
+    );
     for scheme in ["http", "https"] {
         let prefix = format!("{scheme}://");
         for (column, _) in line.to_ascii_lowercase().match_indices(&prefix) {
@@ -233,4 +251,41 @@ fn absolute_home(path: &str) -> bool {
             .trim_start_matches('/')
             .strip_prefix("users/")
             .is_some_and(|name| account(name.trim_start_matches('/')))
+}
+
+fn registry_spans(source: &str) -> Result<Vec<std::ops::Range<usize>>, String> {
+    #[derive(serde::Deserialize)]
+    struct Package {
+        source: Option<toml::Spanned<String>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Lockfile {
+        package: Vec<Package>,
+    }
+    let lock: Lockfile = toml::from_str(source).map_err(|e| format!("Cargo.lock: {e}"))?;
+    let registry = format!(
+        "registry+{}://github.com/rust-lang/crates.io-index",
+        "https"
+    );
+    Ok(lock
+        .package
+        .into_iter()
+        .filter_map(|p| p.source)
+        .filter(|s| s.get_ref() == &registry)
+        .map(|s| s.span())
+        .collect())
+}
+
+fn ipv4_in_line(line: &str) -> Vec<(usize, &'static str)> {
+    tokens(line, |c| c.is_ascii_digit() || c == '.')
+        .into_iter()
+        .filter(|(column, token)| {
+            bounded(line, *column, token.len())
+                && token
+                    .trim_matches('.')
+                    .parse::<Ipv4Addr>()
+                    .is_ok_and(|ip| !documentation(ip.into()))
+        })
+        .map(|(column, _)| (column, "IPv4 literal"))
+        .collect()
 }

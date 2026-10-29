@@ -100,7 +100,7 @@ impl Repository {
     }
     fn allowances(&self, reason: &str) {
         let repository = history::repository_url(self.root()).unwrap();
-        self.write("structure/allowances.toml", &format!("[[allowances]]\nid = 'literal'\nmetric = 'instance_literals'\namount = 1\nreason = '{reason}'\nissue = '{repository}/issues/1'\n"));
+        self.write("structure/allowances.toml", &format!("[[allowances]]\nid = 'literal'\nmetric = 'instance_literals'\namount = 2\nreason = '{reason}'\nissue = '{repository}/issues/1'\n"));
     }
 }
 
@@ -140,17 +140,20 @@ fn root_package_and_relocated_modules_fail_the_end_to_end_check() {
 }
 
 #[test]
-fn explicit_fixture_and_build_exclusions_do_not_hide_other_sources() {
+fn explicit_text_and_binary_exclusions_do_not_hide_other_sources() {
     let repo = Repository::new();
     let source = format!("// {}\n", Ipv4Addr::new(10, 20, 30, 40));
     for file in [
         "xtask/tests/fixtures/input.rs",
-        "target/generated.rs",
-        "nested/target/Cargo.toml",
+        "docs/example.txt",
+        "NOTES.md",
+        "LICENSE",
     ] {
         repo.write(file, &source);
         repo.git(&["add", "--force", file]);
     }
+    repo.write("binary.dat", &format!("\0{source}"));
+    repo.git(&["add", "binary.dat"]);
     let files = history::working_files(repo.root()).unwrap();
     assert!(literals::scan(repo.root(), &files, "").unwrap().is_empty());
     repo.write("untracked.rs", &source);
@@ -548,4 +551,113 @@ fn historical_metadata_preserves_an_executable_compiler_wrapper() {
         0o644
     );
     assert!(layers::metadata(snapshot.root()).is_ok());
+}
+
+#[test]
+fn bare_tokens_and_tracked_build_inputs_are_scanned_with_compiled_value_controls() {
+    let repo = Repository::new();
+    let address = Ipv4Addr::new(10, 20, 30, 40).to_string();
+    repo.write("inputs/address.txt", &address);
+    repo.write(
+        "inputs/address.code",
+        &format!("pub const INCLUDED: &str = {address:?};\n"),
+    );
+    repo.write(
+        ".cargo/config.toml",
+        &format!("[env]\nFIXTURE_ADDRESS = {address:?}\n"),
+    );
+    repo.write(
+        "src/lib.rs",
+        &format!(
+            r###"
+#[doc = stringify!({address})]
+pub const DIRECT: &str = stringify!({address});
+macro_rules! forward {{ ($($tokens:tt)*) => {{ stringify!($($tokens)*) }}; }}
+pub const FORWARDED: &str = forward!({address});
+pub const TEXT: &str = include_str!("../inputs/address.txt");
+pub const BYTES: &[u8] = include_bytes!("../inputs/address.txt");
+include!("../inputs/address.code");
+#[doc = include_str!("../inputs/address.txt")]
+pub struct Documented;
+pub const ENVIRONMENT: &str = env!("FIXTURE_ADDRESS");
+#[test]
+fn compiled_values() {{
+    let expected = std::net::Ipv4Addr::new(10, 20, 30, 40).to_string();
+    for value in [DIRECT, FORWARDED, TEXT, INCLUDED, ENVIRONMENT] {{ assert_eq!(value, expected); }}
+    assert_eq!(BYTES, expected.as_bytes());
+}}
+"###
+        ),
+    );
+    repo.git(&["add", "."]);
+    let output = Command::new("cargo")
+        .args(["test", "--offline", "--locked"])
+        .current_dir(repo.root())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let findings = literals::scan(
+        repo.root(),
+        &history::working_files(repo.root()).unwrap(),
+        "",
+    )
+    .unwrap();
+    assert_eq!(findings.len(), 6, "{findings:?}");
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|f| f.starts_with("src/lib.rs:"))
+            .count(),
+        3
+    );
+    for file in [
+        "inputs/address.txt",
+        "inputs/address.code",
+        ".cargo/config.toml",
+    ] {
+        assert!(
+            findings.iter().any(|f| f.starts_with(&format!("{file}:"))),
+            "{file}"
+        );
+    }
+    assert!(
+        check(repo.root(), Some("HEAD"))
+            .unwrap_err()
+            .contains("instance_literals")
+    );
+}
+
+#[test]
+fn only_the_exact_lockfile_registry_source_is_exempt() {
+    let repo = Repository::new();
+    let registry = format!(
+        "registry+{}://github.com/rust-lang/crates.io-index",
+        "https"
+    );
+    for (source, expected) in [(registry.clone(), 0), (format!("{registry}/extra"), 1)] {
+        repo.write(
+            "Cargo.lock",
+            &format!("[[package]]\nname = 'fixture'\nsource = {source:?}\n"),
+        );
+        assert_eq!(
+            literals::scan(repo.root(), &[PathBuf::from("Cargo.lock")], "")
+                .unwrap()
+                .len(),
+            expected
+        );
+    }
+    repo.write(
+        "Cargo.lock",
+        &format!("# {registry}\n[[package]]\nname = 'fixture'\n"),
+    );
+    assert_eq!(
+        literals::scan(repo.root(), &[PathBuf::from("Cargo.lock")], "")
+            .unwrap()
+            .len(),
+        1
+    );
 }
