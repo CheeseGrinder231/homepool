@@ -8,7 +8,7 @@ pub fn validate_allowances(allowances: &[Allowance], issue_prefix: &str) -> Resu
         if entry.id.trim().is_empty() || !ids.insert(&entry.id) {
             return Err("allowances require nonempty, unique ids".into());
         }
-        if !METRICS.contains(&entry.metric.as_str())
+        if !["instance_literals", "layer_violations"].contains(&entry.metric.as_str())
             || entry.amount == 0
             || entry.reason.trim().is_empty()
             || number.is_empty()
@@ -47,6 +47,12 @@ pub fn enforce(
         }
     }
     let sum = |metric: &str, only_new: bool| -> Result<u64, String> {
+        if metric == "allowance_count" {
+            return Ok(allowances
+                .iter()
+                .filter(|a| !only_new || !old.contains_key(&a.id))
+                .count() as u64);
+        }
         allowances
             .iter()
             .filter(|a| a.metric == metric && (!only_new || !old.contains_key(&a.id)))

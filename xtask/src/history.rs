@@ -1,49 +1,71 @@
 use std::{
+    collections::BTreeSet,
     fs,
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
+    path::{Component, Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub struct Snapshot(PathBuf);
+#[derive(Debug, PartialEq, Eq)]
+pub enum Base {
+    Initial,
+    Commit(String),
+}
+
+pub struct Snapshot {
+    root: PathBuf,
+    pub files: Vec<PathBuf>,
+}
 
 impl Snapshot {
     pub fn root(&self) -> &Path {
-        &self.0
+        &self.root
     }
 
-    pub fn create(root: &Path, revision: &str) -> Result<Self, String> {
+    pub fn empty() -> Result<Self, String> {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().join(format!(
             "homepool-structure-{}-{unique}",
             std::process::id()
         ));
-        fs::create_dir(&path).map_err(|e| format!("create structure scratch directory: {e}"))?;
-        let snapshot = Self(path);
-        let archive = git(root, &["archive", "--format=tar", revision])?;
-        let mut child = Command::new("tar")
-            .args(["-xf", "-", "-C"])
-            .arg(snapshot.root())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("extract base snapshot: {e}"))?;
-        let write = child
-            .stdin
-            .take()
-            .ok_or("tar stdin unavailable")?
-            .write_all(&archive);
-        let status = child
-            .wait()
-            .map_err(|e| format!("extract base snapshot: {e}"))?;
-        write.map_err(|e| format!("write base snapshot: {e}"))?;
-        if !status.success() {
-            return Err("extract base snapshot failed".into());
+        fs::create_dir(&root).map_err(|e| format!("create structure scratch directory: {e}"))?;
+        Ok(Self {
+            root,
+            files: Vec::new(),
+        })
+    }
+
+    pub fn create(root: &Path, revision: &str) -> Result<Self, String> {
+        let mut snapshot = Self::empty()?;
+        // Read Git objects, not an archive or checkout: export and checkout filters
+        // must not alter the historical evidence used by the ratchet.
+        let tree = git(root, &["ls-tree", "--full-tree", "-r", "-z", revision])?;
+        for record in tree.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+            let record = std::str::from_utf8(record).map_err(|_| "Git paths must be UTF-8")?;
+            let (object, name) = record.split_once('\t').ok_or("invalid Git tree entry")?;
+            let fields: Vec<_> = object.split_whitespace().collect();
+            if fields.len() != 3
+                || fields[0] != "100644" && fields[0] != "100755"
+                || fields[1] != "blob"
+            {
+                return Err(format!("unsupported Git tree entry: {name}"));
+            }
+            let path = PathBuf::from(name);
+            if !path
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+            {
+                return Err("invalid path in Git tree".into());
+            }
+            let destination = snapshot.root.join(&path);
+            fs::create_dir_all(destination.parent().ok_or("missing parent directory")?)
+                .map_err(|e| e.to_string())?;
+            fs::write(destination, git(root, &["cat-file", "blob", fields[2]])?)
+                .map_err(|e| e.to_string())?;
+            snapshot.files.push(path);
         }
         Ok(snapshot)
     }
@@ -51,7 +73,7 @@ impl Snapshot {
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
@@ -70,36 +92,73 @@ pub fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
-pub fn base(root: &Path, requested: Option<&str>) -> Result<String, String> {
-    let output = if let Some(revision) = requested {
-        git(
-            root,
-            &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
-        )?
-    } else {
-        // On main, check the last change; on a branch, check the complete PR.
-        let merge_base = git(root, &["merge-base", "HEAD", "origin/main"])?;
-        let head = git(root, &["rev-parse", "HEAD"])?;
-        if merge_base == head
-            && Command::new("git")
-                .args(["cat-file", "-e", "HEAD:Cargo.toml"])
-                .current_dir(root)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-        {
-            git(root, &["rev-parse", "HEAD^"])?
-        } else {
-            merge_base
-        }
-    };
-    String::from_utf8(output)
-        .map(|s| s.trim().to_owned())
-        .map_err(|e| e.to_string())
+pub fn working_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let files = git(
+        root,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )?;
+    files
+        .split(|b| *b == 0)
+        .filter(|r| !r.is_empty())
+        .map(|r| {
+            std::str::from_utf8(r)
+                .map(PathBuf::from)
+                .map_err(|_| "Git paths must be UTF-8".to_owned())
+        })
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(|paths| paths.into_iter().collect())
 }
 
-pub fn issue_prefix(root: &Path) -> Result<String, String> {
+pub fn base(root: &Path, requested: Option<&str>) -> Result<Base, String> {
+    let revision = |bytes: Vec<u8>| {
+        String::from_utf8(bytes)
+            .map(|s| s.trim().to_owned())
+            .map_err(|e| e.to_string())
+    };
+    if let Some(requested) = requested {
+        if matches!(requested.len(), 40 | 64) && requested.bytes().all(|b| b == b'0') {
+            return Ok(Base::Initial);
+        }
+        return revision(git(
+            root,
+            &["rev-parse", "--verify", &format!("{requested}^{{commit}}")],
+        )?)
+        .map(Base::Commit);
+    }
+    let head = revision(git(root, &["rev-parse", "HEAD"])?)?;
+    // Read the actual parent header: graph traversal can make a shallow boundary
+    // look like a root commit and must never silently grant an initial state.
+    let commit =
+        String::from_utf8(git(root, &["cat-file", "commit", &head])?).map_err(|e| e.to_string())?;
+    let parent = commit
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| line.strip_prefix("parent "));
+    let dirty = !git(root, &["status", "--porcelain", "--untracked-files=normal"])?.is_empty();
+    // A true root commit has no previous tree, including before the first push
+    // creates a main tracking ref. Local edits still compare against that commit.
+    let Some(parent) = parent else {
+        return Ok(if dirty {
+            Base::Commit(head)
+        } else {
+            Base::Initial
+        });
+    };
+    let merge_base = revision(git(root, &["merge-base", "HEAD", "origin/main"])?)?;
+    if merge_base != head {
+        return Ok(Base::Commit(merge_base));
+    }
+    // Working-tree and index edits must be compared with the committed main state.
+    Ok(Base::Commit(if dirty { head } else { parent.into() }))
+}
+
+pub fn repository_url(root: &Path) -> Result<String, String> {
     let remote = String::from_utf8(git(root, &["remote", "get-url", "origin"])?)
         .map_err(|e| e.to_string())?;
     let remote = remote.trim().trim_end_matches(".git");
@@ -119,5 +178,5 @@ pub fn issue_prefix(root: &Path) -> Result<String, String> {
     {
         return Err("invalid repository origin".into());
     }
-    Ok(format!("{https}{repository}/issues/"))
+    Ok(format!("{https}{repository}"))
 }

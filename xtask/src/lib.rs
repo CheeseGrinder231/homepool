@@ -3,9 +3,10 @@ mod history;
 mod layers;
 pub mod literals;
 mod ratchet;
+mod rust_context;
 
 use config::{Allowances, Counts, Layers, METRICS};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 struct Measurement {
@@ -15,12 +16,12 @@ struct Measurement {
     findings: Vec<String>,
 }
 
-fn measure(root: &Path) -> Result<Measurement, String> {
+fn measure(root: &Path, files: &[PathBuf], repository: &str) -> Result<Measurement, String> {
     let layers: Layers = config::read(root, "structure/layers.toml")?;
     let baseline = config::read(root, "structure/baseline.toml")?;
     let allowances: Allowances = config::read(root, "structure/allowances.toml")?;
     let layer_findings = layers::violations(&layers::metadata(root)?, &layers)?;
-    let literal_findings = literals::scan(root)?;
+    let literal_findings = literals::scan(root, files, repository)?;
     let counts = Counts {
         layer_violations: layer_findings.len() as u64,
         instance_literals: literal_findings.len() as u64,
@@ -37,11 +38,19 @@ fn measure(root: &Path) -> Result<Measurement, String> {
 
 pub fn check(root: &Path, requested_base: Option<&str>) -> Result<(), String> {
     let revision = history::base(root, requested_base)?;
-    let prefix = history::issue_prefix(root)?;
-    let current = measure(root)?;
-    let snapshot = history::Snapshot::create(root, &revision)?;
-    let old = if snapshot.root().join("Cargo.toml").exists() {
-        measure(snapshot.root())?
+    let repository = history::repository_url(root)?;
+    let prefix = format!("{repository}/issues/");
+    let current = measure(root, &history::working_files(root)?, &repository)?;
+    let snapshot = match revision {
+        history::Base::Initial => history::Snapshot::empty()?,
+        history::Base::Commit(revision) => history::Snapshot::create(root, &revision)?,
+    };
+    let old = if snapshot
+        .files
+        .iter()
+        .any(|path| path == Path::new("Cargo.toml"))
+    {
+        measure(snapshot.root(), &snapshot.files, &repository)?
     } else {
         Measurement::default()
     };
@@ -64,3 +73,6 @@ pub fn check(root: &Path, requested_base: Option<&str>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod regressions;

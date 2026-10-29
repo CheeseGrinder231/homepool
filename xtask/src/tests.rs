@@ -37,10 +37,7 @@ fn ratchet_fixture_cases() {
         let allowances = if case.allowance == 0 {
             vec![]
         } else {
-            vec![
-                allowance("literal", "instance_literals", case.allowance),
-                allowance("budget", "allowance_count", 2),
-            ]
+            vec![allowance("literal", "instance_literals", case.allowance)]
         };
         let current = Counts {
             instance_literals: case.current,
@@ -81,18 +78,15 @@ fn ratchet_fixture_cases() {
 
 #[test]
 fn existing_allowances_are_immutable_and_cannot_fund_an_increase() {
-    let old = vec![
-        allowance("literal", "instance_literals", 9),
-        allowance("budget", "allowance_count", 2),
-    ];
+    let old = vec![allowance("literal", "instance_literals", 9)];
     let counts = Counts {
         instance_literals: 1,
-        allowance_count: 2,
+        allowance_count: 1,
         ..Counts::default()
     };
     let increased = Counts {
         instance_literals: 2,
-        allowance_count: 2,
+        allowance_count: 1,
         ..Counts::default()
     };
     assert!(
@@ -135,14 +129,14 @@ fn existing_allowances_are_immutable_and_cannot_fund_an_increase() {
 }
 
 #[test]
-fn allowance_entries_also_need_coverage() {
+fn each_allowance_funds_its_own_count() {
     let entries = [allowance("literal", "instance_literals", 1)];
     let counts = Counts {
         instance_literals: 1,
         allowance_count: 1,
         ..Counts::default()
     };
-    let error = ratchet::enforce(
+    ratchet::enforce(
         &counts,
         &Counts::default(),
         &entries,
@@ -150,8 +144,9 @@ fn allowance_entries_also_need_coverage() {
         &Counts::default(),
         &[],
     )
-    .unwrap_err();
-    assert!(error.contains("allowance_count"));
+    .unwrap();
+    let recursive = allowance("recursive", "allowance_count", 1);
+    assert!(ratchet::validate_allowances(&[recursive], "").is_err());
 }
 
 #[test]
@@ -221,7 +216,15 @@ fn scan_excludes_fixtures_and_reports_file_and_line() {
     let fixtures = snapshot.root().join("xtask/tests/fixtures");
     std::fs::create_dir_all(&fixtures).unwrap();
     std::fs::write(fixtures.join("Cargo.toml"), &input).unwrap();
-    let findings = literals::scan(snapshot.root()).unwrap();
+    let mut files = snapshot.files.clone();
+    files.extend(
+        [
+            "crates/example/src/lib.rs",
+            "xtask/tests/fixtures/Cargo.toml",
+        ]
+        .map(std::path::PathBuf::from),
+    );
+    let findings = literals::scan(snapshot.root(), &files, "").unwrap();
     assert!(
         findings
             .iter()
