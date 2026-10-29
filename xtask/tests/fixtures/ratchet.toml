@@ -1,0 +1,44 @@
+[[cases]]
+name = "pass"
+current = 0
+baseline = 0
+old_count = 0
+old_baseline = 0
+allowance = 0
+expected = ""
+
+[[cases]]
+name = "increase-fail"
+current = 1
+baseline = 0
+old_count = 0
+old_baseline = 0
+allowance = 0
+expected = "new allowances"
+
+[[cases]]
+name = "stale-baseline-fail"
+current = 0
+baseline = 1
+old_count = 1
+old_baseline = 1
+allowance = 0
+expected = "ratchet: lower instance_literals baseline to 0"
+
+[[cases]]
+name = "allowance-pass"
+current = 1
+baseline = 0
+old_count = 0
+old_baseline = 0
+allowance = 1
+expected = ""
+
+[[cases]]
+name = "raised-baseline-fail"
+current = 1
+baseline = 1
+old_count = 0
+old_baseline = 0
+allowance = 0
+expected = "baseline may only fall"

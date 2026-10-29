@@ -1,0 +1,9 @@
+[layers]
+core = []
+adapter = ["core"]
+app = ["core", "adapter"]
+
+[crates]
+homepool-core = "core"
+homepool-cli = "app"
+xtask = "app"
