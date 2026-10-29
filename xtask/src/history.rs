@@ -63,8 +63,15 @@ impl Snapshot {
             let destination = snapshot.root.join(&path);
             fs::create_dir_all(destination.parent().ok_or("missing parent directory")?)
                 .map_err(|e| e.to_string())?;
-            fs::write(destination, git(root, &["cat-file", "blob", fields[2]])?)
+            fs::write(&destination, git(root, &["cat-file", "blob", fields[2]])?)
                 .map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = if fields[0] == "100755" { 0o755 } else { 0o644 };
+                fs::set_permissions(&destination, fs::Permissions::from_mode(mode))
+                    .map_err(|e| e.to_string())?;
+            }
             snapshot.files.push(path);
         }
         Ok(snapshot)

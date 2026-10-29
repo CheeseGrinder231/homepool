@@ -32,16 +32,20 @@ Local checks also include non-ignored untracked sources so newly added files are
 checked before staging. The explicit exclusions are `xtask/tests/fixtures/`, Git
 metadata, and generated `target/` directories. Symlinks fail closed rather than
 allowing sources to escape the scan. Historical scans use the exact Git tree's file
-inventory and blob contents; export attributes and checkout filters cannot omit or
-rewrite the evidence.
+inventory, blob contents, and executable file modes; export attributes and checkout
+filters cannot omit or rewrite the evidence.
 
 Each finding reports its relative file, line, column, and category. The categories
 are IPv4 and IPv6 literals outside the RFC 5737 and RFC 3849 documentation ranges,
 absolute home-directory paths (Unix account homes, the root account's home, and
 Windows drive-qualified user profiles), email addresses, and HTTP or HTTPS URL
 literals with case-insensitive schemes. Sentence punctuation does not hide IPv6.
-Comments and strings, including raw strings and nested comments, are included;
-ordinary Rust path syntax in code is not an IPv6 literal.
+Rust sources are tokenized with `ra-ap-rustc_lexer`. Only string-literal contents
+(including byte, C, and raw strings), comment text (including nested comments), and
+the shebang line are scanned. Literal suffixes are consumed with their token;
+identifiers, paths, numbers, and character literals are never scanned. Cargo
+manifests are scanned as text. Home paths must begin an absolute path token;
+relative directory components do not count.
 
 Only the exact canonical HTTPS repository URL derived from origin is exempt, and
 only as the value of `package.repository` or `workspace.package.repository` in a
@@ -113,3 +117,7 @@ ISC, Unicode-3.0, and Zlib. Copyleft-only dependencies are not allowed. Unknown
 registries and Git sources are denied; crates.io is the default allowed registry.
 Wildcard version requirements are also denied; duplicate versions produce warnings.
 The separate weekly advisory workflow is non-blocking and can be run manually.
+
+The tokenizer's Unicode tables must agree. The lockfile selects compatible
+Unicode 17 releases of `unicode-ident` and `unicode-properties`; keep their Unicode
+versions aligned when updating dependencies.

@@ -43,35 +43,33 @@ pub fn scan(
             return Err(format!("source scan requires a regular file: {name}"));
         }
         let source = fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
-        let text = if rust {
-            crate::rust_context::text_mask(&source)
+        let spans = if rust {
+            crate::rust_text::ranges(&source)
         } else {
-            vec![]
+            std::iter::once(0..source.len()).collect()
         };
         let metadata_spans = if manifest {
             canonical_repository_spans(&source, repository)?
         } else {
             vec![]
         };
-        let mut offset = 0;
-        for (index, line) in source.split_inclusive('\n').enumerate() {
-            for (column, category) in in_line(line) {
-                let position = offset + column;
-                if category == "IPv6 literal"
-                    && rust
-                    && !text[position]
-                    && crate::rust_context::is_path(line, column)
-                {
-                    continue;
+        for span in spans {
+            let mut offset = span.start;
+            for line in source[span].split_inclusive('\n') {
+                for (column, category) in in_line(line) {
+                    let position = offset + column;
+                    if category == "URL literal"
+                        && metadata_spans.iter().any(|span| span.contains(&position))
+                    {
+                        continue;
+                    }
+                    let preceding = &source[..position];
+                    let line = preceding.bytes().filter(|b| *b == b'\n').count() + 1;
+                    let column = position - preceding.rfind('\n').map_or(0, |n| n + 1) + 1;
+                    findings.push(format!("{name}:{line}:{column}: {category}"));
                 }
-                if category == "URL literal"
-                    && metadata_spans.iter().any(|span| span.contains(&position))
-                {
-                    continue;
-                }
-                findings.push(format!("{name}:{}:{}: {category}", index + 1, column + 1));
+                offset += line.len();
             }
-            offset += line.len();
         }
     }
     findings.sort();
@@ -179,53 +177,11 @@ pub fn in_line(line: &str) -> Vec<(usize, &'static str)> {
             findings.push((column, "URL literal"));
         }
     }
-    for prefix in [format!("/{}/", "home"), format!("/{}/", "Users")] {
-        for (column, tail) in line.match_indices(&prefix) {
-            if column >= 2
-                && line.as_bytes()[column - 1] == b':'
-                && line.as_bytes()[column - 2].is_ascii_alphabetic()
-            {
-                continue;
-            }
-            let rest = &line[column + tail.len()..];
-            if rest
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
-            {
-                findings.push((column, "absolute home path"));
-            }
-        }
-    }
-    let root_home = format!("/{}", "root");
-    for (column, _) in line.match_indices(&root_home) {
-        if line[column + root_home.len()..]
-            .chars()
-            .next()
-            .is_none_or(|c| !c.is_alphanumeric() && !matches!(c, '_' | '-' | '.'))
-        {
+    for (column, path) in tokens(line, |c| {
+        c.is_alphanumeric() || matches!(c, '/' | '\\' | ':' | '.' | '_' | '-' | '~' | '%' | '+')
+    }) {
+        if absolute_home(path.trim_end_matches('.')) {
             findings.push((column, "absolute home path"));
-        }
-    }
-    let lower = line.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    for column in 0..bytes.len().saturating_sub(2) {
-        if bytes[column].is_ascii_alphabetic() && bytes[column + 1] == b':' {
-            let rest = lower[column + 2..].trim_start_matches(['\\', '/']);
-            if rest.len() == lower[column + 2..].len() {
-                continue;
-            }
-            if let Some(rest) = rest.strip_prefix("users") {
-                let user = rest.trim_start_matches(['\\', '/']);
-                if user.len() != rest.len()
-                    && user
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
-                {
-                    findings.push((column, "absolute home path"));
-                }
-            }
         }
     }
     for (column, token) in tokens(line, |c| {
@@ -250,4 +206,31 @@ pub fn in_line(line: &str) -> Vec<(usize, &'static str)> {
     }
     findings.sort();
     findings
+}
+
+fn absolute_home(path: &str) -> bool {
+    let account = |name: &str| {
+        name.chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    };
+    let root = format!("/{}", "root");
+    if path == root
+        || path.starts_with(&format!("{root}/"))
+        || ["home", "Users"]
+            .iter()
+            .any(|base| path.strip_prefix(&format!("/{base}/")).is_some_and(account))
+    {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
+        return false;
+    }
+    let rest = path[2..].replace('\\', "/").to_ascii_lowercase();
+    rest.starts_with('/')
+        && rest
+            .trim_start_matches('/')
+            .strip_prefix("users/")
+            .is_some_and(|name| account(name.trim_start_matches('/')))
 }

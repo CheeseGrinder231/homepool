@@ -211,7 +211,7 @@ fn scan_excludes_fixtures_and_reports_file_and_line() {
     let snapshot = history::Snapshot::create(root, "HEAD").unwrap();
     let dir = snapshot.root().join("crates/example/src");
     std::fs::create_dir_all(&dir).unwrap();
-    let input = format!("// placeholder\n{}\n", Ipv4Addr::new(10, 20, 30, 40));
+    let input = format!("// placeholder\n// {}\n", Ipv4Addr::new(10, 20, 30, 40));
     std::fs::write(dir.join("lib.rs"), &input).unwrap();
     let fixtures = snapshot.root().join("xtask/tests/fixtures");
     std::fs::create_dir_all(&fixtures).unwrap();
@@ -228,7 +228,7 @@ fn scan_excludes_fixtures_and_reports_file_and_line() {
     assert!(
         findings
             .iter()
-            .any(|f| f == "crates/example/src/lib.rs:2:1: IPv4 literal")
+            .any(|f| f == "crates/example/src/lib.rs:2:4: IPv4 literal")
     );
     assert!(!findings.iter().any(|f| f.contains("fixtures")));
 }

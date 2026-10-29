@@ -3,7 +3,7 @@ mod history;
 mod layers;
 pub mod literals;
 mod ratchet;
-mod rust_context;
+mod rust_text;
 
 use config::{Allowances, Counts, Layers, METRICS};
 use std::path::{Path, PathBuf};

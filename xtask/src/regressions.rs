@@ -276,6 +276,8 @@ fn compilable_hexadecimal_rust_paths_are_not_ipv6_but_prose_still_is() {
         format!("pub const A: &str = \"{path}\";\n"),
         format!("pub const A: &str = r###\"{path}\"###;\n"),
         format!("pub const A: &[u8] = br#\"{path}\"#;\n"),
+        format!("pub const A: &std::ffi::CStr = c\"{path}\";\n"),
+        format!("pub const A: &std::ffi::CStr = cr#\"{path}\"#;\n"),
     ] {
         repo.write("src/lib.rs", &text);
         assert!(
@@ -422,4 +424,128 @@ fn a_shallow_boundary_is_not_a_true_root_commit() {
         history::base(repo.root(), None).unwrap(),
         history::Base::Commit(parent)
     );
+}
+
+#[test]
+fn expanding_macro_literal_suffixes_cannot_hide_an_ipv6_string() {
+    let repo = Repository::new();
+    let address = Ipv6Addr::new(0xab, 0, 0, 0, 0, 0, 0, 0xdef);
+    repo.write("src/lib.rs", &format!(r###"
+macro_rules! expose {{
+    ($first:literal $second:literal $value:literal) => {{ pub const ADDRESS: &str = $value; }};
+}}
+expose!("tag"r"\"" "{address}");
+#[test]
+fn expanded_value() {{
+    assert_eq!(ADDRESS.parse::<std::net::Ipv6Addr>().unwrap(), std::net::Ipv6Addr::new(0xab, 0, 0, 0, 0, 0, 0, 0xdef));
+}}
+"###));
+    let output = Command::new("cargo")
+        .args(["test", "--offline", "--locked"])
+        .current_dir(repo.root())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        check(repo.root(), Some("HEAD"))
+            .unwrap_err()
+            .contains("instance_literals")
+    );
+}
+
+#[test]
+fn shebang_text_is_scanned_without_confusing_inner_attributes() {
+    let repo = Repository::new();
+    let address = Ipv6Addr::new(0xab, 0, 0, 0, 0, 0, 0, 0xdef);
+    repo.write("src/lib.rs", &format!("#!{address}\npub fn value() {{}}\n"));
+    let findings = literals::scan(repo.root(), &[PathBuf::from("src/lib.rs")], "").unwrap();
+    assert_eq!(findings, ["src/lib.rs:1:3: IPv6 literal"]);
+    repo.write("src/lib.rs", "#![forbid(unsafe_code)]\npub fn value() {}\n");
+    assert!(check(repo.root(), Some("HEAD")).is_ok());
+}
+
+#[test]
+fn compilable_range_paths_are_never_scanned_as_address_text() {
+    let repo = Repository::new();
+    let path = ["abc", "DEF"].join(&":".repeat(2));
+    repo.write("src/lib.rs", &format!("mod abc {{ pub const DEF: u8 = 7; }}\npub fn limit() -> std::ops::RangeTo<u8> {{ ..{path} }}\n"));
+    let output = Command::new("cargo")
+        .args(["check", "--offline", "--locked"])
+        .current_dir(repo.root())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(check(repo.root(), Some("HEAD")).is_ok());
+}
+
+#[test]
+fn relative_path_components_are_not_absolute_home_paths() {
+    let repo = Repository::new();
+    let absolute = format!("/{}/data", "root");
+    for path in [
+        "fixtures/root/data".to_owned(),
+        format!("fixtures/{}/example", "home"),
+        format!("../{}/example", "Users"),
+        format!("fixtures/C:\\{}\\example", "Users"),
+    ] {
+        repo.write(
+            "src/lib.rs",
+            &format!("pub const RELATIVE: &str = {path:?};\n"),
+        );
+        assert!(check(repo.root(), Some("HEAD")).is_ok(), "{path}");
+    }
+    repo.write(
+        "src/lib.rs",
+        &format!("pub const ABSOLUTE: &str = {absolute:?};\n"),
+    );
+    assert!(
+        check(repo.root(), Some("HEAD"))
+            .unwrap_err()
+            .contains("instance_literals")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn historical_metadata_preserves_an_executable_compiler_wrapper() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repository::new();
+    repo.write(
+        ".cargo/config.toml",
+        "[build]\nrustc-wrapper = './compiler-wrapper'\n",
+    );
+    repo.write("compiler-wrapper", "#!/bin/sh\nexec \"$@\"\n");
+    fs::set_permissions(
+        repo.root().join("compiler-wrapper"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert!(layers::metadata(repo.root()).is_ok());
+    let revision = repo.commit();
+    assert!(
+        repo.git(&["ls-tree", "HEAD", "compiler-wrapper"])
+            .starts_with("100755")
+    );
+    let snapshot = history::Snapshot::create(repo.root(), &revision).unwrap();
+    assert_eq!(
+        fs::metadata(snapshot.root().join("compiler-wrapper"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::metadata(snapshot.root().join("src/lib.rs"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+    assert!(layers::metadata(snapshot.root()).is_ok());
 }
