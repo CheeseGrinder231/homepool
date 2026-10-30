@@ -2,6 +2,7 @@
 
 use std::fmt::Write;
 
+use homepool_adapter_garage::StorageUsage;
 use homepool_core::{ComputeBudget, MemberState, Pool, Tier};
 use serde::Serialize;
 
@@ -12,6 +13,8 @@ const STATUS_JSON_VERSION: u64 = 1;
 struct Status {
     version: u64,
     members: Vec<MemberStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<StorageUsage>,
 }
 
 #[derive(Serialize)]
@@ -45,9 +48,10 @@ impl From<ComputeBudget> for Budget {
     }
 }
 
-pub fn render(pool: &Pool, json: bool) -> Result<String, String> {
+pub fn render(pool: &Pool, json: bool, storage: Option<StorageUsage>) -> Result<String, String> {
     let status = Status {
         version: STATUS_JSON_VERSION,
+        storage,
         members: pool
             .members()
             .map(|member| MemberStatus {
@@ -73,7 +77,11 @@ pub fn render(pool: &Pool, json: bool) -> Result<String, String> {
             .map(|text| format!("{text}\n"))
             .map_err(|e| format!("could not encode status: {e}"));
     }
-    let mut output = String::from("Declared members (from file; no live probes)\n");
+    let mut output = String::from(if status.storage.is_some() {
+        "Declared members (from file)\n"
+    } else {
+        "Declared members (from file; no live probes)\n"
+    });
     if status.members.is_empty() {
         output.push_str("No members.\n");
     }
@@ -97,6 +105,13 @@ pub fn render(pool: &Pool, json: bool) -> Result<String, String> {
         )
         .expect("write to String");
     }
+    if let Some(storage) = status.storage {
+        writeln!(output,
+            "Garage consumer storage (live, logical): {} buckets, {} objects, {} used bytes, {} unfinished upload bytes",
+            storage.buckets, storage.objects, storage.used_bytes, storage.unfinished_upload_bytes
+        ).expect("write to String");
+        output.push_str("A single-node layout keeps a single copy; it is not a backup.\n");
+    }
     Ok(output)
 }
 
@@ -108,7 +123,7 @@ mod tests {
     fn status_json_v1_contract() {
         assert_eq!(STATUS_JSON_VERSION, 1);
         assert_eq!(
-            render(&Pool::default(), true).unwrap(),
+            render(&Pool::default(), true, None).unwrap(),
             "{\"version\":1,\"members\":[]}\n"
         );
     }

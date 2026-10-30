@@ -7,13 +7,23 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
-const USAGE: &str = "Usage: homepool [--config FILE] status [--json]\n\nRead the private member file and show its declared members and budgets.\n--config FILE may also follow status. See docs/members.md for the schema.";
+use signal_hook::{
+    consts::{SIGINT, SIGTERM},
+    flag,
+};
+
+const USAGE: &str = "Usage: homepool [--config FILE] status [--json] [--garage-config FILE]\n\nRead the private member file and show its declared members and budgets.\n--garage-config adds a live storage usage probe through an installed Garage.\n--config FILE may also follow status. See docs/members.md for the schema.";
 
 struct Options {
     config: Option<PathBuf>,
     json: bool,
+    garage_config: Option<PathBuf>,
 }
 
 enum Command {
@@ -25,6 +35,7 @@ enum Command {
 fn arguments(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut args = args.into_iter();
     let mut config = None;
+    let mut garage_config = None;
     let mut json = false;
     let mut status = false;
     while let Some(arg) = args.next() {
@@ -32,15 +43,22 @@ fn arguments(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             return Ok(Command::Help);
         } else if arg == "--version" {
             return Ok(Command::Version);
-        } else if arg == "--config" {
-            if config.is_some() {
-                return Err("--config may only be supplied once".into());
+        } else if arg == "--config" || arg == "--garage-config" {
+            let (name, selected) = if arg == "--config" {
+                ("--config", &mut config)
+            } else {
+                ("--garage-config", &mut garage_config)
+            };
+            if selected.is_some() {
+                return Err(format!("{name} may only be supplied once"));
             }
-            let value = args.next().ok_or("--config requires a file path")?;
+            let value = args
+                .next()
+                .ok_or_else(|| format!("{name} requires a file path"))?;
             if value.is_empty() || value.to_string_lossy().starts_with('-') {
-                return Err("--config requires a file path".into());
+                return Err(format!("{name} requires a file path"));
             }
-            config = Some(PathBuf::from(value));
+            *selected = Some(PathBuf::from(value));
         } else if arg == "--json" && !json {
             json = true;
         } else if arg == "status" && !status {
@@ -52,10 +70,14 @@ fn arguments(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     if !status {
         return Err(USAGE.into());
     }
-    Ok(Command::Status(Options { config, json }))
+    Ok(Command::Status(Options {
+        config,
+        json,
+        garage_config,
+    }))
 }
 
-fn run() -> Result<(), String> {
+fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
     let output = match arguments(env::args_os().skip(1))? {
         Command::Help => format!("{USAGE}\n"),
         Command::Version => format!("homepool {}\n", env!("CARGO_PKG_VERSION")),
@@ -66,7 +88,43 @@ fn run() -> Result<(), String> {
                 env::var_os("XDG_CONFIG_HOME"),
             )?;
             let pool = settings::load(&path)?;
-            status::render(&pool, options.json)?
+            let storage = options
+                .garage_config
+                .map(|config| {
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let terminate_immediately = Arc::new(AtomicBool::new(true));
+                    for signal in [SIGINT, SIGTERM] {
+                        // Record the exit code before publishing cancellation.
+                        flag::register_conditional_default(
+                            signal,
+                            Arc::clone(&terminate_immediately),
+                        )
+                        .and_then(|_| {
+                            flag::register_usize(signal, Arc::clone(interrupted), signal as usize)
+                        })
+                        .and_then(|_| flag::register(signal, Arc::clone(&cancelled)))
+                        .map_err(|_| {
+                            "could not register Garage cancellation signals".to_string()
+                        })?;
+                    }
+                    // Defer ordinary termination only while child cleanup is needed.
+                    terminate_immediately.store(false, Ordering::SeqCst);
+                    // A signal between the two registrations must also cancel.
+                    if interrupted.load(Ordering::SeqCst) != 0 {
+                        cancelled.store(true, Ordering::Release);
+                    }
+                    let result = homepool_adapter_garage::Garage::new(&config)
+                        .with_cancellation(cancelled)
+                        .storage_usage();
+                    // Both success and error returns have completed child cleanup.
+                    terminate_immediately.store(true, Ordering::SeqCst);
+                    if interrupted.load(Ordering::SeqCst) != 0 {
+                        return Err(homepool_adapter_garage::Error::CANCELLED.to_string());
+                    }
+                    result.map_err(|e| e.to_string())
+                })
+                .transpose()?;
+            status::render(&pool, options.json, storage)?
         }
     };
     io::stdout()
@@ -76,11 +134,17 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let interrupted = Arc::new(AtomicUsize::new(0));
+    let result = match run(&interrupted) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("homepool: {error}");
             ExitCode::FAILURE
         }
+    };
+    match interrupted.load(Ordering::SeqCst) as i32 {
+        SIGINT => ExitCode::from(130),
+        SIGTERM => ExitCode::from(143),
+        _ => result,
     }
 }
