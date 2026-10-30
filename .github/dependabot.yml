@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Rust advisories are covered by the scheduled dependency advisories workflow.
+  # Dependabot preserves existing full commit SHA pins and updates version comments.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
