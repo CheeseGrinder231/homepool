@@ -1,8 +1,11 @@
 #![cfg(target_os = "linux")]
 
 use std::{
-    fs,
-    os::unix::{fs::PermissionsExt, process::CommandExt},
+    fs, io,
+    os::unix::{
+        fs::PermissionsExt,
+        process::{CommandExt, ExitStatusExt},
+    },
     path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
@@ -15,6 +18,102 @@ struct Running {
     cli: Option<Child>,
     wrapper: Option<Pid>,
     scratch: PathBuf,
+}
+
+#[test]
+fn signals_terminate_blocked_stdout_after_the_probe_is_reaped() {
+    for (signal, number) in [(Signal::INT, 2), (Signal::TERM, 15)] {
+        let scratch = PathBuf::from(
+            std::env::var_os("TMPDIR").unwrap_or_else(|| env!("CARGO_TARGET_TMPDIR").into()),
+        )
+        .join(format!(
+            "garage-output-signals-{}-{number}",
+            std::process::id()
+        ));
+        fs::create_dir_all(scratch.join("bin")).unwrap();
+        let mut running = Running {
+            cli: None,
+            wrapper: None,
+            scratch,
+        };
+        let pids = running.scratch.join("pids");
+        let wrapper = running.scratch.join("bin/garage");
+        fs::write(
+            &wrapper,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' $$ > "$HOMEPOOL_TEST_PIDS"
+printf '[]'
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        let (reader, writer) = io::pipe().unwrap();
+        let capacity = rustix::pipe::fcntl_getpipe_size(&reader).unwrap();
+        let mut members = String::from("version = 1\n");
+        // Every JSON member occupies more than 64 bytes, so stdout must stall.
+        for id in 0..=capacity / 64 {
+            members.push_str(&format!(
+                "[[members]]\nid = {id}\ntier = 'core'\nstate = 'active'\ncapabilities = {{}}\n"
+            ));
+        }
+        fs::write(running.scratch.join("members.toml"), members).unwrap();
+        let mut paths = vec![running.scratch.join("bin")];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        running.cli = Some(
+            Command::new(env!("CARGO_BIN_EXE_homepool"))
+                .args([
+                    "status",
+                    "--config",
+                    "members.toml",
+                    "--garage-config",
+                    "private-garage.toml",
+                    "--json",
+                ])
+                .current_dir(&running.scratch)
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env("HOMEPOOL_TEST_PIDS", &pids)
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(writer)
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let cli = running.cli.as_mut().unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while rustix::io::ioctl_fionread(&reader).unwrap() < capacity as u64 {
+            assert!(
+                cli.try_wait().unwrap().is_none(),
+                "CLI exited before filling stdout"
+            );
+            assert!(Instant::now() < until, "stdout did not fill");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let wrapper_id: i32 = fs::read_to_string(&pids).unwrap().parse().unwrap();
+        assert!(
+            !PathBuf::from(format!("/proc/{wrapper_id}")).exists(),
+            "probe must be reaped before output blocks"
+        );
+        assert!(cli.try_wait().unwrap().is_none());
+        kill_process_group(Pid::from_raw(cli.id() as i32).unwrap(), signal).unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        while cli.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < until,
+                "blocked output ignored the termination signal"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        // Keep the full pipe's reader open and undrained until after termination.
+        let output = running.cli.take().unwrap().wait_with_output().unwrap();
+        assert_eq!(output.status.signal(), Some(number));
+        assert_eq!(output.status.code(), None);
+        assert!(output.stderr.is_empty());
+        drop(reader);
+    }
 }
 
 impl Drop for Running {

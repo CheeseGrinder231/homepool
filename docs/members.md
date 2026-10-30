@@ -130,6 +130,10 @@ sanitized cancellation diagnostic. Cancellation of a mutation has the same unkno
 outcome as a deadline: inspect Garage privately before retrying; no operation is
 automatically retried. Uncatchable termination cannot perform this cleanup.
 
+After the probe returns and child cleanup is complete, SIGINT and SIGTERM use
+ordinary Unix signal termination, including when status output is blocked on a
+stalled pipe. Shells report `130` or `143`, respectively; partial output may remain.
+
 This is an additive, opt-in extension of status JSON version 1: with the option,
 the top-level object also contains `storage`. Without the option, this field is
 omitted and the previous JSON shape is unchanged. The member-file schema is unchanged.

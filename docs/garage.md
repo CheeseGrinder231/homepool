@@ -92,8 +92,8 @@ with the adapter. Setting it to true stops the process group and reaps its child
 before returning the fixed `Error::CANCELLED`. The flag remains set and prevents
 subsequent operations from starting. Cancellation has the same unknown-outcome,
 inspect-before-retry rule as a deadline and never automatically retries or launches
-cleanup requests after cancellation. The CLI sets this flag on SIGINT and SIGTERM;
-see [status exit codes](members.md#optional-live-garage-storage). Library callers
+cleanup requests after cancellation. During a probe the CLI sets this flag on
+SIGINT and SIGTERM; see [status exit codes](members.md#optional-live-garage-storage). Library callers
 own signal handling and must keep the supervisor alive until cancellation returns.
 
 ## Status and verification
