@@ -12,7 +12,7 @@ use toml::{
     de::{DeTable, DeValue},
 };
 
-/// Version of the member file and status JSON contracts.
+/// Version of the member-file schema.
 pub const SCHEMA_VERSION: u64 = 1;
 /// Used only when neither an explicit path nor HOMEPOOL_CONFIG is supplied.
 const DEFAULT_CONFIG_PATH: &str = "homepool/members.toml";
@@ -248,5 +248,18 @@ fn field_name(prefix: &str, key: &str) -> String {
         key.into()
     } else {
         format!("{prefix}.{key}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_file_v1_contract() {
+        assert_eq!(SCHEMA_VERSION, 1);
+        let path = Path::new("members.toml");
+        assert!(parse(path, "version = 1\nmembers = []").is_ok());
+        assert!(parse(path, "version = 2\nmembers = []").is_err());
     }
 }

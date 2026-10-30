@@ -43,6 +43,12 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: cargo test -p homepool-adapter-garage --test garage --locked -- --ignored
+      - name: Test the Docker adapter against the runner engine
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          docker pull alpine:3.22
+          cargo test -p homepool-adapter-docker --test engine --locked -- --ignored --test-threads=1
 
   structure:
     name: structure

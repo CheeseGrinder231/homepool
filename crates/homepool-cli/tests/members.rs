@@ -208,6 +208,65 @@ fn empty_pool_and_default_capabilities_have_stable_json() {
 }
 
 #[test]
+fn closed_stdout_pipe_reports_output_failure() {
+    let scratch = Scratch::new();
+    let path = scratch.file("members.toml", "version = 1\nmembers = []\n");
+    let (reader, writer) = std::io::pipe().unwrap();
+    // Close before spawning so the outcome does not depend on process scheduling
+    // or on how much output the platform's pipe buffer can hold.
+    drop(reader);
+    let output = scratch
+        .command()
+        .args(["status", "--json", "--config"])
+        .arg(path)
+        .stdout(writer)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("homepool: stdout:"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn closing_stdout_pipe_mid_json_leaves_partial_output_and_reports_failure() {
+    use std::{io::Read, process::Stdio};
+
+    let scratch = Scratch::new();
+    // Since Linux 4.9 this is also the ceiling on a new pipe's capacity.
+    // Exceed it so the child cannot finish writing before the reader closes.
+    let pipe_ceiling: usize = fs::read_to_string("/proc/sys/fs/pipe-max-size")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut source = String::from("version = 1\n");
+    for id in 0..=pipe_ceiling / 64 {
+        source.push_str(&member(id as u64, "core", "active"));
+    }
+    let complete = scratch.status(&source);
+    assert!(complete.status.success());
+    let mut prefix = [0; 32];
+    assert!(complete.stdout.len() > pipe_ceiling + prefix.len());
+
+    let mut child = scratch
+        .command()
+        .args(["status", "--json", "--config", "members.toml"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = child.stdout.take().unwrap();
+    reader.read_exact(&mut prefix).unwrap();
+    drop(reader);
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(prefix, complete.stdout[..prefix.len()]);
+    assert!(serde_json::from_slice::<Value>(&prefix).is_err());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("homepool: stdout:"));
+}
+
+#[test]
 fn json_member_order_is_independent_of_input_order() {
     let scratch = Scratch::new();
     let first = member(1, "core", "active");
