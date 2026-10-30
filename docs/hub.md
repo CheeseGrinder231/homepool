@@ -51,7 +51,9 @@ homepool --socket "$HOMEPOOL_SOCKET" inventory --json
 
 Config selection is unchanged. Socket selection takes the first supplied source:
 `--socket FILE`, `HOMEPOOL_SOCKET`, then `$XDG_RUNTIME_DIR/homepool/hub.sock`.
-Explicit and environment paths may be relative to the working directory. Empty
+Explicit and environment paths may be relative to the working directory. Unix
+socket paths have a short platform-dependent limit of about 100 bytes; a relative
+path from a nearby working directory avoids the limit on a long absolute path. Empty
 selections fail; the XDG directory must be absolute and nonempty. There is no home
 fallback. New socket parent directories use `0700`; existing immediate parents
 must already have that mode and the current owner. The socket is created with

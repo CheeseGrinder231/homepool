@@ -19,7 +19,7 @@ use std::{
     fs, io,
     os::unix::{
         fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        net::UnixListener,
+        net::{SocketAddr, UnixListener},
     },
     path::{Path, PathBuf},
     sync::{
@@ -92,9 +92,7 @@ pub fn serve(config_path: &Path, socket: &Path) -> Result<(), String> {
     let previous = rustix::process::umask(rustix::fs::Mode::from_bits_truncate(0o177));
     let bound = UnixListener::bind(socket);
     rustix::process::umask(previous);
-    let listener = bound.map_err(
-        |_| "could not bind hub socket; an existing path is never removed automatically",
-    )?;
+    let listener = bound.map_err(|error| bind_error(socket, error))?;
     let meta = fs::symlink_metadata(socket).map_err(|_| "could not inspect hub socket")?;
     let _socket_file = SocketFile {
         path: socket.to_owned(),
@@ -349,6 +347,31 @@ fn place(
     }
 }
 
+fn socket_address_error(path: &Path, error: io::Error) -> &'static str {
+    // std rejects both overlong paths and interior NULs as InvalidInput before
+    // the system call. Only the length failure should suggest a shorter path.
+    if error.kind() == io::ErrorKind::InvalidInput
+        && error.raw_os_error().is_none()
+        && !path.as_os_str().as_encoded_bytes().contains(&0)
+    {
+        "hub socket path is too long for a Unix socket; use a shorter or relative path"
+    } else {
+        "invalid hub socket address"
+    }
+}
+
+fn bind_error(path: &Path, error: io::Error) -> &'static str {
+    match error.kind() {
+        io::ErrorKind::InvalidInput if error.raw_os_error().is_none() => {
+            socket_address_error(path, error)
+        }
+        io::ErrorKind::AddrInUse => {
+            "could not bind hub socket; an existing path is never removed automatically"
+        }
+        _ => "could not bind hub socket",
+    }
+}
+
 fn check_socket(path: &Path) -> Result<(), String> {
     if !private::check(path, false)?.file_type().is_socket() {
         return Err("API path must be a Unix socket".into());
@@ -360,6 +383,7 @@ pub fn call(socket: &Path, request: Request) -> Result<Value, String> {
     let timing = settings::Timing::load()?;
     let deadline = Instant::now() + timing.request;
     let message = Message::new(request, timing.request)?;
+    SocketAddr::from_pathname(socket).map_err(|error| socket_address_error(socket, error))?;
     check_socket(socket)?;
     let cancelled = AtomicBool::new(false);
     let mut stream = protocol::connect(socket, &cancelled, deadline)?;
@@ -383,8 +407,21 @@ pub fn call(socket: &Path, request: Request) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Signals;
-    use std::{os::unix::process::ExitStatusExt, process::Command};
+    use super::{Signals, bind_error};
+    use std::{io, os::unix::process::ExitStatusExt, path::Path, process::Command};
+    #[test]
+    fn other_bind_errors_do_not_claim_an_existing_or_overlong_path() {
+        assert_eq!(
+            bind_error(
+                Path::new("hub.sock"),
+                io::ErrorKind::PermissionDenied.into()
+            ),
+            "could not bind hub socket"
+        );
+        let path = Path::new("bad\0socket");
+        let error = std::os::unix::net::UnixListener::bind(path).unwrap_err();
+        assert_eq!(bind_error(path, error), "invalid hub socket address");
+    }
     #[test]
     fn termination_uses_default_action_after_cancellation_scope() {
         if let Ok(signal) = std::env::var("HOMEPOOL_SIGNAL_SCOPE_CHILD") {
