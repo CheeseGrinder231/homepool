@@ -66,7 +66,8 @@ The schema currently needs neither names nor network addresses.
 
 ## Diagnostics
 
-Failures exit with code `1` and write a diagnostic to stderr. Failures before output
+Failures exit with code `1`, except signal cancellation described below, and write
+a diagnostic to stderr. Failures before output
 begins leave stdout empty, including with `--json`. Output failures, such as a reader
 closing a pipe, may leave partial output (including incomplete JSON) on stdout.
 Successful status exits with code `0`.
@@ -121,6 +122,14 @@ Only this explicit option performs live probes, through Garage's configured RPC
 connection. No admin token or S3 credential is accepted as a command argument.
 See [Garage setup and consumer isolation](garage.md).
 
+During a live Garage probe, Ctrl-C (`SIGINT`) and `SIGTERM` request cooperative
+cancellation. The CLI stops the local Garage process group, including wrapper
+descendants, and reaps its direct child before exiting with code `130` for SIGINT
+or `143` for SIGTERM. A pending probe produces no stdout and reports the fixed
+sanitized cancellation diagnostic. Cancellation of a mutation has the same unknown
+outcome as a deadline: inspect Garage privately before retrying; no operation is
+automatically retried. Uncatchable termination cannot perform this cleanup.
+
 This is an additive, opt-in extension of status JSON version 1: with the option,
 the top-level object also contains `storage`. Without the option, this field is
 omitted and the previous JSON shape is unchanged. The member-file schema is unchanged.
@@ -136,7 +145,7 @@ The `storage` object has four unsigned 64-bit integer fields:
 Each bucket is counted once even if it has multiple aliases. Other buckets are
 excluded. Counters may lag recent writes/deletes and do not measure physical disk
 usage, replication overhead or remaining member capacity. An empty store returns
-zero counters. A failed probe, malformed counter or overflowing sum exits `1`,
+zero counters. Other probe failures, malformed counters or overflowing sums exit `1`,
 leaves stdout empty and reports a fixed diagnostic without subprocess output,
 configuration paths, credentials or server error bodies. No credentials or node
 addresses are included in successful status output either.

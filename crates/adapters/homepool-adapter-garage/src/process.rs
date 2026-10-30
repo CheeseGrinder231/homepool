@@ -3,6 +3,7 @@ use std::{
     io::{self, Read, Write},
     os::{fd::AsFd, unix::process::CommandExt},
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
 
@@ -34,10 +35,11 @@ pub(super) fn call(
     operation: &str,
     request: &Value,
     deadline: Instant,
+    cancelled: &AtomicBool,
 ) -> Result<Value, Error> {
     let input =
         serde_json::to_vec(request).map_err(|_| Error("could not encode Garage request"))?;
-    check_deadline(deadline)?;
+    check_operation(deadline, cancelled)?;
     let mut running = Running(
         Command::new(executable)
             .args(prefix)
@@ -64,7 +66,7 @@ pub(super) fn call(
     let mut output = Vec::new();
     let mut eof = false;
     loop {
-        check_deadline(deadline)?;
+        check_operation(deadline, cancelled)?;
         let mut progressed = false;
         if sent == input.len() {
             input_pipe.take();
@@ -104,7 +106,7 @@ pub(super) fn call(
             && eof
             && input_pipe.is_none()
         {
-            check_deadline(deadline)?;
+            check_operation(deadline, cancelled)?;
             if status.exit_status() != Some(0) {
                 return Err(Error(
                     "Garage operation failed; inspect the installation privately",
@@ -112,7 +114,7 @@ pub(super) fn call(
             }
             let parsed =
                 serde_json::from_slice(&output).map_err(|_| Error("invalid Garage JSON response"));
-            check_deadline(deadline)?;
+            check_operation(deadline, cancelled)?;
             return parsed;
         }
         if !progressed {
@@ -123,8 +125,10 @@ pub(super) fn call(
     }
 }
 
-pub(super) fn check_deadline(deadline: Instant) -> Result<(), Error> {
-    if Instant::now() >= deadline {
+pub(super) fn check_operation(deadline: Instant, cancelled: &AtomicBool) -> Result<(), Error> {
+    if cancelled.load(Ordering::Acquire) {
+        Err(Error::CANCELLED)
+    } else if Instant::now() >= deadline {
         Err(Error::DEADLINE)
     } else {
         Ok(())
@@ -143,7 +147,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{Error, call};
+    use super::{AtomicBool, Error, call};
 
     struct Scratch(std::path::PathBuf);
     impl Drop for Scratch {
@@ -187,6 +191,7 @@ mod tests {
                 "ApplyClusterLayout",
                 &request,
                 started + Duration::from_millis(500),
+                &AtomicBool::new(false),
             )
             .unwrap_err();
             assert_eq!(error, Error::DEADLINE);
@@ -225,6 +230,7 @@ mod tests {
             "test",
             &request,
             Instant::now() + Duration::from_secs(5),
+            &AtomicBool::new(false),
         )
         .unwrap();
         assert_eq!(response["padding"].as_str().unwrap().len(), 131072);
@@ -234,7 +240,8 @@ mod tests {
                 &[],
                 "test",
                 &Value::Null,
-                Instant::now()
+                Instant::now(),
+                &AtomicBool::new(false),
             )
             .unwrap_err(),
             Error::DEADLINE

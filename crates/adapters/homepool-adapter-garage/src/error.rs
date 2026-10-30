@@ -5,6 +5,9 @@ use std::fmt;
 pub struct Error(pub(crate) &'static str);
 
 impl Error {
+    /// Cooperative cancellation, with any mutation's outcome still unknown.
+    pub const CANCELLED: Self =
+        Self("Garage operation cancelled; inspect privately before retrying");
     pub(crate) const DEADLINE: Self =
         Self("Garage operation deadline exceeded; inspect privately before retrying");
 }

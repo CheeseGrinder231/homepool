@@ -9,6 +9,7 @@ use std::{
     ffi::OsString,
     fmt,
     path::Path,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -64,6 +65,7 @@ pub struct Garage {
     executable: OsString,
     prefix: Vec<OsString>,
     operation_timeout: Duration,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Garage {
@@ -82,6 +84,7 @@ impl Garage {
             executable: executable.into(),
             prefix: prefix.into_iter().collect(),
             operation_timeout: settings::OPERATION_TIMEOUT,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -94,6 +97,15 @@ impl Garage {
         }
         self.operation_timeout = timeout;
         Ok(self)
+    }
+
+    /// Share a cancellation flag across all operations. Setting it stops the local
+    /// process group and reaps its child before returning `Error::CANCELLED`.
+    /// Cancellation never resets the flag or retries a mutation; inspect its
+    /// unknown outcome privately before deciding whether to retry.
+    pub fn with_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.cancelled = cancelled;
+        self
     }
 
     fn deadline(&self) -> Result<Instant, Error> {
@@ -109,6 +121,7 @@ impl Garage {
             operation,
             &request,
             deadline,
+            &self.cancelled,
         )
     }
 
@@ -182,7 +195,7 @@ impl Garage {
             Ok(key) => key,
             Err(error) => {
                 let _ = self.call(deadline, "DeleteBucket", json!({"id": bucket_id}));
-                process::check_deadline(deadline)?;
+                process::check_operation(deadline, &self.cancelled)?;
                 return Err(error);
             }
         };
@@ -210,7 +223,7 @@ impl Garage {
                     let _ = self.call(deadline, "DeleteKey", json!({"id": id}));
                 }
                 let _ = self.call(deadline, "DeleteBucket", json!({"id": bucket_id}));
-                process::check_deadline(deadline)?;
+                process::check_operation(deadline, &self.cancelled)?;
                 Err(error)
             }
         }
@@ -249,7 +262,7 @@ impl Garage {
                 number(&info, "unfinishedMultipartUploadBytes")?,
             )?;
         }
-        process::check_deadline(deadline)?;
+        process::check_operation(deadline, &self.cancelled)?;
         Ok(usage)
     }
 }

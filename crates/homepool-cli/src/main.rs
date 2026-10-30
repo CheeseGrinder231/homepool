@@ -7,6 +7,15 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
+
+use signal_hook::{
+    consts::{SIGINT, SIGTERM},
+    flag,
 };
 
 const USAGE: &str = "Usage: homepool [--config FILE] status [--json] [--garage-config FILE]\n\nRead the private member file and show its declared members and budgets.\n--garage-config adds a live storage usage probe through an installed Garage.\n--config FILE may also follow status. See docs/members.md for the schema.";
@@ -68,7 +77,7 @@ fn arguments(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     }))
 }
 
-fn run() -> Result<(), String> {
+fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
     let output = match arguments(env::args_os().skip(1))? {
         Command::Help => format!("{USAGE}\n"),
         Command::Version => format!("homepool {}\n", env!("CARGO_PKG_VERSION")),
@@ -81,9 +90,26 @@ fn run() -> Result<(), String> {
             let pool = settings::load(&path)?;
             let storage = options
                 .garage_config
-                .map(|config| homepool_adapter_garage::Garage::new(&config).storage_usage())
-                .transpose()
-                .map_err(|e| e.to_string())?;
+                .map(|config| {
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    for signal in [SIGINT, SIGTERM] {
+                        // Record the exit code before publishing cancellation.
+                        flag::register_usize(signal, Arc::clone(interrupted), signal as usize)
+                            .and_then(|_| flag::register(signal, Arc::clone(&cancelled)))
+                            .map_err(|_| {
+                                "could not register Garage cancellation signals".to_string()
+                            })?;
+                    }
+                    // A signal between the two registrations must also cancel.
+                    if interrupted.load(Ordering::SeqCst) != 0 {
+                        cancelled.store(true, Ordering::Release);
+                    }
+                    homepool_adapter_garage::Garage::new(&config)
+                        .with_cancellation(cancelled)
+                        .storage_usage()
+                        .map_err(|e| e.to_string())
+                })
+                .transpose()?;
             status::render(&pool, options.json, storage)?
         }
     };
@@ -94,11 +120,17 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let interrupted = Arc::new(AtomicUsize::new(0));
+    let result = match run(&interrupted) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("homepool: {error}");
             ExitCode::FAILURE
         }
+    };
+    match interrupted.load(Ordering::SeqCst) as i32 {
+        SIGINT => ExitCode::from(130),
+        SIGTERM => ExitCode::from(143),
+        _ => result,
     }
 }

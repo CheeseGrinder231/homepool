@@ -84,6 +84,25 @@ fn member(storage_bytes: u64) -> Member {
 }
 
 #[test]
+fn cancellation_is_sticky_and_prevents_every_operation_from_starting() {
+    use homepool_adapter_garage::Error;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let garage =
+        Garage::with_command("no-such-program", []).with_cancellation(Arc::clone(&cancelled));
+    for result in [
+        garage.stage_portion(&member(1), &"a".repeat(64), "zone-a"),
+        garage.apply_layout(1),
+        garage.create_consumer(1).map(|_| ()),
+        garage.storage_usage().map(|_| ()),
+    ] {
+        assert_eq!(result.unwrap_err(), Error::CANCELLED);
+    }
+    assert!(cancelled.load(Ordering::Acquire));
+}
+
+#[test]
 fn portion_is_exact_staged_and_explicitly_applied() {
     let fake = Fake::new(&[
         (
