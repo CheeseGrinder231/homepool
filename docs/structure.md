@@ -71,12 +71,99 @@ Do not publish machine names, hostnames, home-directory paths, usernames, emails
 private repository names, internal issue details, or information about a contributor's
 host. Use generic product language and documentation addresses in examples.
 
+## Module cycles
+
+`module_cycles` sums, over workspace packages, the size of each package's largest
+cyclic component (zero when acyclic). Each Cargo target is a separate module tree;
+the package contributes the largest result across its targets. A cyclic component
+is a set of at least two mutually reachable modules, including inline modules and
+the crate root. Self references do not count. Findings name the target and every
+module in each component, including smaller components.
+
+The lexer discovers nodes from `mod` declarations, starting at Cargo's target
+source paths. External modules use conventional `name.rs` or `name/mod.rs` files;
+inline modules establish their own namespace and child directory. Declarations
+establish nodes, not dependency edges. Block-local modules also get nodes, with
+distinct identities for each declaration; they never merge with module-level
+modules or same-named modules in other blocks. Diagnostics mark local names as
+`name[local@N]`, where N is the zero-based byte offset of `mod` in its source file.
+Their children retain that local namespace. Blocks add no `super` level:
+`super::` inside a local module refers to its enclosing module, while `crate::`
+always starts in the module-level namespace at the crate root.
+Edges come from explicit `crate::` and
+`super::` paths, including repeated `super`, grouped imports, aliases, and globs.
+The destination is the longest declared module prefix; an item on the crate root
+therefore points to the root. All written conditional branches are inspected.
+Strings, comments, and macro token trees supply no edges; a macro call's own
+explicit module path is still inspected.
+
+This does not resolve unqualified paths, aliases used elsewhere, re-exports,
+`#[path]` relocations, macro expansion, `include!`, or generated modules. Missing
+conventional files are skipped (for example, a platform-specific declaration).
+It does not evaluate `cfg` conditions or prove that the source compiles. To fix a
+finding, move shared types into a lower-level module or pass data through an
+interface so the modules no longer depend on each other.
+
+## Duplicate sources
+
+`source_copies` counts extra copies of byte-identical, non-empty `.rs` files in
+the workspace Git inventory described above, including tests, build scripts, and
+non-ignored untracked sources. A group of N identical files contributes N - 1.
+Empty means zero bytes; a whitespace-only file is non-empty. Comparisons use the
+complete bytes, without trimming or newline normalization. Each finding names
+both the extra copy and the first file in sorted path order.
+
+`docs/` and `xtask/tests/fixtures/` are excluded. This does not catch partial copies,
+near duplicates, other source languages or extensions, or files outside the Git
+inventory. Replace copies with a shared module or crate; remove redundant files.
+
+## Settings in code
+
+Each workspace package has one designated settings module file:
+`src/settings.rs`, relative to its `Cargo.toml`. It may contain documented
+configuration defaults. No other file named `settings.rs`, inline settings module,
+or child file receives this exemption. No module is required until defaults exist.
+
+`settings_in_code` counts simple `let`, `const`, or `static` bindings whose
+initializer is a single literal followed by a semicolon, outside that designated
+file. Bindings may have `mut`/`ref` and a type annotation. Names are compared
+case-insensitively after removing a raw-identifier prefix. The complete name must
+be one of these suffixes, or end with an underscore followed by one:
+
+| Name suffix | Literal kind |
+| --- | --- |
+| `timeout_ms`, `timeout_secs`, `interval_ms`, `interval_secs` | Integer or float |
+| `retry_count`, `size_limit`, `size_limit_bytes`, `port` | Integer or float |
+| `path` | Ordinary or raw string |
+
+For example, `const CONNECT_TIMEOUT_MS: u64 = 2000;` and
+`let storage_path = "data/pool";` each count once. Diagnostics give file, line,
+column, and binding name. Numeric bases and suffixes do not change the rule.
+The same `.rs` inventory and exclusions as duplicate sources apply. Test source
+outside the fixture directory is included; comments, strings containing example
+code, and macro token trees do not create bindings.
+
+This intentionally narrow rule does not infer intent from arbitrary numbers or
+strings. Other names, struct fields, assignments after declaration, destructuring,
+function arguments or returns, constructor calls such as `Duration::from_secs(2)`,
+parenthesized/computed/negative values, and macro expansion are not detected.
+Move a finding into configuration with documented defaults in `src/settings.rs`,
+and use the configured value at the call site. Review must still check tunables
+outside the named-binding rule.
+
+These three checks target **accidental structural drift**, not deliberate evasion.
+They inspect unexpanded source tokens or bytes and are not a compiler or a defense
+against reconstructing values to avoid a finding.
+
 ## The ratchet
 
-`structure/baseline.toml` starts all three counts at zero:
+`structure/baseline.toml` starts all six counts at zero:
 
 - `layer_violations`: forbidden internal dependency edges.
 - `instance_literals`: the source findings described above.
+- `module_cycles`: sum of each workspace package's largest cyclic component.
+- `source_copies`: extra byte-identical, non-empty Rust source copies.
+- `settings_in_code`: named direct literal bindings outside settings modules.
 - `allowance_count`: entries in `structure/allowances.toml`.
 
 The checker compares the working tree with a Git base snapshot. On a branch, the
@@ -96,10 +183,14 @@ allowances cannot fund new debt. If a count falls below its baseline, lower the
 baseline in that PR. Otherwise the check reports
 `ratchet: lower <metric> baseline to N`.
 
-Each allowance needs a unique, nonempty `id`, a `metric` of `instance_literals` or
-`layer_violations`, a positive integer `amount`, a nonempty `reason`, and an `issue`
-URL pointing to an issue in this repository. The checker derives the repository from the Git origin. Existing entries
-are immutable relative to the base, including their reasons and issue links. Delete
+The three new baseline keys default to zero when absent, so snapshots from before
+these metrics were introduced retain an initial zero baseline.
+
+Each allowance needs a unique, nonempty `id`, a `metric` of `instance_literals`,
+`layer_violations`, `module_cycles`, `source_copies`, or `settings_in_code`, a positive
+integer `amount`, a nonempty `reason`, and an `issue` URL pointing to an issue in
+this repository. The checker derives the repository from the Git origin. Existing
+entries are immutable relative to the base, including their reasons and issue links. Delete
 entries when retired. Allowance sums cannot overflow.
 
 Every allowance contributes one to `allowance_count` and funds exactly that one

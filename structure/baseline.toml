@@ -1,3 +1,6 @@
 layer_violations = 0
 instance_literals = 0
 allowance_count = 0
+module_cycles = 0
+source_copies = 0
+settings_in_code = 0

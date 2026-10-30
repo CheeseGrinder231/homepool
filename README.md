@@ -4,7 +4,9 @@ Pool your own machines into one personal cloud.
 
 homepool joins the computers you already own into a single pool. A lean hub keeps the registry of members and decides where work goes. Members add what they offer: compute for sandboxes, a portion of their disk for shared storage, and services. Everything else stays on the machine it belongs to.
 
-**Status:** early. The first change sets up the structure checks; code follows.
+**Status:** early. The workspace has structure checks and a pure pool model.
+`homepool status` reads a private member file and reports its declared contributions;
+see [the member file guide](docs/members.md) for setup and the versioned JSON format.
 
 ## Principles
 
