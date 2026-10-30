@@ -12,18 +12,6 @@ pub fn scan(
     let mut findings = Vec::new();
     for relative in files {
         let name = relative.to_string_lossy().replace('\\', "/");
-        if name.starts_with("xtask/tests/fixtures/")
-            || name.starts_with("docs/")
-            || relative.extension().is_some_and(|ext| ext == "md")
-            || relative.file_name().is_some_and(|file| file == "LICENSE")
-            || relative.components().any(|c| c.as_os_str() == ".git")
-        {
-            continue;
-        }
-        let rust = relative.extension().is_some_and(|ext| ext == "rs");
-        let manifest = relative
-            .file_name()
-            .is_some_and(|file| file == "Cargo.toml");
         let path = root.join(relative);
         let mut ancestor = root.to_path_buf();
         for component in relative.components() {
@@ -40,6 +28,18 @@ pub fn scan(
         if !metadata.is_file() {
             return Err(format!("source scan requires a regular file: {name}"));
         }
+        if name.starts_with("xtask/tests/fixtures/")
+            || name.starts_with("docs/")
+            || relative.extension().is_some_and(|ext| ext == "md")
+            || relative.file_name().is_some_and(|file| file == "LICENSE")
+            || relative.components().any(|c| c.as_os_str() == ".git")
+        {
+            continue;
+        }
+        let rust = relative.extension().is_some_and(|ext| ext == "rs");
+        let manifest = relative
+            .file_name()
+            .is_some_and(|file| file == "Cargo.toml");
         let bytes = fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
         let Ok(source) = std::str::from_utf8(&bytes) else {
             continue;
@@ -58,6 +58,11 @@ pub fn scan(
         if rust {
             spans.push((0..source.len(), true));
         }
+        let projections = if rust {
+            crate::rust_text::field_projections(source)
+        } else {
+            vec![]
+        };
         let metadata_spans = if manifest {
             canonical_repository_spans(source, repository)?
         } else if relative == Path::new("Cargo.lock") {
@@ -75,6 +80,9 @@ pub fn scan(
                 };
                 for (column, category) in candidates {
                     let position = offset + column;
+                    if *ipv4_only && projections.iter().any(|span| span.contains(&position)) {
+                        continue;
+                    }
                     if *ipv4_only
                         && spans
                             .iter()
@@ -285,7 +293,35 @@ fn ipv4_in_line(line: &str) -> Vec<(usize, &'static str)> {
                     .trim_matches('.')
                     .parse::<Ipv4Addr>()
                     .is_ok_and(|ip| !documentation(ip.into()))
+                && !version_context(line, *column)
         })
         .map(|(column, _)| (column, "IPv4 literal"))
         .collect()
+}
+
+// Recognize version-shaped tokens, not arbitrary four-part numbers. This is a
+// text heuristic: an address written as version metadata is intentionally exempt.
+fn version_context(line: &str, column: usize) -> bool {
+    tokens(line, |c| {
+        c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')
+    })
+    .into_iter()
+    .filter(|(start, token)| (*start..start + token.len()).contains(&column))
+    .any(|(_, token)| {
+        let (version, build) = token.split_once('+').unwrap_or((token, ""));
+        let (core, pre) = version.split_once('-').unwrap_or((version, ""));
+        let numbers: Vec<_> = core.split('.').collect();
+        let identifiers = |text: &str| {
+            !text.is_empty()
+                && text.split('.').all(|part| {
+                    !part.is_empty() && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                })
+        };
+        numbers.len() == 3
+            && numbers
+                .iter()
+                .all(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+            && (!version.contains('-') || identifiers(pre))
+            && (!token.contains('+') || identifiers(build))
+    })
 }
