@@ -17,7 +17,10 @@ struct Fake {
 impl Fake {
     fn new(responses: &[(&str, Value)]) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let scratch = PathBuf::from(std::env::var_os("TMPDIR").unwrap_or_else(|| env!("CARGO_TARGET_TMPDIR").into())).join(format!(
+        let scratch = PathBuf::from(
+            std::env::var_os("TMPDIR").unwrap_or_else(|| env!("CARGO_TARGET_TMPDIR").into()),
+        )
+        .join(format!(
             "garage-protocol-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -186,6 +189,7 @@ fn usage_excludes_other_buckets_and_counts_multiple_aliases_once() {
         (1, 2, 123, 45)
     );
     assert_eq!(fake.calls(), "ListBuckets\nGetBucketInfo\n");
+    assert_eq!(fake.requests()[0], Value::Null);
 }
 
 #[test]

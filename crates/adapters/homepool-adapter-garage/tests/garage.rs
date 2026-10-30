@@ -31,6 +31,10 @@ impl Installation {
             PathBuf::from(std::env::var_os("TMPDIR").expect("set TMPDIR for integration"))
                 .join(format!("garage-integration-{}", std::process::id()));
         fs::create_dir(&scratch).unwrap();
+        let mut installation = Self {
+            container: String::new(),
+            scratch: scratch.clone(),
+        };
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -72,8 +76,7 @@ api_bind_addr = "{LOOPBACK}:3900"
         );
         let output = Command::new("docker")
             .args([
-                "run",
-                "-d",
+                "create",
                 "--network",
                 "none",
                 "--mount",
@@ -86,10 +89,18 @@ api_bind_addr = "{LOOPBACK}:3900"
             output.status.success(),
             "could not start isolated Garage container"
         );
-        Self {
-            container: String::from_utf8(output.stdout).unwrap().trim().into(),
-            scratch,
-        }
+        installation.container = String::from_utf8(output.stdout).unwrap().trim().into();
+        let started = Command::new("docker")
+            .args(["start", &installation.container])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            started.success(),
+            "could not start isolated Garage container"
+        );
+        installation
     }
 
     fn prefix(&self) -> Vec<OsString> {
@@ -159,11 +170,13 @@ api_bind_addr = "{LOOPBACK}:3900"
 
 impl Drop for Installation {
     fn drop(&mut self) {
-        let _ = Command::new("docker")
-            .args(["rm", "-f", &self.container])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if !self.container.is_empty() {
+            let _ = Command::new("docker")
+                .args(["rm", "-f", &self.container])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = fs::remove_dir_all(&self.scratch);
     }
 }
