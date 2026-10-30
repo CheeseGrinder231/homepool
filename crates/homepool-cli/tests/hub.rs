@@ -387,6 +387,80 @@ fn sigint_and_sigterm_cancel_stalled_docker_transports() {
 }
 
 #[test]
+fn overlong_socket_paths_report_length_and_work_with_a_relative_path() {
+    let mut f = Fixture::new(false);
+    let parent = f.root.join("d".repeat(120));
+    fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
+    let socket = parent.join("hub.sock");
+    let error = std::os::unix::net::UnixListener::bind(&socket).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(error.raw_os_error(), None);
+    assert!(!socket.exists());
+
+    let expected =
+        "homepool: hub socket path is too long for a Unix socket; use a shorter or relative path\n";
+    for args in [
+        vec!["hub", "--config", "members.toml"],
+        vec!["inventory", "--json"],
+    ] {
+        let output = f
+            .command()
+            .args(args)
+            .arg("--socket")
+            .arg(&socket)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), expected);
+        assert!(!socket.exists());
+    }
+
+    // The same directory entry is usable with a short relative socket address.
+    f.hub = Some(
+        f.command()
+            .current_dir(&parent)
+            .arg("--config")
+            .arg(f.root.join("members.toml"))
+            .args(["--socket", "hub.sock", "hub"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() {
+        assert!(f.hub.as_mut().unwrap().try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline, "hub startup watchdog");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = f
+        .command()
+        .current_dir(&parent)
+        .args(["--socket", "hub.sock", "inventory", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = f
+        .command()
+        .arg("--socket")
+        .arg(&socket)
+        .args(["inventory", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), expected);
+    assert!(socket.exists());
+    f.stop(Signal::TERM);
+    assert!(!socket.exists());
+}
+
+#[test]
 fn private_paths_and_member_updates_fail_closed() {
     let mut f = Fixture::new(false);
     f.start();
@@ -410,13 +484,15 @@ fn private_paths_and_member_updates_fail_closed() {
     assert!(!f.run(&["place", "--json"], Some(json!({"sandbox_id": "unaligned", "image": "alpine:3.22", "cpu_millicores": 201, "memory_bytes": 33554432}))).status.success());
     f.stop(Signal::TERM);
     f.write("hub.sock", "stale-path");
-    assert!(
-        !f.command()
-            .args(["hub", "--config", "members.toml", "--socket", "hub.sock"])
-            .output()
-            .unwrap()
-            .status
-            .success()
+    let output = f
+        .command()
+        .args(["hub", "--config", "members.toml", "--socket", "hub.sock"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "homepool: could not bind hub socket; an existing path is never removed automatically\n"
     );
     assert_eq!(
         fs::read_to_string(f.root.join("hub.sock")).unwrap(),
