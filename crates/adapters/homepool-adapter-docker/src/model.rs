@@ -79,6 +79,12 @@ pub struct Sandbox {
     pub sandbox_id: String,
     /// Docker's state, such as `running`, `exited`, or `created`.
     pub state: String,
+    /// Hard CPU ceiling from NanoCPUs and CFS quota/period, rounded up to whole
+    /// millicores. `None` means no finite quota: never account it as zero usage.
+    /// CPU affinity and parent cgroups can further restrict actual execution.
+    pub cpu_millicores: Option<u64>,
+    /// Hard memory ceiling in bytes. `None` means unlimited, not zero usage.
+    pub memory_bytes: Option<u64>,
 }
 
 /// Engine totals, without inferred free capacity or sandbox-slot policy.

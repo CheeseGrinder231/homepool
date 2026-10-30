@@ -9,6 +9,7 @@ mod adapter;
 mod command;
 mod endpoint;
 mod error;
+mod limits;
 mod model;
 mod settings;
 mod spec;

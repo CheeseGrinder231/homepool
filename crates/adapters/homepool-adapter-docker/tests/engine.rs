@@ -165,8 +165,9 @@ fn capacity_and_full_lifecycle_with_limits_mounts_and_environment() {
         "exec",
         &sandbox.container_id,
         "sh",
+        "-eu",
         "-c",
-        "printf '%s\\n' \"$REGISTRATION_TOKEN\"; cat /input/input; test -z \"$EMPTY\"; test ${#BULK_31} -eq 4096",
+        "printf '%s\\n' \"$REGISTRATION_TOKEN\"; cat /input/input; test \"${EMPTY+x}\" = x; test -z \"$EMPTY\"; test ${#BULK_31} -eq 4096",
     ]);
     assert_eq!(result, b"dummy-secret='quoted' = value\nmounted value");
     assert_eq!(details["Mounts"][0]["RW"], false);
@@ -258,4 +259,143 @@ fn failed_start_rolls_back_the_created_container() {
             .iter()
             .any(|item| item.container_id == container_id)
     );
+}
+
+#[test]
+#[ignore = "requires a local Docker engine and alpine:3.22"]
+fn restart_inventory_restores_differently_sized_running_sandboxes() {
+    use homepool_core::{
+        Capabilities, ComputeBudget, Member, MemberState, Pool, Reservation, SandboxRequest, Tier,
+    };
+    use std::collections::BTreeMap;
+    let member = Member {
+        id: MemberId(4),
+        tier: Tier::Core,
+        state: MemberState::Active,
+        capabilities: Capabilities {
+            compute: Some(ComputeBudget {
+                cpu_millicores: 4000,
+                memory_bytes: 256 * 1024 * 1024,
+                sandbox_slots: 4,
+            }),
+            storage_bytes: 0,
+        },
+    };
+    let docker = engine();
+    let mut original = Pool::default();
+    original.add_member(member.clone()).unwrap();
+    let mut mapping = BTreeMap::new();
+    let mut cleanup = Vec::new();
+    for (cpu_millicores, memory_bytes) in [(500, 64 * 1024 * 1024), (1250, 96 * 1024 * 1024)] {
+        let mut request = spec();
+        request.cpu_millicores = cpu_millicores;
+        request.memory_bytes = memory_bytes;
+        let reservation = original
+            .reserve(&SandboxRequest {
+                cpu_millicores,
+                memory_bytes,
+                preferences: vec![],
+            })
+            .unwrap();
+        let sandbox = docker.start(&request).unwrap();
+        cleanup.push(Container(sandbox.container_id.clone()));
+        mapping.insert(sandbox.container_id, reservation);
+    }
+    // Reconstruct from a fresh adapter and inventory, retaining the caller's
+    // handle-to-reservation mapping. Admission stays closed while rebuilding.
+    let mut restarted = Pool::default();
+    restarted
+        .add_member(Member {
+            state: MemberState::Draining,
+            ..member
+        })
+        .unwrap();
+    let inventory = engine().list().unwrap();
+    for sandbox in inventory {
+        let Some(saved) = mapping.get(&sandbox.container_id) else {
+            continue;
+        };
+        assert_eq!(sandbox.state, "running");
+        let budget = ComputeBudget {
+            cpu_millicores: sandbox.cpu_millicores.expect("bounded CPU"),
+            memory_bytes: sandbox.memory_bytes.expect("bounded memory"),
+            sandbox_slots: 1,
+        };
+        assert_eq!(budget, saved.budget);
+        assert_eq!(
+            restarted.import_allocation(Reservation { budget, ..*saved }),
+            Ok(*saved)
+        );
+    }
+    assert_eq!(
+        restarted.reservations().copied().collect::<Vec<_>>(),
+        original.reservations().copied().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        restarted.reserve(&SandboxRequest::default()),
+        Err(homepool_core::Error::NoCapacity)
+    );
+    restarted
+        .set_state(MemberId(4), MemberState::Active)
+        .unwrap();
+    assert_eq!(
+        restarted.free_budget(MemberId(4)),
+        original.free_budget(MemberId(4))
+    );
+    for reservation in mapping.values() {
+        assert_eq!(restarted.release(reservation.id), Ok(*reservation));
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires the Docker CLI and Unix sockets"]
+fn stalled_engine_returns_at_the_operation_deadline() {
+    use std::{
+        os::{fd::AsRawFd, unix::net::UnixListener},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+    let scratch = Scratch::new();
+    // TMPDIR may exceed Unix socket path limits. Keep the directory fd open
+    // and use its short procfs alias, also accessible by the Docker child.
+    let directory = fs::File::open(&scratch.0).unwrap();
+    let socket = PathBuf::from(format!(
+        "/proc/{}/fd/{}/engine.sock",
+        std::process::id(),
+        directory.as_raw_fd()
+    ));
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    std::thread::scope(|scope| {
+        let stop = done.clone();
+        let server = scope.spawn(move || {
+            let mut connections = Vec::new();
+            let until = Instant::now() + Duration::from_secs(5);
+            while !stop.load(Ordering::Relaxed) && Instant::now() < until {
+                match listener.accept() {
+                    Ok((stream, _)) => connections.push(stream),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("fake engine accept: {error}"),
+                }
+            }
+            connections.len()
+        });
+        let docker = Docker::new(Endpoint::unix(&socket).unwrap(), MemberId(4))
+            .with_operation_timeout(Duration::from_millis(500))
+            .unwrap();
+        let started = Instant::now();
+        let result = docker.capacity();
+        done.store(true, Ordering::Relaxed);
+        let accepted = server.join().unwrap();
+        assert!(matches!(result, Err(Error::Deadline("capacity"))));
+        assert!(accepted > 0, "the CLI must reach the stalled engine");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    });
 }

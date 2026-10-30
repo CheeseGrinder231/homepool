@@ -2,8 +2,8 @@
 
 `homepool-adapter-docker` uses the installed Docker CLI with an explicit `--host`
 for every operation. This reuses Docker's API negotiation and SSH transport without
-adding an HTTP, TLS, or SSH client dependency. The only external Rust dependencies
-are the workspace's existing `serde` and `serde_json` for structured responses.
+adding an HTTP, TLS, or SSH client dependency. Structured responses use `serde`
+and `serde_json`; safe Unix process and pipe control uses `rustix`.
 It requires a Unix client with `/dev/stdin` and a Linux Docker engine. It creates
 ordinary containers, with the isolation guarantees of that engine.
 
@@ -36,6 +36,60 @@ retrying creation. List errors, including concurrent removal, are returned rathe
 than converted into empty results. Capacity reads report engine CPU and memory
 totals; free capacity, slot counts, and placement remain caller policy.
 
+## Deadlines and reconciliation
+
+Every public operation has a 60-second default deadline. Configure it with
+`Docker::new(endpoint, member).with_operation_timeout(Duration::from_secs(30))?`.
+The deadline covers the entire call: list and all inspections, ownership checks
+and mutations, or create/start/inspection and attempted rollback. A slow command
+does not reset the clock. Zero and unrepresentable durations are rejected.
+
+The adapter uses a dedicated process group for the CLI and its SSH transport.
+On expiry it kills the group, reaps the CLI, and closes the nonblocking pipes;
+stdin cannot leave a blocked writer behind. Cleanup after a failed start shares
+the same deadline. If no time remains, `StartFailed` returns the known container
+id with `cleanup_failed: true`. A create timeout may have no known container id.
+
+Terminating the client does not cancel a mutation already received by an engine.
+After a deadline, communication error, failed cleanup, or failed final inspection,
+keep the member closed to new placement and reconcile with a successful `list`.
+Match known work by `(member id, full container id)` and inspect its current state.
+For an uncertain create, examine all matching sandbox labels for duplicate or
+unclaimed containers before deciding what to retain or remove. The sandbox label
+is descriptive and has no uniqueness or retry guarantee. Reconcile before retrying
+an uncertain start; blind retries can create a second sandbox. Do not release a
+reservation just because stop/remove timed out. Confirm the resulting state first.
+An incomplete or failed list is never evidence that a sandbox is absent.
+
+## Restart accounting
+
+`Sandbox` includes `cpu_millicores: Option<u64>` and `memory_bytes: Option<u64>`.
+CPU is the tighter configured NanoCPUs or CFS quota/period ceiling, rounded up to
+whole millicores to avoid undercounting. Memory is the configured hard byte limit.
+A missing finite ceiling is `None`, never a zero-sized allocation. CPU affinity,
+parent cgroups, and engine totals can further restrict execution; these observations
+do not infer free host resources. Malformed or missing limit fields fail the list.
+Unbounded observations require caller policy; keep admission closed rather than
+importing them as zero usage.
+
+To rebuild a pool, add members as draining or unreachable, then inventory each
+member fully. Retain or deterministically reconstruct a collision-checked mapping
+from `(member id, full container id)` to `ReservationId`; do not use the sandbox
+label as a unique key. Pass each observed allocation and its stable id to
+`Pool::import_allocation(Reservation { id, member_id, budget })`, using the observed
+CPU, memory, and one slot. Import preserves the exact member, even when draining
+or unreachable, rejects duplicate outstanding ids and over-budget work, and
+advances subsequent generated ids beyond all imported ids. Import order does not
+matter. The caller must not repurpose an id for a different allocation.
+
+Only mark a member active after its complete inventory has been accounted for.
+A partial read, unsupported limits, or failed import must leave it unschedulable.
+Draining members stay draining after restoration. `list` also includes stopped and
+created containers: the caller must explicitly reconcile their lifecycle before
+releasing allocations or removing them. Neither import nor a state change implies
+that work has ended. Core performs no persistence or engine I/O; the caller owns
+the stable mapping and admission transition.
+
 ## Secrets
 
 Put all secret values in `Environment`, never in images, commands, paths, ids, or
@@ -50,7 +104,7 @@ These values become container environment variables. Docker administrators and
 processes with inspection access can read them; this is a transport rule, not an
 encrypted secret store. `Environment` debug output redacts values. Adapter errors
 omit raw Docker output, which could echo sensitive input. Inspect operations read
-only ids, labels, and state, never environment values.
+only ids, labels, state, and resource limits, never environment values.
 
 Docker's [create reference](https://docs.docker.com/reference/cli/docker/container/create/)
 and [env-file parser](https://github.com/docker/cli/blob/master/pkg/kvfile/kvfile.go)
@@ -75,7 +129,10 @@ Set `HOMEPOOL_TEST_DOCKER_SOCKET` to test a custom local socket. Tests create
 containers and bind-mount scratch files under `TMPDIR`; cleanup runs on normal
 completion and assertion failures. Tests cover capacity, lifecycle, labels,
 limits, mounts, environment input beyond pipe-buffer capacity, ownership checks,
-and rollback after a failed start. They never contact an SSH host.
+rollback after a failed start, and restart accounting for different sandbox sizes.
+A Linux fake-engine test accepts a local connection without responding and checks
+the operation deadline. Unit tests also cover a transport that never reads stdin,
+large simultaneous pipe traffic, and child reaping. They never contact an SSH host.
 
 ## Manual SSH verification
 
@@ -84,7 +141,8 @@ from the documentation range; replace it with a member you own. Do not commit
 real connection details. Configure key or agent authentication, verify the host
 key interactively first, and ensure the remote login can run Docker. For automation,
 set `BatchMode yes` and a bounded `ConnectTimeout` in that member's SSH stanza.
-The adapter is synchronous; operation deadlines follow Docker and SSH settings.
+The adapter deadline also bounds local SSH transport; SSH connection settings may
+fail earlier.
 
 1. Run `docker --host ssh://192.0.2.1 info`. If the member uses a custom port or
    remote rootless socket, append it, for example

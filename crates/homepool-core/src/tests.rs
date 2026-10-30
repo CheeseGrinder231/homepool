@@ -276,3 +276,190 @@ fn reservation_id_exhaustion_does_not_consume_capacity_or_reuse_ids() {
         Err(Error::ReservationIdsExhausted)
     );
 }
+
+#[test]
+fn imports_restore_exact_inactive_member_and_stable_identity() {
+    for state in [
+        MemberState::Active,
+        MemberState::Draining,
+        MemberState::Unreachable,
+    ] {
+        let mut original = pool([member(1, 8, 16, 3), member(2, 8, 16, 3)]);
+        let mut wanted = request(3, 5);
+        wanted.preferences = vec![MemberId(2)];
+        let first = original.reserve(&wanted).unwrap();
+        let second = original.reserve(&request(1, 2)).unwrap();
+        let mut restarted = pool(original.members().cloned());
+        restarted.set_state(MemberId(2), state).unwrap();
+        // Restore out of order; ids and exact members must survive a restart.
+        restarted.import_allocation(second).unwrap();
+        assert_eq!(restarted.import_allocation(first), Ok(first));
+        assert_eq!(
+            restarted.reservations().copied().collect::<Vec<_>>(),
+            original.reservations().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(restarted.member(MemberId(2)).unwrap().state, state);
+        if state != MemberState::Active {
+            assert_eq!(
+                restarted.free_budget(MemberId(2)),
+                Ok(ComputeBudget::default())
+            );
+        }
+        restarted
+            .set_state(MemberId(2), MemberState::Active)
+            .unwrap();
+        assert_eq!(
+            restarted.free_budget(MemberId(2)),
+            original.free_budget(MemberId(2))
+        );
+        let next = restarted.reserve(&request(0, 0)).unwrap();
+        assert!(next.id > first.id && next.id > second.id);
+        assert_eq!(restarted.release(first.id), Ok(first));
+    }
+}
+
+#[test]
+fn incomplete_inventory_stays_unschedulable_after_partial_import_or_release() {
+    let mut pool = pool([member(1, 8, 16, 3)]);
+    pool.set_state(MemberId(1), MemberState::Unreachable)
+        .unwrap();
+    let allocation = Reservation {
+        id: ReservationId(42),
+        member_id: MemberId(1),
+        budget: ComputeBudget {
+            cpu_millicores: 3,
+            memory_bytes: 5,
+            sandbox_slots: 1,
+        },
+    };
+    pool.import_allocation(allocation).unwrap();
+    let mut oversized = allocation;
+    oversized.id = ReservationId(43);
+    oversized.budget.cpu_millicores = 6;
+    assert_eq!(pool.import_allocation(oversized), Err(Error::NoCapacity));
+    assert_eq!(pool.reserve(&request(0, 0)), Err(Error::NoCapacity));
+    pool.release(allocation.id).unwrap();
+    assert_eq!(pool.place(&request(0, 0)), Err(Error::NoCapacity));
+    assert_eq!(pool.free_budget(MemberId(1)), Ok(ComputeBudget::default()));
+}
+
+#[test]
+fn invalid_imports_are_atomic_and_never_redirected() {
+    let mut pool = pool([member(1, u64::MAX, u64::MAX, 2), member(2, 0, 0, 1)]);
+    let allocation = Reservation {
+        id: ReservationId(7),
+        member_id: MemberId(1),
+        budget: ComputeBudget {
+            cpu_millicores: u64::MAX,
+            memory_bytes: u64::MAX,
+            sandbox_slots: 1,
+        },
+    };
+    pool.import_allocation(allocation).unwrap();
+    let free = pool.free_budget(MemberId(1));
+    assert_eq!(
+        pool.import_allocation(allocation),
+        Err(Error::DuplicateReservation(allocation.id))
+    );
+    for (member_id, budget, error) in [
+        (
+            MemberId(99),
+            allocation.budget,
+            Error::UnknownMember(MemberId(99)),
+        ),
+        (MemberId(2), allocation.budget, Error::NoCapacity),
+        (
+            MemberId(1),
+            ComputeBudget {
+                cpu_millicores: 1,
+                memory_bytes: 0,
+                sandbox_slots: 1,
+            },
+            Error::NoCapacity,
+        ),
+        (
+            MemberId(1),
+            ComputeBudget {
+                cpu_millicores: 0,
+                memory_bytes: 1,
+                sandbox_slots: 1,
+            },
+            Error::NoCapacity,
+        ),
+        (
+            MemberId(1),
+            ComputeBudget::default(),
+            Error::InvalidAllocation,
+        ),
+        (
+            MemberId(1),
+            ComputeBudget {
+                sandbox_slots: 2,
+                ..ComputeBudget::default()
+            },
+            Error::InvalidAllocation,
+        ),
+    ] {
+        assert_eq!(
+            pool.import_allocation(Reservation {
+                id: ReservationId(u64::MAX),
+                member_id,
+                budget
+            }),
+            Err(error)
+        );
+        assert_eq!(pool.free_budget(MemberId(1)), free);
+        assert_eq!(
+            pool.reservations().copied().collect::<Vec<_>>(),
+            [allocation]
+        );
+    }
+    let next = pool.reserve(&request(0, 0)).unwrap();
+    assert_eq!(next.id, ReservationId(8));
+    // No slots remain on the exact member, despite capacity on another member.
+    assert_eq!(
+        pool.import_allocation(Reservation {
+            id: ReservationId(9),
+            member_id: next.member_id,
+            budget: next.budget
+        }),
+        Err(Error::NoCapacity)
+    );
+    let mut storage = member(3, 0, 0, 0);
+    storage.capabilities.compute = None;
+    pool.add_member(storage).unwrap();
+    assert_eq!(
+        pool.import_allocation(Reservation {
+            id: ReservationId(9),
+            member_id: MemberId(3),
+            budget: next.budget
+        }),
+        Err(Error::NoCapacity)
+    );
+}
+
+#[test]
+fn importing_the_last_id_preserves_accounting_on_exhaustion() {
+    let mut pool = pool([member(1, 4, 8, 2)]);
+    let allocation = Reservation {
+        id: ReservationId(u64::MAX),
+        member_id: MemberId(1),
+        budget: ComputeBudget {
+            cpu_millicores: 1,
+            memory_bytes: 1,
+            sandbox_slots: 1,
+        },
+    };
+    pool.import_allocation(allocation).unwrap();
+    let free = pool.free_budget(MemberId(1));
+    assert_eq!(
+        pool.reserve(&request(0, 0)),
+        Err(Error::ReservationIdsExhausted)
+    );
+    assert_eq!(pool.free_budget(MemberId(1)), free);
+    pool.release(allocation.id).unwrap();
+    assert_eq!(
+        pool.reserve(&request(0, 0)),
+        Err(Error::ReservationIdsExhausted)
+    );
+}

@@ -5,6 +5,8 @@ use std::fmt;
 pub enum Error {
     InvalidInput(&'static str),
     Io(&'static str),
+    /// The local transport was terminated; remote mutation may still have happened.
+    Deadline(&'static str),
     Command {
         operation: &'static str,
         code: Option<i32>,
@@ -23,6 +25,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInput(field) => write!(f, "invalid {field}"),
+            Self::Deadline(operation) => write!(f, "Docker {operation} deadline exceeded"),
             Self::Io(operation) => write!(f, "Docker {operation} I/O failed"),
             Self::Command { operation, code } => write!(
                 f,
