@@ -40,16 +40,22 @@ jobs:
       - run: cargo test --workspace --all-features --locked
       - name: Garage single-node S3 integration
         timeout-minutes: 5
-        env:
-          TMPDIR: ${{ runner.temp }}
-        run: cargo test -p homepool-adapter-garage --test garage --locked -- --ignored
-      - name: Test the Docker adapter against the runner engine
+        shell: bash
         env:
           TMPDIR: ${{ runner.temp }}
         run: |
-          cargo test -p homepool-adapter-docker --lib --locked -- --ignored
+          cargo test -p homepool-adapter-garage --test garage --locked -- --ignored | tee "$RUNNER_TEMP/garage-tests.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/garage-tests.log"
+      - name: Test the Docker adapter against the runner engine
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          cargo test -p homepool-adapter-docker --lib --locked -- --ignored | tee "$RUNNER_TEMP/docker-lib-tests.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/docker-lib-tests.log"
           docker pull alpine:3.22
-          cargo test -p homepool-adapter-docker --test engine --locked -- --ignored --test-threads=1 --nocapture
+          cargo test -p homepool-adapter-docker --test engine --locked -- --ignored --test-threads=1 --nocapture | tee "$RUNNER_TEMP/docker-engine-tests.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/docker-engine-tests.log"
 
   structure:
     name: structure
