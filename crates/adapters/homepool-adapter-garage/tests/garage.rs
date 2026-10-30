@@ -251,6 +251,33 @@ fn single_node_portion_scoped_consumers_and_cross_container_s3() {
     assert!(installation.s3(&first, &second.bucket, "deny-put"));
     assert!(installation.s3(&first, "unowned-consumer", "deny-create"));
 
+    // A well-formed but nonexistent node must leave both active and staged layout
+    // untouched. Garage itself accepts such roles, which can break later PUTs.
+    let before = installation.raw("GetClusterLayout", Value::Null).unwrap();
+    let unknown = if node_id == "0".repeat(64) {
+        "f".repeat(64)
+    } else {
+        "0".repeat(64)
+    };
+    let error = garage
+        .stage_portion(&member, &unknown, "zone-a")
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Garage storage node is not known to the cluster"
+    );
+    assert_eq!(
+        installation.raw("GetClusterLayout", Value::Null).unwrap(),
+        before
+    );
+    for _ in 0..3 {
+        assert!(
+            installation.s3(&first, &first.bucket, "put"),
+            "rejected unknown node must not disrupt S3 writes"
+        );
+    }
+    assert!(installation.s3(&first, &first.bucket, "get"));
+
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let usage = garage.storage_usage().unwrap();

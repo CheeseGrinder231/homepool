@@ -3,8 +3,14 @@
 
 mod error;
 mod process;
+mod settings;
 
-use std::{ffi::OsString, fmt, path::Path};
+use std::{
+    ffi::OsString,
+    fmt,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use homepool_core::Member;
 use serde::{Deserialize, Serialize};
@@ -57,6 +63,7 @@ pub struct StorageUsage {
 pub struct Garage {
     executable: OsString,
     prefix: Vec<OsString>,
+    operation_timeout: Duration,
 }
 
 impl Garage {
@@ -74,18 +81,44 @@ impl Garage {
         Self {
             executable: executable.into(),
             prefix: prefix.into_iter().collect(),
+            operation_timeout: settings::OPERATION_TIMEOUT,
         }
     }
 
-    fn call(&self, operation: &str, request: Value) -> Result<Value, Error> {
-        process::call(&self.executable, &self.prefix, operation, &request)
+    /// Set one end-to-end deadline per public operation, including all subprocess
+    /// I/O, cluster queries and attempted cleanup. Zero/unrepresentable limits fail.
+    /// Expiry never retries a mutation; inspect Garage privately before retrying.
+    pub fn with_operation_timeout(mut self, timeout: Duration) -> Result<Self, Error> {
+        if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
+            return Err(Error("invalid Garage operation timeout"));
+        }
+        self.operation_timeout = timeout;
+        Ok(self)
+    }
+
+    fn deadline(&self) -> Result<Instant, Error> {
+        Instant::now()
+            .checked_add(self.operation_timeout)
+            .ok_or(Error("invalid Garage operation timeout"))
+    }
+
+    fn call(&self, deadline: Instant, operation: &str, request: Value) -> Result<Value, Error> {
+        process::call(
+            &self.executable,
+            &self.prefix,
+            operation,
+            &request,
+            deadline,
+        )
     }
 
     /// Stage the member's declared storage bytes as this node's layout capacity.
     /// A zero portion is rejected, rather than silently removing a storage node.
     /// Staging does not activate the layout. Review it before `apply_layout`.
+    /// The full ID must resolve in cluster status; unknown nodes never stage roles.
     /// Serialize layout administration: Garage's draft is shared by all operators.
     pub fn stage_portion(&self, member: &Member, node_id: &str, zone: &str) -> Result<(), Error> {
+        let deadline = self.deadline()?;
         if member.capabilities.storage_bytes == 0
             || node_id.len() != 64
             || !node_id.bytes().all(|b| b.is_ascii_hexdigit())
@@ -95,10 +128,22 @@ impl Garage {
                 "Garage portion requires storage, a full node ID and a zone",
             ));
         }
+        let status = self.call(deadline, "GetClusterStatus", Value::Null)?;
+        let nodes = status["nodes"]
+            .as_array()
+            .ok_or(Error("invalid Garage cluster status"))?;
+        if !nodes.iter().any(|node| {
+            node["id"]
+                .as_str()
+                .is_some_and(|id| id.eq_ignore_ascii_case(node_id))
+        }) {
+            return Err(Error("Garage storage node is not known to the cluster"));
+        }
         self.call(
+            deadline,
             "UpdateClusterLayout",
             json!({"roles": [{
-                "id": node_id,
+                "id": node_id.to_ascii_lowercase(),
                 "zone": zone,
                 "capacity": member.capabilities.storage_bytes,
                 "tags": [format!("homepool-member-{}", member.id.0)]
@@ -110,7 +155,11 @@ impl Garage {
     /// Apply the entire reviewed draft, using the current layout version plus one.
     /// Capacity is a placement weight, not a disk quota or a backup guarantee.
     pub fn apply_layout(&self, next_version: u64) -> Result<(), Error> {
-        self.call("ApplyClusterLayout", json!({"version": next_version}))?;
+        self.call(
+            self.deadline()?,
+            "ApplyClusterLayout",
+            json!({"version": next_version}),
+        )?;
         Ok(())
     }
 
@@ -121,16 +170,19 @@ impl Garage {
     /// On a later failure, known newly created resources are cleaned up best-effort;
     /// inspect Garage after any failure before retrying (RPC is not transactional).
     pub fn create_consumer(&self, consumer_id: u64) -> Result<Consumer, Error> {
+        let deadline = self.deadline()?;
         let bucket = format!("homepool-consumer-{consumer_id}");
-        let created = self.call("CreateBucket", json!({"globalAlias": bucket}))?;
+        let created = self.call(deadline, "CreateBucket", json!({"globalAlias": bucket}))?;
         let bucket_id = text(&created, "id")?;
         let key = match self.call(
+            deadline,
             "CreateKey",
             json!({"name": bucket, "deny": {"createBucket": true}}),
         ) {
             Ok(key) => key,
             Err(error) => {
-                let _ = self.call("DeleteBucket", json!({"id": bucket_id}));
+                let _ = self.call(deadline, "DeleteBucket", json!({"id": bucket_id}));
+                process::check_deadline(deadline)?;
                 return Err(error);
             }
         };
@@ -138,6 +190,7 @@ impl Garage {
             let access_key_id = text(&key, "accessKeyId")?;
             let secret_access_key = text(&key, "secretAccessKey")?;
             self.call(
+                deadline,
                 "AllowBucketKey",
                 json!({"bucketId": bucket_id, "accessKeyId": access_key_id,
                     "permissions": {"read": true, "write": true, "owner": false}}),
@@ -154,9 +207,10 @@ impl Garage {
             Ok(consumer) => Ok(consumer),
             Err(error) => {
                 if let Ok(id) = text(&key, "accessKeyId") {
-                    let _ = self.call("DeleteKey", json!({"id": id}));
+                    let _ = self.call(deadline, "DeleteKey", json!({"id": id}));
                 }
-                let _ = self.call("DeleteBucket", json!({"id": bucket_id}));
+                let _ = self.call(deadline, "DeleteBucket", json!({"id": bucket_id}));
+                process::check_deadline(deadline)?;
                 Err(error)
             }
         }
@@ -165,7 +219,8 @@ impl Garage {
     /// Sum each homepool consumer bucket once. Other buckets are excluded.
     /// All probes must succeed; incomplete results never masquerade as zero usage.
     pub fn storage_usage(&self) -> Result<StorageUsage, Error> {
-        let listed = self.call("ListBuckets", Value::Null)?;
+        let deadline = self.deadline()?;
+        let listed = self.call(deadline, "ListBuckets", Value::Null)?;
         let buckets = listed
             .as_array()
             .ok_or(Error("invalid Garage bucket list"))?;
@@ -181,7 +236,11 @@ impl Garage {
             {
                 continue;
             }
-            let info = self.call("GetBucketInfo", json!({"id": text(bucket, "id")?}))?;
+            let info = self.call(
+                deadline,
+                "GetBucketInfo",
+                json!({"id": text(bucket, "id")?}),
+            )?;
             usage.buckets = add(usage.buckets, 1)?;
             usage.objects = add(usage.objects, number(&info, "objects")?)?;
             usage.used_bytes = add(usage.used_bytes, number(&info, "bytes")?)?;
@@ -190,6 +249,7 @@ impl Garage {
                 number(&info, "unfinishedMultipartUploadBytes")?,
             )?;
         }
+        process::check_deadline(deadline)?;
         Ok(usage)
     }
 }

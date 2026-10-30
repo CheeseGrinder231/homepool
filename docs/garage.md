@@ -4,8 +4,9 @@
 through `garage json-api`. It does not download, bundle, link or vendor Garage.
 The adapter has been tested against Garage 2.1.0. See Garage's
 [administration API documentation](https://garagehq.deuxfleurs.fr/documentation/reference-manual/admin-api/)
-for the JSON-over-stdin interface. Only `serde` and `serde_json`, already used by
-this workspace, are dependencies in addition to core.
+for the JSON-over-stdin interface. The adapter requires a Unix client. It uses
+`serde` and `serde_json` for JSON and `rustix` for safe nonblocking pipes and
+process-group control, in addition to core. It never depends on another adapter.
 
 Install and operate Garage separately. Give its private configuration file the
 RPC connection settings and restrict access to that file and its executable.
@@ -20,7 +21,10 @@ Use `Garage::stage_portion(&member, node_id, zone)` with the full Garage node ID
 and a failure-domain zone. This stages exactly the member's `storage_bytes`
 contribution as the node's capacity, with a `homepool-member-ID` tag. It replaces
 that node's role and tags, preserving other nodes' roles. Zero contributions,
-invalid node IDs and empty zones fail before invoking Garage. Zero does not mean
+invalid node IDs and empty zones fail before invoking Garage. A full ID must also
+resolve to a node in `GetClusterStatus` before any role is staged. Unknown nodes or
+failed cluster queries leave the draft untouched; joining nodes remains separate
+administration. Zero does not mean
 remove a node; removal and draining remain explicit Garage administration tasks.
 
 Review the shared draft with `garage layout show`, then call
@@ -66,6 +70,23 @@ them in command-line arguments, logs, status, or errors. Normal memory is used;
 there is no promise to zeroize credentials. The calling application and any wrapper
 must maintain the same confidentiality rules.
 
+## Operation deadlines
+
+Each public adapter operation has a 60-second default deadline, defined in the
+adapter's settings module. Configure it with
+`Garage::new(config).with_operation_timeout(Duration::from_secs(30))?` (also
+available after `with_command`). Zero and unrepresentable durations are rejected.
+The same budget covers all subprocess calls, stdin, output, process completion,
+cluster resolution and attempted provisioning cleanup. It does not restart for
+each request or bucket. On expiry the adapter kills the local process group,
+reaps its direct child, closes the nonblocking pipes, and returns a fixed sanitized
+deadline diagnostic. There are no background pipe threads left waiting on a wrapper.
+
+Killing the client cannot cancel a mutation already received by Garage or a remote
+program behind a deployment wrapper. A timed-out mutation has an **unknown outcome**:
+inspect the installation privately before retrying. No operation is retried
+automatically, and cleanup cannot launch another request after the budget expires.
+
 ## Status and verification
 
 Add `--garage-config FILE` to `homepool status` to probe live logical usage through
@@ -85,6 +106,10 @@ single-node layout without publishing ports, assigns a member portion, provision
 two consumers, writes in one client container and reads in another through S3.
 It verifies both directions of read isolation, denied cross-bucket writes and
 bucket creation, exact key permissions, no duplicate consumer key, and converging
-usage counters. The Python client uses only its standard library. Generated test
+usage counters. It also rejects an unknown full node ID without changing the layout
+or draft and confirms repeated S3 writes still succeed. Transport regressions cover
+blocked stdin, stalled responses, inherited output pipes, process completion,
+concurrent pipe traffic, child reaping and a shared multi-request deadline.
+The Python client uses only its standard library. Generated test
 credentials travel only through stdin and remain inside the test; containers and
 scratch files are removed on normal completion or a test assertion failure.

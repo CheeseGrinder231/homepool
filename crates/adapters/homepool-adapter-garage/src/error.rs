@@ -4,6 +4,11 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Error(pub(crate) &'static str);
 
+impl Error {
+    pub(crate) const DEADLINE: Self =
+        Self("Garage operation deadline exceeded; inspect privately before retrying");
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0)

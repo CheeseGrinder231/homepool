@@ -86,6 +86,10 @@ fn member(storage_bytes: u64) -> Member {
 #[test]
 fn portion_is_exact_staged_and_explicitly_applied() {
     let fake = Fake::new(&[
+        (
+            "GetClusterStatus",
+            json!({"nodes": [{"id": "a".repeat(64)}]}),
+        ),
         ("UpdateClusterLayout", json!({})),
         ("ApplyClusterLayout", json!({})),
     ]);
@@ -94,14 +98,14 @@ fn portion_is_exact_staged_and_explicitly_applied() {
     garage
         .stage_portion(&member(123_456), &node, "zone-a")
         .unwrap();
-    assert_eq!(fake.calls(), "UpdateClusterLayout\n");
+    assert_eq!(fake.calls(), "GetClusterStatus\nUpdateClusterLayout\n");
     assert_eq!(
-        fake.requests()[0],
+        fake.requests()[1],
         json!({"roles": [{"id": node, "zone": "zone-a", "capacity": 123456,
         "tags": ["homepool-member-7"]}]})
     );
     garage.apply_layout(4).unwrap();
-    assert_eq!(fake.requests()[1], json!({"version": 4}));
+    assert_eq!(fake.requests()[2], json!({"version": 4}));
     for (portion, node, zone) in [
         (0, node.as_str(), "zone-a"),
         (1, "short", "zone-a"),
@@ -109,7 +113,62 @@ fn portion_is_exact_staged_and_explicitly_applied() {
     ] {
         assert!(garage.stage_portion(&member(portion), node, zone).is_err());
     }
-    assert_eq!(fake.calls(), "UpdateClusterLayout\nApplyClusterLayout\n");
+    assert_eq!(
+        fake.calls(),
+        "GetClusterStatus\nUpdateClusterLayout\nApplyClusterLayout\n"
+    );
+}
+
+#[test]
+fn unknown_nodes_and_failed_cluster_queries_never_stage_a_role() {
+    for response in [
+        json!({"nodes": []}),
+        json!({"nodes": [{"id": "b".repeat(64)}]}),
+        json!({}),
+        json!({"nodes": null}),
+    ] {
+        let fake = Fake::new(&[("GetClusterStatus", response)]);
+        assert!(
+            fake.garage()
+                .stage_portion(&member(123_456), &"a".repeat(64), "zone-a")
+                .is_err()
+        );
+        assert_eq!(fake.calls(), "GetClusterStatus\n");
+    }
+    let fake = Fake::new(&[]);
+    assert!(
+        fake.garage()
+            .stage_portion(&member(1), &"a".repeat(64), "zone-a")
+            .is_err()
+    );
+    assert_eq!(fake.calls(), "GetClusterStatus\n");
+}
+
+#[test]
+fn one_deadline_covers_provisioning_and_prevents_cleanup_after_expiry() {
+    use std::time::{Duration, Instant};
+    let fake = Fake::new(&provisioning());
+    for timeout in [Duration::ZERO, Duration::MAX] {
+        assert!(fake.garage().with_operation_timeout(timeout).is_err());
+    }
+    let script = fs::read_to_string(&fake.script).unwrap();
+    fs::write(
+        &fake.script,
+        script.replace("cat \"$0.$2\"", "sleep 0.3\ncat \"$0.$2\""),
+    )
+    .unwrap();
+    let garage = fake
+        .garage()
+        .with_operation_timeout(Duration::from_millis(500))
+        .unwrap();
+    let started = Instant::now();
+    let error = garage.create_consumer(9).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Garage operation deadline exceeded; inspect privately before retrying"
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(fake.calls(), "CreateBucket\nCreateKey\n");
 }
 
 fn provisioning() -> Vec<(&'static str, Value)> {
