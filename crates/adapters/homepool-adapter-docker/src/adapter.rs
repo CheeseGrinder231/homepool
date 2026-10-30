@@ -98,28 +98,9 @@ impl Docker {
             .map_err(|_| Error::Protocol("create"))?
             .trim();
         validate_id(id).map_err(|_| Error::Protocol("create"))?;
-        if self
-            .run(
-                deadline,
-                "start",
-                vec!["container".into(), "start".into(), id.into()],
-                &[],
-            )
-            .is_err()
-        {
-            let cleanup_failed = self
-                .run(
-                    deadline,
-                    "cleanup",
-                    vec!["container".into(), "rm".into(), "--force".into(), id.into()],
-                    &[],
-                )
-                .is_err();
-            return Err(Error::StartFailed {
-                container_id: id.into(),
-                cleanup_failed,
-            });
-        }
+        start_created(id, |operation, args| {
+            self.run(deadline, operation, args, &[])
+        })?;
         self.owned(deadline, id)
     }
 
@@ -246,4 +227,27 @@ pub(crate) fn owned_observation(
         cpu_millicores: observed.limits.cpu_millicores()?,
         memory_bytes: (observed.limits.memory_bytes > 0).then_some(observed.limits.memory_bytes),
     })
+}
+
+// The caller supplies one runner capturing the operation's shared deadline.
+// Keeping recovery here also lets tests expire either phase after readiness.
+pub(crate) fn start_created(
+    id: &str,
+    mut run: impl FnMut(&'static str, Vec<String>) -> Result<Vec<u8>, Error>,
+) -> Result<(), Error> {
+    if let Err(start_error) = run("start", vec!["container".into(), "start".into(), id.into()]) {
+        let cleanup_error = run(
+            "cleanup",
+            vec!["container".into(), "rm".into(), "--force".into(), id.into()],
+        )
+        .err()
+        .map(Box::new);
+        return Err(Error::StartFailed {
+            container_id: id.into(),
+            start_error: Box::new(start_error),
+            outcome_uncertain: cleanup_error.is_some(),
+            cleanup_error,
+        });
+    }
+    Ok(())
 }

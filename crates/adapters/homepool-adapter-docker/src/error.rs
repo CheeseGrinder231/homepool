@@ -13,11 +13,16 @@ pub enum Error {
     },
     Protocol(&'static str),
     NotManaged,
-    /// Creation succeeded but starting failed. A failed cleanup leaves this id
-    /// available for explicit recovery through `stop` and `remove`.
+    /// Creation succeeded but starting failed. Both causes are redacted.
+    /// Failed cleanup leaves the final mutation outcome uncertain; reconcile
+    /// this known container id before retrying or releasing its allocation.
     StartFailed {
         container_id: String,
-        cleanup_failed: bool,
+        start_error: Box<Error>,
+        /// `None` means rollback confirmed removal of the container.
+        cleanup_error: Option<Box<Error>>,
+        /// True when rollback could not confirm removal, including on a deadline.
+        outcome_uncertain: bool,
     },
 }
 
@@ -35,13 +40,26 @@ impl fmt::Display for Error {
             Self::NotManaged => f.write_str("container is not managed by this member"),
             Self::StartFailed {
                 container_id,
-                cleanup_failed,
-            } => write!(
-                f,
-                "Docker start failed for {container_id}; cleanup failed: {cleanup_failed}"
-            ),
+                start_error,
+                cleanup_error,
+                outcome_uncertain,
+            } => {
+                write!(f, "Docker start failed for {container_id}: {start_error}; ")?;
+                match cleanup_error {
+                    Some(error) => write!(f, "cleanup failed: {error}")?,
+                    None => f.write_str("cleanup succeeded")?,
+                }
+                write!(f, "; outcome uncertain: {outcome_uncertain}")
+            }
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::StartFailed { start_error, .. } => Some(start_error.as_ref()),
+            _ => None,
+        }
+    }
+}

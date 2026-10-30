@@ -21,3 +21,6 @@ pub use model::{BindMount, EngineCapacity, Environment, Sandbox, SandboxSpec};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod deadline_tests;

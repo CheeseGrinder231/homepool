@@ -245,13 +245,23 @@ fn failed_start_rolls_back_the_created_container() {
     let error = engine().start(&request).unwrap_err();
     let Error::StartFailed {
         container_id,
-        cleanup_failed,
+        start_error,
+        cleanup_error,
+        outcome_uncertain,
     } = error
     else {
         panic!("expected a start failure");
     };
     let _cleanup = Container(container_id.clone());
-    assert!(!cleanup_failed);
+    assert!(matches!(
+        *start_error,
+        Error::Command {
+            operation: "start",
+            ..
+        }
+    ));
+    assert!(cleanup_error.is_none());
+    assert!(!outcome_uncertain);
     assert!(
         !engine()
             .list()
@@ -348,54 +358,64 @@ fn restart_inventory_restores_differently_sized_running_sandboxes() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
-#[ignore = "requires the Docker CLI and Unix sockets"]
-fn stalled_engine_returns_at_the_operation_deadline() {
-    use std::{
-        os::{fd::AsRawFd, unix::net::UnixListener},
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        time::{Duration, Instant},
-    };
-    let scratch = Scratch::new();
-    // TMPDIR may exceed Unix socket path limits. Keep the directory fd open
-    // and use its short procfs alias, also accessible by the Docker child.
-    let directory = fs::File::open(&scratch.0).unwrap();
-    let socket = PathBuf::from(format!(
-        "/proc/{}/fd/{}/engine.sock",
-        std::process::id(),
-        directory.as_raw_fd()
-    ));
-    let listener = UnixListener::bind(&socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let done = Arc::new(AtomicBool::new(false));
-    std::thread::scope(|scope| {
-        let stop = done.clone();
-        let server = scope.spawn(move || {
-            let mut connections = Vec::new();
-            let until = Instant::now() + Duration::from_secs(5);
-            while !stop.load(Ordering::Relaxed) && Instant::now() < until {
-                match listener.accept() {
-                    Ok((stream, _)) => connections.push(stream),
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5))
-                    }
-                    Err(error) => panic!("fake engine accept: {error}"),
-                }
-            }
-            connections.len()
-        });
-        let docker = Docker::new(Endpoint::unix(&socket).unwrap(), MemberId(4))
-            .with_operation_timeout(Duration::from_millis(500))
-            .unwrap();
-        let started = Instant::now();
-        let result = docker.capacity();
-        done.store(true, Ordering::Relaxed);
-        let accepted = server.join().unwrap();
-        assert!(matches!(result, Err(Error::Deadline("capacity"))));
-        assert!(accepted > 0, "the CLI must reach the stalled engine");
-        assert!(started.elapsed() < Duration::from_secs(5));
-    });
+#[ignore = "requires a local Docker engine and alpine:3.22"]
+fn quota_only_default_period_supports_inventory_and_lifecycle() {
+    let sandbox_id = unique();
+    let label = format!("homepool.sandbox={sandbox_id}");
+    let id = String::from_utf8(cli(&[
+        "container",
+        "create",
+        "--cpu-quota",
+        "50000",
+        "--memory",
+        "67108864",
+        "--label",
+        "homepool.managed=true",
+        "--label",
+        "homepool.member=4",
+        "--label",
+        &label,
+        "alpine:3.22",
+        "sleep",
+        "60",
+    ]))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let _cleanup = Container(id.clone());
+    cli(&["container", "start", &id]);
+    let details: Value = serde_json::from_slice(&cli(&["container", "inspect", &id])).unwrap();
+    assert_eq!(details[0]["HostConfig"]["NanoCpus"], 0);
+    assert_eq!(details[0]["HostConfig"]["CpuQuota"], 50_000);
+    assert_eq!(details[0]["HostConfig"]["CpuPeriod"], 0);
+    let docker = engine();
+    let observed = docker
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|item| item.container_id == id)
+        .unwrap();
+    assert_eq!(observed.sandbox_id, sandbox_id);
+    assert_eq!(observed.state, "running");
+    assert_eq!(observed.cpu_millicores, Some(500));
+    assert_eq!(observed.memory_bytes, Some(67_108_864));
+    docker.stop(&id).unwrap();
+    assert_eq!(
+        docker
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.container_id == id)
+            .unwrap()
+            .state,
+        "exited"
+    );
+    docker.remove(&id).unwrap();
+    assert!(
+        !docker
+            .list()
+            .unwrap()
+            .iter()
+            .any(|item| item.container_id == id)
+    );
 }

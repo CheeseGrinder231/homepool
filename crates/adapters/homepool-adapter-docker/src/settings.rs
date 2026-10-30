@@ -14,6 +14,9 @@ pub(crate) const MEMBER_LABEL: &str = "homepool.member";
 pub(crate) const SANDBOX_LABEL: &str = "homepool.sandbox";
 pub(crate) const STOP_SECONDS: &str = "10";
 pub(crate) const MILLICORES_PER_CPU: u64 = 1_000;
+/// Docker's zero HostConfig.CpuPeriod selects the Linux CFS default: 100 ms,
+/// expressed in microseconds, including when only --cpu-quota is specified.
+pub(crate) const DEFAULT_CPU_PERIOD_MICROS: u64 = 100_000;
 // Docker's env-file scanner limits each line to less than 64 KiB.
 pub(crate) const MAX_ENV_LINE_BYTES: usize = 65_535;
 pub(crate) const INSPECT_FORMAT: &str = r#"{"id":{{json .Id}},"labels":{{json .Config.Labels}},"state":{{json .State.Status}},"limits":{"nano_cpus":{{json .HostConfig.NanoCpus}},"cpu_quota":{{json .HostConfig.CpuQuota}},"cpu_period":{{json .HostConfig.CpuPeriod}},"memory_bytes":{{json .HostConfig.Memory}}}}"#;

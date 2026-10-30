@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::error::Error;
+use crate::{error::Error, settings::DEFAULT_CPU_PERIOD_MICROS};
 
 /// Only resource configuration is projected; never the container environment.
 #[derive(Deserialize)]
@@ -18,10 +18,12 @@ impl Limits {
         }
         let nano = (self.nano_cpus > 0).then(|| self.nano_cpus.div_ceil(1_000_000));
         let quota = if self.cpu_quota > 0 {
-            if self.cpu_period == 0 {
-                return Err(Error::Protocol("inspect limits"));
-            }
-            let value = (self.cpu_quota as u128 * 1_000).div_ceil(self.cpu_period as u128);
+            let period = if self.cpu_period == 0 {
+                DEFAULT_CPU_PERIOD_MICROS
+            } else {
+                self.cpu_period
+            };
+            let value = (self.cpu_quota as u128 * 1_000).div_ceil(period as u128);
             Some(u64::try_from(value).map_err(|_| Error::Protocol("inspect limits"))?)
         } else {
             None

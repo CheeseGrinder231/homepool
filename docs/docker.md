@@ -47,8 +47,12 @@ does not reset the clock. Zero and unrepresentable durations are rejected.
 The adapter uses a dedicated process group for the CLI and its SSH transport.
 On expiry it kills the group, reaps the CLI, and closes the nonblocking pipes;
 stdin cannot leave a blocked writer behind. Cleanup after a failed start shares
-the same deadline. If no time remains, `StartFailed` returns the known container
-id with `cleanup_failed: true`. A create timeout may have no known container id.
+the same deadline. `StartFailed` retains the known container id, redacted
+`start_error`, optional `cleanup_error`, and `outcome_uncertain`. A `Deadline`
+cause identifies which phase expired. Successful rollback has no cleanup error
+and confirms removal; any failed rollback leaves `outcome_uncertain: true`.
+If start exhausts the deadline, cleanup also reports a deadline without spawning
+a new command. A create timeout may have no known container id.
 
 Terminating the client does not cancel a mutation already received by an engine.
 After a deadline, communication error, failed cleanup, or failed final inspection,
@@ -65,7 +69,10 @@ An incomplete or failed list is never evidence that a sandbox is absent.
 
 `Sandbox` includes `cpu_millicores: Option<u64>` and `memory_bytes: Option<u64>`.
 CPU is the tighter configured NanoCPUs or CFS quota/period ceiling, rounded up to
-whole millicores to avoid undercounting. Memory is the configured hard byte limit.
+whole millicores to avoid undercounting. Docker's zero/default CPU period resolves
+to the 100,000-microsecond CFS default, so a quota-only value of 50,000 means
+500 millicores. The protocol default is documented in the adapter settings module.
+Memory is the configured hard byte limit.
 A missing finite ceiling is `None`, never a zero-sized allocation. CPU affinity,
 parent cgroups, and engine totals can further restrict execution; these observations
 do not infer free host resources. Malformed or missing limit fields fail the list.
@@ -115,12 +122,14 @@ Docker's SSH transport.
 ## Local integration tests
 
 The ordinary workspace suite runs unit tests without requiring an engine.
-The CI `test` job additionally pulls `alpine:3.22` and runs the ignored engine
-tests explicitly. Missing or inaccessible Docker fails that step.
+The CI `test` job additionally runs the ignored Docker CLI regression, pulls
+`alpine:3.22`, and runs the ignored engine tests explicitly. Missing or inaccessible
+Docker fails that step.
 
 With a disposable local engine and a writable `TMPDIR`:
 
 ```sh
+cargo test -p homepool-adapter-docker --lib -- --ignored
 docker pull alpine:3.22
 cargo test -p homepool-adapter-docker --test engine -- --ignored --test-threads=1
 ```
@@ -130,9 +139,13 @@ containers and bind-mount scratch files under `TMPDIR`; cleanup runs on normal
 completion and assertion failures. Tests cover capacity, lifecycle, labels,
 limits, mounts, environment input beyond pipe-buffer capacity, ownership checks,
 rollback after a failed start, and restart accounting for different sandbox sizes.
-A Linux fake-engine test accepts a local connection without responding and checks
-the operation deadline. Unit tests also cover a transport that never reads stdin,
-large simultaneous pipe traffic, and child reaping. They never contact an SSH host.
+A Linux fake-engine test accepts a local connection without responding, then
+expires the private test clock after readiness. The same seam covers blocked stdin,
+inherited pipes, start expiry, and rollback expiry. Tests assert transport
+termination, direct-child reaping, and pipe closure; an outer watchdog detects hangs
+without making startup speed a correctness condition. Unit tests also cover large
+simultaneous pipe traffic. Engine tests cover quota-only inventory and lifecycle.
+They never contact an SSH host.
 
 ## Manual SSH verification
 

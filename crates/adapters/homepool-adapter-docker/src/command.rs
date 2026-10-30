@@ -2,7 +2,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::process::CommandExt,
     process::{Child, Command, Stdio},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use rustix::{
@@ -62,7 +62,20 @@ pub(crate) fn execute(
     input: &[u8],
     deadline: Instant,
 ) -> Result<Vec<u8>, Error> {
-    if Instant::now() >= deadline {
+    execute_with_remaining(command, operation, input, || {
+        deadline.saturating_duration_since(Instant::now())
+    })
+}
+
+// Private clock seam: production derives remaining time from the single public
+// operation deadline. Tests can expire it after controlled transport readiness.
+pub(crate) fn execute_with_remaining(
+    command: &mut Command,
+    operation: &'static str,
+    input: &[u8],
+    mut remaining: impl FnMut() -> Duration,
+) -> Result<Vec<u8>, Error> {
+    if remaining().is_zero() {
         return Err(Error::Deadline(operation));
     }
     let mut transport = Transport(
@@ -84,8 +97,8 @@ pub(crate) fn execute(
     let mut eof = false;
     let mut input_failed = false;
     loop {
-        let now = Instant::now();
-        if now >= deadline {
+        let time_left = remaining();
+        if time_left.is_zero() {
             return Err(Error::Deadline(operation));
         }
         let mut progressed = false;
@@ -147,9 +160,7 @@ pub(crate) fn execute(
             return Ok(output);
         }
         if !progressed {
-            std::thread::sleep(
-                TRANSPORT_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-            );
+            std::thread::sleep(TRANSPORT_POLL_INTERVAL.min(time_left));
         }
     }
 }
