@@ -9,11 +9,12 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "Usage: homepool [--config FILE] status [--json]\n\nRead the private member file and show its declared members and budgets.\n--config FILE may also follow status. See docs/members.md for the schema.";
+const USAGE: &str = "Usage: homepool [--config FILE] status [--json] [--garage-config FILE]\n\nRead the private member file and show its declared members and budgets.\n--garage-config adds a live storage usage probe through an installed Garage.\n--config FILE may also follow status. See docs/members.md for the schema.";
 
 struct Options {
     config: Option<PathBuf>,
     json: bool,
+    garage_config: Option<PathBuf>,
 }
 
 enum Command {
@@ -25,6 +26,7 @@ enum Command {
 fn arguments(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut args = args.into_iter();
     let mut config = None;
+    let mut garage_config = None;
     let mut json = false;
     let mut status = false;
     while let Some(arg) = args.next() {
@@ -32,15 +34,22 @@ fn arguments(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             return Ok(Command::Help);
         } else if arg == "--version" {
             return Ok(Command::Version);
-        } else if arg == "--config" {
-            if config.is_some() {
-                return Err("--config may only be supplied once".into());
+        } else if arg == "--config" || arg == "--garage-config" {
+            let (name, selected) = if arg == "--config" {
+                ("--config", &mut config)
+            } else {
+                ("--garage-config", &mut garage_config)
+            };
+            if selected.is_some() {
+                return Err(format!("{name} may only be supplied once"));
             }
-            let value = args.next().ok_or("--config requires a file path")?;
+            let value = args
+                .next()
+                .ok_or_else(|| format!("{name} requires a file path"))?;
             if value.is_empty() || value.to_string_lossy().starts_with('-') {
-                return Err("--config requires a file path".into());
+                return Err(format!("{name} requires a file path"));
             }
-            config = Some(PathBuf::from(value));
+            *selected = Some(PathBuf::from(value));
         } else if arg == "--json" && !json {
             json = true;
         } else if arg == "status" && !status {
@@ -52,7 +61,11 @@ fn arguments(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     if !status {
         return Err(USAGE.into());
     }
-    Ok(Command::Status(Options { config, json }))
+    Ok(Command::Status(Options {
+        config,
+        json,
+        garage_config,
+    }))
 }
 
 fn run() -> Result<(), String> {
@@ -66,7 +79,12 @@ fn run() -> Result<(), String> {
                 env::var_os("XDG_CONFIG_HOME"),
             )?;
             let pool = settings::load(&path)?;
-            status::render(&pool, options.json)?
+            let storage = options
+                .garage_config
+                .map(|config| homepool_adapter_garage::Garage::new(&config).storage_usage())
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            status::render(&pool, options.json, storage)?
         }
     };
     io::stdout()

@@ -6,4 +6,5 @@ app = ["core", "adapter"]
 [crates]
 homepool-core = "core"
 homepool-cli = "app"
+homepool-adapter-garage = "adapter"
 xtask = "app"

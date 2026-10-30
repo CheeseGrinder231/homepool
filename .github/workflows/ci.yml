@@ -38,6 +38,11 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
       - run: cargo test --workspace --all-features --locked
+      - name: Garage single-node S3 integration
+        timeout-minutes: 5
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: cargo test -p homepool-adapter-garage --test garage --locked -- --ignored
 
   structure:
     name: structure

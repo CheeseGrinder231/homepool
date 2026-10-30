@@ -49,6 +49,70 @@ impl Scratch {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn optional_garage_probe_adds_usage_and_sanitizes_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = Scratch::new();
+    scratch.file("members.toml", "version = 1\nmembers = []");
+    let program = scratch.file(
+        "bin/garage",
+        r#"#!/bin/sh
+cat >/dev/null
+case "$4" in
+  ListBuckets) printf '%s' '[{"id":"bucket-id","globalAliases":["homepool-consumer-1"]}]' ;;
+  GetBucketInfo) printf '%s' '{"objects":2,"bytes":48,"unfinishedMultipartUploadBytes":12}' ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut paths = vec![scratch.0.join("bin")];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let search = std::env::join_paths(paths).unwrap();
+    let run = |json: bool| {
+        let mut command = scratch.command();
+        command
+            .args([
+                "status",
+                "--config",
+                "members.toml",
+                "--garage-config",
+                "private-garage.toml",
+            ])
+            .env("PATH", &search);
+        if json {
+            command.arg("--json");
+        }
+        command.output().unwrap()
+    };
+    assert_eq!(
+        decoded(&run(true)),
+        json!({
+            "version": 1, "members": [], "storage": {
+                "buckets": 1, "objects": 2, "used_bytes": 48, "unfinished_upload_bytes": 12
+            }
+        })
+    );
+    let human = run(false);
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("48 used bytes"));
+    assert!(human.contains("single copy; it is not a backup"));
+
+    fs::write(
+        program,
+        "#!/bin/sh\nprintf placeholder-secret >&2\nprintf placeholder-key\nexit 1\n",
+    )
+    .unwrap();
+    let failed = run(true);
+    diagnostic(&failed, "Garage operation failed");
+    assert!(!String::from_utf8_lossy(&failed.stderr).contains("placeholder"));
+}
+
 impl Drop for Scratch {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.0).unwrap();
