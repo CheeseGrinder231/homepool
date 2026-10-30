@@ -5,7 +5,7 @@ use rustix::fs::{FlockOperation, OFlags, flock};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -170,4 +170,53 @@ pub fn save(path: &Path, config: &Configuration) -> Result<(), String> {
         .and_then(|f| f.sync_all())
         .map_err(|_| "member file replaced but directory sync failed")?;
     Ok(())
+}
+
+/// A reserved new private file. Never follows or replaces an existing entry.
+/// Uncommitted files are removed on failure, including partially written secrets.
+pub struct NewFile {
+    file: File,
+    path: PathBuf,
+    persisted: bool,
+}
+
+impl NewFile {
+    pub fn create(path: &Path) -> Result<Self, String> {
+        parent(path)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(
+                |_| "could not create new private credentials file; destination must not exist",
+            )?;
+        let new = Self {
+            file,
+            path: path.to_owned(),
+            persisted: false,
+        };
+        // An unusually restrictive umask may remove owner bits. The inode was
+        // created with at most 0600, and is never widened beyond that mode.
+        new.file
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|_| "could not secure credentials file")?;
+        Ok(new)
+    }
+
+    pub fn persist(&mut self, contents: &[u8]) -> Result<(), std::io::Error> {
+        self.file.write_all(contents)?;
+        self.file.write_all(b"\n")?;
+        self.file.sync_all()?;
+        self.persisted = true;
+        Ok(())
+    }
+}
+
+impl Drop for NewFile {
+    fn drop(&mut self) {
+        if !self.persisted {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }

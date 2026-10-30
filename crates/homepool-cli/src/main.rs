@@ -46,6 +46,10 @@ fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
                 status::render(&pool, options.json, storage)?
             }
         }
+        command if arguments::is_storage_command(command) => {
+            storage::execute(&options, interrupted)?;
+            String::new()
+        }
         command => {
             let socket = settings::resolve_socket(
                 options.socket,

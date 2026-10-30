@@ -15,6 +15,90 @@ RPC connection settings and restrict access to that file and its executable.
 such as a container exec command. These are trusted program inputs, not a shell
 command string. Never put credentials in prefix arguments.
 
+## Owner CLI commands
+
+The shipped `homepool` binary can stage a portion, apply the shared layout and
+create a consumer directly through the adapter. These commands do not use the
+hub. All three read the private member file using the usual `--config FILE`,
+`HOMEPOOL_CONFIG`, then `XDG_CONFIG_HOME` selection. The member file must be a
+regular file owned by the current user with mode `0600`. Each command requires
+`--garage-config FILE`; the installed `garage` must be on `PATH`.
+
+```sh
+homepool --config "$HOMEPOOL_CONFIG" stage-storage 1 "$GARAGE_NODE_ID" zone-a --garage-config "$GARAGE_CONFIG"
+# Review all staged changes using the existing Garage administration command:
+garage -c "$GARAGE_CONFIG" layout show
+homepool --config "$HOMEPOOL_CONFIG" apply-storage 1 --garage-config "$GARAGE_CONFIG"
+homepool --config "$HOMEPOOL_CONFIG" create-consumer 1 --garage-config "$GARAGE_CONFIG" --credentials-file "$CREDENTIALS_FILE"
+```
+
+`stage-storage MEMBER NODE ZONE` uses that member's declared `storage_bytes`,
+requires the full Garage node ID and rejects unknown members and zero storage.
+`apply-storage VERSION` applies the entire shared draft at the explicitly supplied
+next version. Replace `1` with the current version plus one; there is no automatic
+version lookup, layout repair or retry. Review with `garage layout show` and
+serialize administration with other operators before applying.
+`create-consumer ID --credentials-file FILE` accepts an unsigned pool-local
+numeric consumer ID. File options can appear before or after the command.
+Successful mutations exit `0` with no stdout or stderr. Failures exit `1` with
+fixed diagnostics that do not echo input paths or Garage output. Signal cancellation
+uses the same cleanup and exit codes as the [live probe](members.md#optional-live-garage-storage).
+An interrupted or timed-out mutation has an unknown outcome: inspect Garage
+privately before retrying.
+
+### Credentials file format, version 1
+
+The destination must not exist, including a directory or dangling symlink. Its
+parent must pass the existing private-path checks: a directory owned by the
+current user with mode `0700`, without a symlink at that directory entry. Missing
+parents are created privately. The CLI reserves a new regular file with mode
+`0600` **before any Garage call**, then writes the complete UTF-8 JSON document,
+adds a newline and syncs the file before reporting success. An existing file is
+never overwritten. Keep the directory private and do not replace its entries
+while provisioning.
+
+The stable version-1 JSON fields are:
+
+| Field | Value |
+| --- | --- |
+| `version` | Integer `1`. |
+| `bucket` | String `homepool-consumer-ID`. |
+| `aws_access_key_id` | Newly issued access key ID string. |
+| `aws_secret_access_key` | Newly issued secret access key string. |
+
+Read the file directly in your S3 client, for example with Python and boto3:
+
+```python
+import json
+import os
+import boto3
+
+with open(os.environ["CREDENTIALS_FILE"], encoding="utf-8") as source:
+    credentials = json.load(source)
+if credentials["version"] != 1:
+    raise ValueError("unsupported credentials file version")
+s3 = boto3.client(
+    "s3",
+    endpoint_url=os.environ["S3_ENDPOINT"],
+    region_name=os.environ["S3_REGION"],
+    aws_access_key_id=credentials["aws_access_key_id"],
+    aws_secret_access_key=credentials["aws_secret_access_key"],
+)
+s3.put_object(Bucket=credentials["bucket"], Key="sample", Body=b"shared object")
+```
+
+The endpoint and region come from the separately operated Garage installation.
+Never print the document or pass keys through command arguments or logs. If Garage
+issues credentials but the write or sync fails, the CLI removes the incomplete
+file where possible and reports: `Garage issued credentials but the credentials
+file could not be written; the consumer may exist; inspect Garage privately before
+retrying`. The consumer is not automatically deleted or retried; inspect and
+revoke it through Garage administration before creating a replacement. Other
+provisioning failures also remove the reserved file where possible and preserve
+the adapter's nontransactional failure semantics below.
+
+**A single-node layout keeps a single copy. It is not a backup.**
+
 ## Member portions
 
 Use `Garage::stage_portion(&member, node_id, zone)` with the full Garage node ID
@@ -92,7 +176,7 @@ with the adapter. Setting it to true stops the process group and reaps its child
 before returning the fixed `Error::CANCELLED`. The flag remains set and prevents
 subsequent operations from starting. Cancellation has the same unknown-outcome,
 inspect-before-retry rule as a deadline and never automatically retries or launches
-cleanup requests after cancellation. During a probe the CLI sets this flag on
+cleanup requests after cancellation. During a probe or storage command the CLI sets this flag on
 SIGINT and SIGTERM; see [status exit codes](members.md#optional-live-garage-storage). Library callers
 own signal handling and must keep the supervisor alive until cancellation returns.
 
@@ -107,10 +191,11 @@ The CI `test` job runs the opt-in integration test on a GitHub-hosted runner:
 
 ```sh
 cargo test -p homepool-adapter-garage --test garage --locked -- --ignored
+cargo test -p homepool-cli --test garage --locked -- --ignored
 ```
 
-Set `TMPDIR` to a private scratch directory and provide Docker locally. The test
-uses version-and-digest-pinned Garage and Python images. It creates an isolated
+Set `TMPDIR` to a private scratch directory and provide Docker locally. Both tests
+use version-and-digest-pinned Garage and Python images. It creates an isolated
 single-node layout without publishing ports, assigns a member portion, provisions
 two consumers, writes in one client container and reads in another through S3.
 It verifies both directions of read isolation, denied cross-bucket writes and
@@ -122,3 +207,10 @@ concurrent pipe traffic, child reaping and a shared multi-request deadline.
 The Python client uses only its standard library. Generated test
 credentials travel only through stdin and remain inside the test; containers and
 scratch files are removed on normal completion or a test assertion failure.
+
+The CLI integration runs `stage-storage`, `apply-storage` and `create-consumer`
+against a real single-node Garage, then reads the credentials file and performs
+S3 writes and reads in fresh client containers. It also checks the file mode,
+silent successful output, existing-file refusal, unknown nodes and wrong versions.
+Local CLI regressions exercise zero-storage and unknown members, private path and
+argument diagnostics, and a failed credentials write after issuance.
