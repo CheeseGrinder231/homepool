@@ -83,7 +83,14 @@ module in each component, including smaller components.
 The lexer discovers nodes from `mod` declarations, starting at Cargo's target
 source paths. External modules use conventional `name.rs` or `name/mod.rs` files;
 inline modules establish their own namespace and child directory. Declarations
-establish nodes, not dependency edges. Edges come from explicit `crate::` and
+establish nodes, not dependency edges. Block-local modules also get nodes, with
+distinct identities for each declaration; they never merge with module-level
+modules or same-named modules in other blocks. Diagnostics mark local names as
+`name[local@N]`, where N is the zero-based byte offset of `mod` in its source file.
+Their children retain that local namespace. Blocks add no `super` level:
+`super::` inside a local module refers to its enclosing module, while `crate::`
+always starts in the module-level namespace at the crate root.
+Edges come from explicit `crate::` and
 `super::` paths, including repeated `super`, grouped imports, aliases, and globs.
 The destination is the longest declared module prefix; an item on the crate root
 therefore points to the root. All written conditional branches are inspected.

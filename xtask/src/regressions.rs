@@ -663,6 +663,47 @@ fn only_the_exact_lockfile_registry_source_is_exempt() {
 }
 
 #[test]
+fn compilable_block_local_modules_keep_distinct_namespaces() {
+    for (name, source, expected) in [
+        (
+            "local and module-level names",
+            include_str!("../tests/fixtures/structure/modules-local-shadow.rs"),
+            0,
+        ),
+        (
+            "names in separate blocks",
+            include_str!("../tests/fixtures/structure/modules-local-blocks.rs"),
+            0,
+        ),
+        (
+            "cycle inside a local module",
+            include_str!("../tests/fixtures/structure/modules-local-cycle.rs"),
+            2,
+        ),
+    ] {
+        let repo = Repository::new();
+        repo.write("src/lib.rs", source);
+        let output = Command::new("cargo")
+            .args(["check", "--offline", "--locked"])
+            .current_dir(repo.root())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{name} must compile");
+        let measured = measure(
+            repo.root(),
+            &history::working_files(repo.root()).unwrap(),
+            &history::repository_url(repo.root()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            measured.counts.module_cycles, expected,
+            "{name}: {:?}",
+            measured.findings
+        );
+    }
+}
+
+#[test]
 fn new_counts_and_issue_linked_allowances_work_end_to_end() {
     for (metric, files, amount) in [
         (

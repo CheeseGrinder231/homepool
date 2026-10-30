@@ -43,6 +43,7 @@ impl Tree {
 
     fn walk(&mut self, sources: &Sources, tokens: &[Token<'_>], module: Module, directory: &Path) {
         let mut i = 0;
+        let mut block_depth = 0;
         while i < tokens.len() {
             if tokens[i].text == "mod"
                 && let Some(name) = tokens
@@ -51,7 +52,13 @@ impl Tree {
             {
                 let name = name.text.trim_start_matches("r#");
                 let mut child = module.clone();
-                child.push(name.into());
+                // Blocks do not add a `super` level, but their module declarations
+                // must not share an identity with module-level or other local names.
+                child.push(if block_depth == 0 {
+                    name.into()
+                } else {
+                    format!("{name}[local@{}]", tokens[i].start)
+                });
                 match tokens.get(i + 2).map(|t| t.text) {
                     Some("{") => {
                         if let Some(end) = closing(tokens, i + 2) {
@@ -90,6 +97,11 @@ impl Tree {
                 }
                 i = self.path(tokens, i + 3, &module, prefix);
                 continue;
+            }
+            match tokens[i].text {
+                "{" => block_depth += 1,
+                "}" => block_depth -= 1,
+                _ => {}
             }
             i += 1;
         }
