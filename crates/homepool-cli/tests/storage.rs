@@ -312,3 +312,99 @@ fn storage_argument_requirements_fail_before_garage() {
         .unwrap();
     failure(&output, "storage commands require --garage-config FILE");
 }
+
+// Linux CI uses dynamic libc fsync interposition to inject faults at the exact
+// persistence boundary, without production hooks or sleeps racing the signal.
+#[cfg(target_os = "linux")]
+impl Scratch {
+    fn credentials_sync_fault(&self, fault: &str) -> Command {
+        let library = self.0.join("credentials-sync.so");
+        let output = Command::new("cc")
+            .args(["-shared", "-fPIC", "-Wall", "-Werror", "-o"])
+            .arg(&library)
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/credentials_sync.c"
+            ))
+            .output()
+            .expect("C compiler is required for deterministic sync fault tests");
+        assert!(
+            output.status.success(),
+            "could not compile sync fault fixture"
+        );
+        let mut command = self.command();
+        command
+            .env("LD_PRELOAD", library)
+            .env("HOMEPOOL_TEST_SYNC_FAULT", fault)
+            .args([
+                "create-consumer",
+                "7",
+                "--credentials-file",
+                "credentials.json",
+            ]);
+        command
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigkill_leaves_unconfirmed_credentials_that_refuse_retry() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let scratch = Scratch::new();
+    let output = scratch.credentials_sync_fault("kill").output().unwrap();
+    assert_eq!(output.status.signal(), Some(signal_hook::consts::SIGKILL));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(scratch.0.join("credentials-sync-reached").exists());
+    let path = scratch.0.join("credentials.json");
+    let unconfirmed = fs::read(&path).unwrap();
+    assert!(serde_json::from_slice::<Value>(&unconfirmed).is_ok());
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
+    fs::remove_file(scratch.0.join("garage-called")).unwrap();
+    // Earlier termination windows can leave an empty file or partial JSON.
+    // Every surviving state must block retry without altering it or calling Garage.
+    for leftover in [unconfirmed, Vec::new(), b"{\"version\":".to_vec()] {
+        fs::write(&path, &leftover).unwrap();
+        failure(
+            &scratch.run(&[
+                "create-consumer",
+                "7",
+                "--credentials-file",
+                "credentials.json",
+            ]),
+            "could not create new private credentials file; destination must not exist",
+        );
+        scratch.not_called();
+        assert!(
+            fs::read(&path).unwrap() == leftover,
+            "retry must preserve surviving credentials"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigterm_during_credentials_sync_error_preserves_recovery_warning() {
+    let scratch = Scratch::new();
+    let output = scratch
+        .credentials_sync_fault("term-error")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(143));
+    assert!(output.stdout.is_empty());
+    assert!(scratch.0.join("credentials-sync-reached").exists());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(!diagnostic.contains("placeholder-access-key"));
+    assert!(!diagnostic.contains("placeholder-secret-key"));
+    // Do not echo unexpected diagnostics: a regression could contain credentials.
+    assert!(
+        diagnostic
+            == "homepool: Garage issued credentials but the credentials file could not be written; the consumer may exist; inspect Garage privately before retrying\n",
+        "must preserve the specific consumer recovery warning"
+    );
+    assert!(!scratch.0.join("credentials.json").exists());
+}

@@ -97,6 +97,16 @@ revoke it through Garage administration before creating a replacement. Other
 provisioning failures also remove the reserved file where possible and preserve
 the adapter's nontransactional failure semantics below.
 
+An ungraceful termination such as SIGKILL or a crash cannot run this cleanup.
+An empty, partial or complete-but-unconfirmed credentials file can remain at the
+destination and will block another attempt. **File existence alone is not
+success.** Inspect and validate any surviving document and the corresponding
+Garage state privately. Keep usable credentials; do not discard them merely
+because success was not reported. If they are unusable, revoke any orphaned keys
+and clean up orphaned consumer resources through Garage administration, then
+remove the leftover file and retry. Do not remove it and retry before reconciling
+Garage's state.
+
 **A single-node layout keeps a single copy. It is not a backup.**
 
 ## Member portions
