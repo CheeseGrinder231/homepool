@@ -24,7 +24,12 @@ limits must be positive. CPU requests must be multiples of 10 millicores;
 anything. Callers reserve that same aligned CPU amount. Bind mount sources refer
 to the **engine's** filesystem,
 including over SSH. Paths containing CSV separators or quotes are rejected.
-The sandbox id is a descriptive label, not a uniqueness or retry guarantee.
+The sandbox identity is an idempotency key on this member: create supplies the
+exact deterministic name `homepool-<member-id>-<sandbox-id>`. Docker enforces name
+uniqueness for the lifetime of the container, including while stopped or created.
+A second create cannot produce a second container and returns typed
+`Error::IdentityConflict`; diagnosis uses a name inspection, not raw stderr.
+This is per-member protection, not a pool-wide identity journal.
 Use the returned full container id for `stop` and `remove`.
 
 `list` includes stopped containers and filters all three labels: `homepool.managed`,
@@ -47,6 +52,11 @@ The deadline covers the entire call: list and all inspections, ownership checks
 and mutations, or create/start/inspection and attempted rollback. A slow command
 does not reset the clock. Zero and unrepresentable durations are rejected.
 
+`Docker::with_deadline(Instant)` additionally caps all public operations with an
+enclosing absolute request deadline. It is never reset between stop and remove or
+between inventory reads and a mutation. The hub passes the remaining request
+budget through this cap.
+
 The adapter uses a dedicated process group for the CLI and its SSH transport.
 On expiry it kills the group, reaps the CLI, and closes the nonblocking pipes;
 stdin cannot leave a blocked writer behind. Cleanup after a failed start shares
@@ -55,7 +65,10 @@ the same deadline. `StartFailed` retains the known container id, redacted
 cause identifies which phase expired. Successful rollback has no cleanup error
 and confirms removal; any failed rollback leaves `outcome_uncertain: true`.
 If start exhausts the deadline, cleanup also reports a deadline without spawning
-a new command. A create timeout may have no known container id.
+a new command. A create timeout may have no known container id. `StartFailed`
+also retains the sandbox identity. If start succeeded but its final inspection failed,
+`StartUnconfirmed` retains both IDs and the redacted cause. `known_sandbox()`
+exposes the known pair on either failure for reconciliation.
 
 Terminating the client does not cancel a mutation already received by an engine.
 After a deadline, communication error, failed cleanup, or failed final inspection,
@@ -63,8 +76,10 @@ keep the member closed to new placement and reconcile with a successful `list`.
 Match known work by `(member id, full container id)` and inspect its current state.
 For an uncertain create, examine all matching sandbox labels for duplicate or
 unclaimed containers before deciding what to retain or remove. The sandbox label
-is descriptive and has no uniqueness or retry guarantee. Reconcile before retrying
-an uncertain start; blind retries can create a second sandbox. Do not release a
+alone is descriptive; deterministic adapter names enforce uniqueness on each
+member, while the hub's strict/fresh contract controls pool-wide admission.
+Reconcile before retrying an uncertain start; blind retries across members can
+create a second sandbox. Do not release a
 reservation just because stop/remove timed out. Confirm the resulting state first.
 An incomplete or failed list is never evidence that a sandbox is absent.
 
@@ -183,3 +198,28 @@ fail earlier.
    from process arguments and labels. Container inspection can read its environment.
 5. Call `stop()` then `remove()` with the returned id and confirm `list()` no longer
    contains it. Repeat with a bind mount whose source exists on the remote member.
+
+## Hub cancellation and budget shrink recovery
+
+`Docker::with_cancellation(Arc<AtomicBool>)` shares a cooperative cancellation
+flag. Once set, it stays cancelled until the caller deliberately replaces or
+resets it. Every transport checks it before spawning and inside the existing
+poll loop. Cancellation kills the process group, reaps the CLI and closes its
+pipes, returning the fixed redacted `Error::Cancelled`. Start rollback uses the
+same flag; cancellation may therefore appear in both `StartFailed` causes, with
+`outcome_uncertain: true`. A mutation cancelled after reaching the engine has the
+same unknown-outcome rule as a deadline. Reconcile before retrying it. Adapters
+install no signal handlers; the hub owns scoped SIGINT/SIGTERM registration.
+
+For example, suppose a member runs sandboxes limited to 200 and 700 millicores,
+and its declared budget is reduced from 1,000 to 500 before the hub restarts.
+The hub inventories both full container handles. The 700-millicore allocation
+cannot be imported; the member remains unreachable for admission even if the
+200-millicore import succeeded. That partial ledger is never complete capacity.
+Use `homepool inventory --json` to inspect both observed handles, then
+`homepool release "$LARGE_SANDBOX_HANDLE"` to stop and remove the rejected work.
+A subsequent complete inventory imports the remaining 200 millicores and can
+restore the declared active state with 300 millicores free. Alternatively, restore
+a sufficient declared budget before restarting. If inspection or removal fails,
+keep admission closed and reconcile privately; neither a timeout nor a missing
+partial entry proves that work ended. See [hub.md](hub.md) for the local API.

@@ -54,6 +54,7 @@ dependencies = [
 name = "homepool-cli"
 version = "0.1.0"
 dependencies = [
+ "homepool-adapter-docker",
  "homepool-adapter-garage",
  "homepool-core",
  "rustix",

@@ -1,136 +1,105 @@
+mod arguments;
+mod hub;
+mod inventory;
+mod private;
+mod protocol;
 mod settings;
 mod status;
+mod storage;
 
+use protocol::Request;
 use std::{
     env,
-    ffi::OsString,
-    io::{self, Write},
-    path::PathBuf,
+    io::{self, Read, Write},
     process::ExitCode,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
-use signal_hook::{
-    consts::{SIGINT, SIGTERM},
-    flag,
-};
-
-const USAGE: &str = "Usage: homepool [--config FILE] status [--json] [--garage-config FILE]\n\nRead the private member file and show its declared members and budgets.\n--garage-config adds a live storage usage probe through an installed Garage.\n--config FILE may also follow status. See docs/members.md for the schema.";
-
-struct Options {
-    config: Option<PathBuf>,
-    json: bool,
-    garage_config: Option<PathBuf>,
-}
-
-enum Command {
-    Status(Options),
-    Help,
-    Version,
-}
-
-fn arguments(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
-    let mut args = args.into_iter();
-    let mut config = None;
-    let mut garage_config = None;
-    let mut json = false;
-    let mut status = false;
-    while let Some(arg) = args.next() {
-        if arg == "--help" || arg == "-h" {
-            return Ok(Command::Help);
-        } else if arg == "--version" {
-            return Ok(Command::Version);
-        } else if arg == "--config" || arg == "--garage-config" {
-            let (name, selected) = if arg == "--config" {
-                ("--config", &mut config)
-            } else {
-                ("--garage-config", &mut garage_config)
-            };
-            if selected.is_some() {
-                return Err(format!("{name} may only be supplied once"));
-            }
-            let value = args
-                .next()
-                .ok_or_else(|| format!("{name} requires a file path"))?;
-            if value.is_empty() || value.to_string_lossy().starts_with('-') {
-                return Err(format!("{name} requires a file path"));
-            }
-            *selected = Some(PathBuf::from(value));
-        } else if arg == "--json" && !json {
-            json = true;
-        } else if arg == "status" && !status {
-            status = true;
-        } else {
-            return Err(format!("unexpected argument: {}", arg.to_string_lossy()));
-        }
-    }
-    if !status {
-        return Err(USAGE.into());
-    }
-    Ok(Command::Status(Options {
-        config,
-        json,
-        garage_config,
-    }))
-}
-
 fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
-    let output = match arguments(env::args_os().skip(1))? {
-        Command::Help => format!("{USAGE}\n"),
-        Command::Version => format!("homepool {}\n", env!("CARGO_PKG_VERSION")),
-        Command::Status(options) => {
+    let options = arguments::parse(env::args_os().skip(1))?;
+    let output = match options.command.as_str() {
+        "help" => format!("{}\n", arguments::USAGE),
+        "version" => format!("homepool {}\n", env!("CARGO_PKG_VERSION")),
+        "status" | "hub" => {
             let path = settings::resolve_config(
                 options.config,
                 env::var_os("HOMEPOOL_CONFIG"),
                 env::var_os("XDG_CONFIG_HOME"),
             )?;
-            let pool = settings::load(&path)?;
-            let storage = options
-                .garage_config
-                .map(|config| {
-                    let cancelled = Arc::new(AtomicBool::new(false));
-                    let terminate_immediately = Arc::new(AtomicBool::new(true));
-                    for signal in [SIGINT, SIGTERM] {
-                        // Record the exit code before publishing cancellation.
-                        flag::register_conditional_default(
-                            signal,
-                            Arc::clone(&terminate_immediately),
-                        )
-                        .and_then(|_| {
-                            flag::register_usize(signal, Arc::clone(interrupted), signal as usize)
-                        })
-                        .and_then(|_| flag::register(signal, Arc::clone(&cancelled)))
-                        .map_err(|_| {
-                            "could not register Garage cancellation signals".to_string()
-                        })?;
+            if options.command == "hub" {
+                let socket = settings::resolve_socket(
+                    options.socket,
+                    env::var_os("HOMEPOOL_SOCKET"),
+                    env::var_os("XDG_RUNTIME_DIR"),
+                )?;
+                hub::serve(&path, &socket)?;
+                String::new()
+            } else {
+                let pool = settings::load(&path)?;
+                let storage = options
+                    .garage_config
+                    .map(|config| storage::probe(config, interrupted))
+                    .transpose()?;
+                status::render(&pool, options.json, storage)?
+            }
+        }
+        command => {
+            let socket = settings::resolve_socket(
+                options.socket,
+                env::var_os("HOMEPOOL_SOCKET"),
+                env::var_os("XDG_RUNTIME_DIR"),
+            )?;
+            let operand = options.operand.as_deref().unwrap_or_default();
+            let member = || {
+                operand
+                    .to_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .ok_or_else(|| "member must be an unsigned integer".to_string())
+            };
+            let request = match command {
+                "inventory" => Request::Inventory {},
+                "place" => {
+                    let mut input = Vec::new();
+                    io::stdin()
+                        .lock()
+                        .take((settings::API_SIZE_LIMIT + 1) as u64)
+                        .read_to_end(&mut input)
+                        .map_err(|_| "could not read placement stdin")?;
+                    if input.len() > settings::API_SIZE_LIMIT {
+                        return Err("placement exceeds size limit".into());
                     }
-                    // Defer ordinary termination only while child cleanup is needed.
-                    terminate_immediately.store(false, Ordering::SeqCst);
-                    // A signal between the two registrations must also cancel.
-                    if interrupted.load(Ordering::SeqCst) != 0 {
-                        cancelled.store(true, Ordering::Release);
+                    Request::Place {
+                        spec: serde_json::from_slice(&input)
+                            .map_err(|_| "invalid placement JSON")?,
                     }
-                    let result = homepool_adapter_garage::Garage::new(&config)
-                        .with_cancellation(cancelled)
-                        .storage_usage();
-                    // Both success and error returns have completed child cleanup.
-                    terminate_immediately.store(true, Ordering::SeqCst);
-                    if interrupted.load(Ordering::SeqCst) != 0 {
-                        return Err(homepool_adapter_garage::Error::CANCELLED.to_string());
-                    }
-                    result.map_err(|e| e.to_string())
-                })
-                .transpose()?;
-            status::render(&pool, options.json, storage)?
+                }
+                "release" => Request::Release {
+                    handle: operand.to_str().ok_or("invalid handle")?.into(),
+                },
+                "add" => Request::Add {
+                    document: private::read(std::path::Path::new(operand))?,
+                },
+                "drain" => Request::Drain { member: member()? },
+                "remove" => Request::Remove { member: member()? },
+                _ => return Err(arguments::USAGE.into()),
+            };
+            let result = hub::call(&socket, request)?;
+            format!(
+                "{}\n",
+                serde_json::to_string(&result).map_err(|_| "could not encode output")?
+            )
         }
     };
-    io::stdout()
-        .lock()
-        .write_all(output.as_bytes())
-        .map_err(|e| format!("stdout: {e}"))
+    if !output.is_empty() {
+        io::stdout()
+            .lock()
+            .write_all(output.as_bytes())
+            .map_err(|e| format!("stdout: {e}"))?;
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -143,8 +112,8 @@ fn main() -> ExitCode {
         }
     };
     match interrupted.load(Ordering::SeqCst) as i32 {
-        SIGINT => ExitCode::from(130),
-        SIGTERM => ExitCode::from(143),
+        signal_hook::consts::SIGINT => ExitCode::from(130),
+        signal_hook::consts::SIGTERM => ExitCode::from(143),
         _ => result,
     }
 }

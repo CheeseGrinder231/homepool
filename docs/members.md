@@ -156,3 +156,12 @@ addresses are included in successful status output either.
 
 Human output includes the single-copy warning: **a single-node layout keeps a
 single copy; it is not a backup.** The same warning applies when using JSON.
+
+## Optional Docker endpoints and lifecycle
+
+Members may also contain a strict `docker` table: either `socket` (an absolute
+local Unix socket path), or `host` with optional `port` and `remote_socket` for SSH.
+These private values are validated and omitted from status output. Existing
+files without endpoints retain the same declaration-only status behavior.
+See [hub.md](hub.md) for endpoint examples, private-file requirements, atomic
+`add`/`remove` updates and persistent `drain` behavior.

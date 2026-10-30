@@ -1,11 +1,13 @@
 //! Private member schema and configuration boundary. Core receives only validated types.
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
 
+use homepool_adapter_docker::Endpoint;
 use homepool_core::{Capabilities, ComputeBudget, Member, MemberId, MemberState, Pool, Tier};
 use toml::{
     Spanned,
@@ -54,6 +56,41 @@ pub fn load(path: &Path) -> Result<Pool, String> {
 
 /// Parse with spans retained through validation, then discard all TOML values.
 pub fn parse(path: &Path, source: &str) -> Result<Pool, String> {
+    Ok(parse_configuration(path, source)?.pool)
+}
+
+pub struct Configuration {
+    pub pool: Pool,
+    pub docker: BTreeMap<MemberId, DockerEndpoint>,
+}
+
+#[derive(Clone)]
+pub enum DockerEndpoint {
+    Unix {
+        socket: String,
+    },
+    Ssh {
+        host: String,
+        port: Option<u16>,
+        remote_socket: Option<String>,
+    },
+}
+
+impl DockerEndpoint {
+    pub fn endpoint(&self) -> Result<Endpoint, String> {
+        match self {
+            Self::Unix { socket } => Endpoint::unix(socket),
+            Self::Ssh {
+                host,
+                port,
+                remote_socket,
+            } => Endpoint::ssh(host, *port, remote_socket.as_deref().map(Path::new)),
+        }
+        .map_err(|e| e.to_string())
+    }
+}
+
+pub fn parse_configuration(path: &Path, source: &str) -> Result<Configuration, String> {
     let document = Document { path, source };
     let root = DeTable::parse(source).map_err(|e| {
         document.error(
@@ -81,9 +118,52 @@ pub fn parse(path: &Path, source: &str) -> Result<Pool, String> {
         )
     })?;
     let mut pool = Pool::default();
+    let mut docker = BTreeMap::new();
     for (index, value) in entries.iter().enumerate() {
         let field = format!("members[{index}]");
         let member = document.member(value, &field)?;
+        let table = value.get_ref().as_table().expect("validated member table");
+        if let Some(value) = table.get("docker") {
+            let field = format!("{field}.docker");
+            let table = document.table(value, &field)?;
+            let string = |key| -> Result<String, String> {
+                let v = document.required(table, value.span().start, &field, key)?;
+                v.get_ref().as_str().map(str::to_owned).ok_or_else(|| {
+                    document.error(
+                        v.span().start,
+                        &field_name(&field, key),
+                        "expected a string",
+                    )
+                })
+            };
+            let endpoint = if table.contains_key("socket") {
+                document.fields(table, &field, &["socket"])?;
+                DockerEndpoint::Unix {
+                    socket: string("socket")?,
+                }
+            } else {
+                document.fields(table, &field, &["host", "port", "remote_socket"])?;
+                DockerEndpoint::Ssh {
+                    host: string("host")?,
+                    port: table
+                        .get("port")
+                        .map(|v| {
+                            document
+                                .unsigned(v, &field_name(&field, "port"), u16::MAX.into())
+                                .map(|p| p as u16)
+                        })
+                        .transpose()?,
+                    remote_socket: table
+                        .get("remote_socket")
+                        .map(|_| string("remote_socket"))
+                        .transpose()?,
+                }
+            };
+            endpoint.endpoint().map_err(|_| {
+                document.error(value.span().start, &field, "invalid Docker endpoint")
+            })?;
+            docker.insert(member.id, endpoint);
+        }
         pool.add_member(member).map_err(|_| {
             let table = value.get_ref().as_table().expect("validated member table");
             document.error(
@@ -93,7 +173,7 @@ pub fn parse(path: &Path, source: &str) -> Result<Pool, String> {
             )
         })?;
     }
-    Ok(pool)
+    Ok(Configuration { pool, docker })
 }
 
 struct Document<'a> {
@@ -164,7 +244,11 @@ impl Document<'_> {
 
     fn member(&self, value: &Spanned<DeValue<'_>>, field: &str) -> Result<Member, String> {
         let table = self.table(value, field)?;
-        self.fields(table, field, &["id", "tier", "state", "capabilities"])?;
+        self.fields(
+            table,
+            field,
+            &["id", "tier", "state", "capabilities", "docker"],
+        )?;
         let get = |key| self.required(table, value.span().start, field, key);
         let id = MemberId(self.unsigned(get("id")?, &field_name(field, "id"), u64::MAX)?);
         let tier_value = get("tier")?;
@@ -248,6 +332,75 @@ fn field_name(prefix: &str, key: &str) -> String {
         key.into()
     } else {
         format!("{prefix}.{key}")
+    }
+}
+
+/// Socket path precedence mirrors the member file, without a home fallback.
+pub fn resolve_socket(
+    explicit: Option<PathBuf>,
+    configured: Option<OsString>,
+    xdg: Option<OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = explicit {
+        return nonempty(path, "--socket");
+    }
+    if let Some(path) = configured {
+        return nonempty(PathBuf::from(path), "HOMEPOOL_SOCKET");
+    }
+    let root = xdg
+        .map(PathBuf::from)
+        .ok_or("XDG_RUNTIME_DIR is unset; supply --socket FILE or HOMEPOOL_SOCKET")?;
+    if !root.is_absolute() {
+        return Err("XDG_RUNTIME_DIR must be an absolute, nonempty directory path".into());
+    }
+    Ok(root.join(DEFAULT_SOCKET_PATH))
+}
+
+pub const DEFAULT_SOCKET_PATH: &str = "homepool/hub.sock";
+pub const HUB_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+pub const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub const API_SIZE_LIMIT: usize = 1024 * 1024;
+pub const CPU_QUANTUM: u64 = 10;
+
+/// Reserve response time inside the same client-supplied request deadline.
+pub const RESPONSE_MARGIN: std::time::Duration = std::time::Duration::from_millis(100);
+
+#[derive(Clone, Copy)]
+pub struct Timing {
+    pub operation: std::time::Duration,
+    pub request: std::time::Duration,
+}
+impl Timing {
+    pub fn load() -> Result<Self, String> {
+        fn duration(
+            key: &str,
+            default: std::time::Duration,
+        ) -> Result<std::time::Duration, String> {
+            let duration = match std::env::var(key) {
+                Ok(value) => std::time::Duration::from_millis(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("{key} must be positive milliseconds"))?,
+                ),
+                Err(std::env::VarError::NotPresent) => default,
+                Err(_) => return Err(format!("invalid {key}")),
+            };
+            if duration.is_zero() || std::time::Instant::now().checked_add(duration).is_none() {
+                return Err(format!("invalid {key}"));
+            }
+            Ok(duration)
+        }
+        let timing = Self {
+            operation: duration(
+                "HOMEPOOL_OPERATION_TIMEOUT_MS",
+                homepool_adapter_docker::Docker::DEFAULT_OPERATION_TIMEOUT,
+            )?,
+            request: duration("HOMEPOOL_REQUEST_TIMEOUT_MS", API_TIMEOUT)?,
+        };
+        if timing.request <= RESPONSE_MARGIN {
+            return Err("request timeout must exceed the response margin (100 ms)".into());
+        }
+        Ok(timing)
     }
 }
 

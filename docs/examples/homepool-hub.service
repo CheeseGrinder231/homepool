@@ -1,0 +1,17 @@
+[Unit]
+Description=Personal cloud placement hub
+
+[Service]
+Type=simple
+ExecStart=homepool --config %h/.config/homepool/members.toml --socket %t/homepool/hub.sock hub
+RuntimeDirectory=homepool
+RuntimeDirectoryMode=0700
+UMask=0077
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

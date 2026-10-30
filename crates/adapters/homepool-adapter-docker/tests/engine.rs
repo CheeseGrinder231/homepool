@@ -152,6 +152,7 @@ fn capacity_and_full_lifecycle_with_limits_mounts_and_environment() {
     let details = &details[0];
     assert_eq!(details["HostConfig"]["NanoCpus"], 500_000_000_u64);
     assert_eq!(details["HostConfig"]["Memory"], request.memory_bytes);
+    assert_eq!(details["HostConfig"]["RestartPolicy"]["Name"], "no");
     assert_eq!(details["Config"]["Labels"]["homepool.managed"], "true");
     assert_eq!(details["Config"]["Labels"]["homepool.member"], "4");
     assert!(
@@ -245,6 +246,7 @@ fn failed_start_rolls_back_the_created_container() {
     let error = engine().start(&request).unwrap_err();
     let Error::StartFailed {
         container_id,
+        sandbox_id: _,
         start_error,
         cleanup_error,
         outcome_uncertain,
@@ -383,6 +385,17 @@ fn quota_only_default_period_supports_inventory_and_lifecycle() {
     .trim()
     .to_owned();
     let _cleanup = Container(id.clone());
+    let created = engine()
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|item| item.container_id == id)
+        .unwrap();
+    assert_eq!(
+        created.state, "created",
+        "identity is visible before any start call"
+    );
+    engine().stop(&id).unwrap(); // Release can stop a never-started record too.
     cli(&["container", "start", &id]);
     let details: Value = serde_json::from_slice(&cli(&["container", "inspect", &id])).unwrap();
     assert_eq!(details[0]["HostConfig"]["NanoCpus"], 0);
@@ -516,4 +529,36 @@ fn inventory_cpu_bounds_cover_applied_cgroup_limits() {
             "APPLIED_CPU_CHECK verified: {case}; reported={reported}, quota={quota}, period={period}"
         );
     }
+}
+
+#[test]
+#[ignore = "requires a local Docker engine and alpine:3.22"]
+fn engine_enforces_member_identity_uniqueness() {
+    let request = spec();
+    let adapter = engine();
+    let first = adapter.start(&request).unwrap();
+    let _first = Container(first.container_id.clone());
+    for _ in 0..2 {
+        assert!(
+            matches!(adapter.start(&request), Err(Error::IdentityConflict { sandbox_id }) if sandbox_id == request.sandbox_id)
+        );
+    }
+    adapter.stop(&first.container_id).unwrap();
+    assert!(matches!(
+        adapter.start(&request),
+        Err(Error::IdentityConflict { .. })
+    ));
+    let matching: Vec<_> = adapter
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.sandbox_id == request.sandbox_id)
+        .collect();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].container_id, first.container_id);
+    // Names are per member, even when both members use one physical engine.
+    let other = Docker::new(endpoint(), MemberId(5))
+        .start(&request)
+        .unwrap();
+    let _other = Container(other.container_id);
 }

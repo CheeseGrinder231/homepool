@@ -198,7 +198,7 @@ fn recovery_timeout(timed_phase: &'static str) {
     let mut expired = false;
     let mut pipes = None;
     let mut phases = Vec::new();
-    let error = start_created(&id, |operation, args| {
+    let error = start_created(&id, "sandbox-a", |operation, args| {
         assert_eq!(args.last().unwrap(), &id);
         phases.push(operation);
         let mut cli = if operation == timed_phase {
@@ -230,6 +230,7 @@ fn recovery_timeout(timed_phase: &'static str) {
     assert!(!text.contains("dummy-secret"));
     let Error::StartFailed {
         container_id,
+        sandbox_id: _,
         start_error,
         cleanup_error,
         outcome_uncertain,
@@ -316,5 +317,44 @@ fn stalled_engine_expires_after_connection_readiness() {
         let mut connection = connection.unwrap();
         connection.set_nonblocking(true).unwrap();
         drain_to_eof(&mut connection);
+    });
+}
+
+#[test]
+fn cancellation_reaps_transport_and_closes_inherited_pipes() {
+    watchdog(|| {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for input in [Vec::new(), vec![b'x'; 1024 * 1024]] {
+            let scratch = Scratch::new();
+            let cancelled = AtomicBool::new(false);
+            let mut witnesses = None;
+            let error = crate::command::execute_poll(
+                &mut scratch.stalled(false),
+                "create",
+                &input,
+                || {
+                    if witnesses.is_none()
+                        && let Some(pipes) = scratch.ready()
+                    {
+                        witnesses = Some(pipes);
+                        cancelled.store(true, Ordering::Release);
+                    }
+                    Duration::from_secs(30)
+                },
+                &cancelled,
+            )
+            .unwrap_err();
+            assert!(matches!(error, Error::Cancelled));
+            witnesses.unwrap().assert_closed();
+            let error = crate::command::execute_poll(
+                &mut Command::new("no-such-command"),
+                "create",
+                &[],
+                || Duration::from_secs(30),
+                &cancelled,
+            )
+            .unwrap_err();
+            assert!(matches!(error, Error::Cancelled));
+        }
     });
 }

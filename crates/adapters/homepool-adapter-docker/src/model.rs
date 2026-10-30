@@ -59,7 +59,7 @@ pub struct BindMount {
 /// contain no secrets; place secret values in `environment` instead.
 #[derive(Debug)]
 pub struct SandboxSpec {
-    /// Nonsecret logical identity, recorded in `homepool.sandbox`.
+    /// Nonsecret idempotency key, recorded in the label and deterministic name.
     pub sandbox_id: String,
     pub image: String,
     /// Nonzero CPU limit in millicores; must be a multiple of 10.

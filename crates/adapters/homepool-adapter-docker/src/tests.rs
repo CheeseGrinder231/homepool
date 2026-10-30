@@ -364,13 +364,14 @@ fn transport_streams_both_pipes_and_redacts_failures() {
 #[test]
 fn recovery_errors_preserve_distinct_redacted_command_causes() {
     let id = "a".repeat(64);
-    let error = crate::adapter::start_created(&id, |operation, _| {
+    let error = crate::adapter::start_created(&id, "sandbox-a", |operation, _| {
         Err(Error::Command {
             operation,
             code: Some(if operation == "start" { 19 } else { 23 }),
         })
     })
     .unwrap_err();
+    assert_eq!(error.known_sandbox(), Some((id.as_str(), "sandbox-a")));
     assert!(
         std::error::Error::source(&error)
             .unwrap()
@@ -379,6 +380,7 @@ fn recovery_errors_preserve_distinct_redacted_command_causes() {
     );
     let Error::StartFailed {
         container_id,
+        sandbox_id: _,
         start_error,
         cleanup_error,
         outcome_uncertain,
@@ -419,4 +421,14 @@ fn starts_reject_unaligned_cpu_before_contacting_the_engine() {
         let args = spec::create_args(MemberId(7), &request).unwrap();
         assert!(args.windows(2).any(|pair| pair == ["--cpus", formatted]));
     }
+}
+
+#[test]
+fn enclosing_deadline_prevents_a_new_mutation() {
+    let adapter = Docker::new(Endpoint::unix("/run/unused.sock").unwrap(), MemberId(7))
+        .with_deadline(std::time::Instant::now());
+    assert!(matches!(
+        adapter.start(&spec()),
+        Err(Error::Deadline("create"))
+    ));
 }

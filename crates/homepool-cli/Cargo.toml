@@ -10,11 +10,13 @@ name = "homepool"
 path = "src/main.rs"
 
 [dependencies]
+homepool-adapter-docker = { version = "0.1.0", path = "../adapters/homepool-adapter-docker" }
+rustix = { version = "1.1", features = ["fs", "process", "net", "time"] }
+signal-hook = { version = "0.4", default-features = false }
 homepool-adapter-garage = { version = "0.1.0", path = "../adapters/homepool-adapter-garage" }
 homepool-core = { version = "0.1.0", path = "../homepool-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-signal-hook = { version = "0.4", default-features = false }
 toml = "0.9"
 
 [dev-dependencies]

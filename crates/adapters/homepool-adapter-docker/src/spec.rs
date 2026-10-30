@@ -49,6 +49,8 @@ pub(crate) fn create_args(member: MemberId, spec: &SandboxSpec) -> Result<Vec<St
     let mut args = vec![
         "container".into(),
         "create".into(),
+        "--name".into(),
+        container_name(member, &spec.sandbox_id),
         "--label".into(),
         format!("{MANAGED_LABEL}=true"),
         "--label".into(),
@@ -85,4 +87,9 @@ pub(crate) fn create_args(member: MemberId, spec: &SandboxSpec) -> Result<Vec<St
     args.extend(["--".into(), spec.image.clone()]);
     args.extend(spec.command.iter().cloned());
     Ok(args)
+}
+
+// Encode the validated identity without hashing, truncation or case folding.
+pub(crate) fn container_name(member: MemberId, sandbox_id: &str) -> String {
+    format!("homepool-{}-{sandbox_id}", member.0)
 }
