@@ -152,6 +152,7 @@ fn capacity_and_full_lifecycle_with_limits_mounts_and_environment() {
     let details = &details[0];
     assert_eq!(details["HostConfig"]["NanoCpus"], 500_000_000_u64);
     assert_eq!(details["HostConfig"]["Memory"], request.memory_bytes);
+    assert_eq!(details["HostConfig"]["RestartPolicy"]["Name"], "no");
     assert_eq!(details["Config"]["Labels"]["homepool.managed"], "true");
     assert_eq!(details["Config"]["Labels"]["homepool.member"], "4");
     assert!(
@@ -384,6 +385,17 @@ fn quota_only_default_period_supports_inventory_and_lifecycle() {
     .trim()
     .to_owned();
     let _cleanup = Container(id.clone());
+    let created = engine()
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|item| item.container_id == id)
+        .unwrap();
+    assert_eq!(
+        created.state, "created",
+        "identity is visible before any start call"
+    );
+    engine().stop(&id).unwrap(); // Release can stop a never-started record too.
     cli(&["container", "start", &id]);
     let details: Value = serde_json::from_slice(&cli(&["container", "inspect", &id])).unwrap();
     assert_eq!(details[0]["HostConfig"]["NanoCpus"], 0);

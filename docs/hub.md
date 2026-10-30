@@ -85,6 +85,18 @@ printf '%s\n' '{"sandbox_id":"example-job","image":"alpine:3.22","cpu_millicores
 homepool --socket "$HOMEPOOL_SOCKET" release "$SANDBOX_HANDLE"
 ```
 
+Under strict use of this hub and adapter, an identity runs on at most one member
+at a time. Container creation and starting are separate engine calls, sequenced
+by one live hub process. If create lands after its transport has died, that
+process cannot issue the later start: the late container is **never started**.
+A strict retry may already be running on another member, so inventory can contain
+one `running` sandbox and a late `created` record with the same identity. The
+created record holds CPU, memory and a slot in placement accounting, is visible
+in inventory, and blocks further strict placement of that identity while it
+exists. Use its full handle
+with `release` to remove it and free that capacity. Inventory never auto-starts
+created records, and a conflicting create never resumes an existing container.
+
 Placement is **strict by default**: if any member's inventory is incomplete,
 `place` rejects the request because the identity cannot be proved new pool-wide.
 The optional boolean `fresh` defaults to `false`. With `fresh: true`, the caller
@@ -129,6 +141,14 @@ external handles. A collision closes the affected member. A rejected import,
 including two observed containers competing for a one-slot budget, leaves all
 observed handles readable with the member closed; release can reconcile them.
 
+Inventory JSON exposes each engine observation as
+`members[].sandboxes[].state`, independently of the member's admission `state`.
+Values are Docker state strings, including `created` (never started), `running`
+and `exited`. A retained failed-start handle may have `unknown` until inspection
+succeeds. When `inventory_complete` is false, retained observations may be stale;
+none of those entries make capacity free. Use this field to distinguish a late
+created record from the running sandbox for the same identity.
+
 After an uncertain start or release, the hub never retries automatically. Failed
 starts retain the adapter's known full container ID and sandbox identity, including
 when final inspection failed. Failed inventories preserve those observations and
@@ -138,19 +158,27 @@ with duplicate labels from external or older clients remain separately accounted
 
 ## Restart settling and request deadlines
 
-Every new hub process closes admission for one full configured adapter operation
-limit: 60 seconds by default. `inventory` remains readable during this period,
-with `settling: true` and zero free budgets. When the period ends, a subsequent
-placement or inventory request re-reads inventories before opening admission.
-An earlier empty listing cannot activate a member. This allows a previous
-process's in-flight mutation to land or end before an empty inventory is trusted.
-The period also applies to fresh placements, and no hub-owned journal is used.
+Every new hub process closes placement and member removal for one full configured
+adapter operation limit: 60 seconds by default. Drain remains available.
+`inventory` remains readable during this period, with `settling: true` and zero
+free budgets. Once the period ends, a subsequent placement, inventory or removal
+request re-reads inventories before acting. An earlier empty listing cannot
+activate or remove a member. The period also applies to fresh placements.
 
-There is a remaining limit: **a SIGKILLed hub can leave an orphaned local/SSH
-transport that outlives the settle period** and submits a mutation later. The
-period cannot fence that transport. Confirm its termination privately before
-restarting or admitting work. Engine names still prevent a second container on
-the same member; the pool-wide strict/fresh contract still applies across members.
+The delay does not prove that an engine-side create has finished. Even after
+SIGTERM killed and reaped its transport and a new process's full settle period
+has elapsed, a submitted create can still land. It leaves the never-started,
+capacity-holding record described above; the hub does not start it later.
+
+SIGKILL can leave an orphaned local/SSH transport. An orphaned **create** can only
+leave a never-started record, because that CLI runs `container create` alone.
+An orphaned **start** can act only on the exact container ID returned by an
+earlier completed create, whose labeled identity is already visible in an
+all-container inventory. Strict placement therefore sees that identity and
+rejects another placement while it exists. The adapter uses no `docker run` or
+restart policy, and the hub does not replay starts after recovery. The strict
+running guarantee and the fresh warning above apply; no journal or retry
+protocol is used.
 
 The CLI supplies one absolute monotonic request deadline, 120 seconds by default,
 starting before connection. It covers connection, socket queue wait, framing,
@@ -183,9 +211,16 @@ homepool --socket "$HOMEPOOL_SOCKET" remove 1
 `add FILE` reads a private `0600` regular file containing the same version-1 schema
 with exactly one member. Duplicate IDs, unknown fields and invalid endpoints fail
 without writing. `drain` persists the declared draining state across restarts and
-keeps existing sandboxes running. `remove` requires a draining member with a
-complete empty inventory; finish or release its work first. An unavailable
-inventory cannot prove that removal is safe.
+keeps existing sandboxes running. `remove` is rejected while the hub is settling,
+including after a successful drain and an empty listing. Once settling ends,
+removal requires a draining member with a complete empty inventory; finish or
+release its observed work first. An unavailable inventory cannot justify removal.
+
+A create submitted before removal can still land after settling and after the
+member was removed. That late record is never started, but its endpoint is no
+longer in the member file. Re-add the member with the same ID and Docker endpoint
+(a draining declaration is suitable), then use `inventory` and `release` to
+recover and remove the record. The hub retains no separate endpoint journal.
 
 Updates rewrite the member file in canonical ID order (comments and original
 formatting are not preserved), validate the entire replacement, write a `0600`
@@ -237,7 +272,12 @@ Regressions cover both two-member outage/retry scenarios, strict rejection and
 fresh placement on a healthy member, retained failed-start identities, delayed
 engine completion across a genuinely new hub process, readable one-slot
 budget rejection, and a queued request expiring behind multiple stalled members
-without starting work. Real-engine adapter tests check typed identity conflicts
+without starting work. Short-deadline and post-settle SIGTERM regressions check
+exactly one running sandbox and one late created record, strict rejection while
+the identity is observed, occupied capacity and release recovery. The restart
+removal regression drains and attempts removal before create completes, then
+recovers the member and eventual handle. Real-engine adapter tests check typed
+identity conflicts, created-state visibility before start, no restart policy,
 and exactly one container per member and identity.
 
 With a disposable Docker engine and `alpine:3.22` pulled, run:

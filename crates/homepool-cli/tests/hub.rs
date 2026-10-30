@@ -612,6 +612,15 @@ fn restart_settles_delayed_engine_completion_and_keeps_over_budget_inventory_rea
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("settling"));
     }
+    // Draining is safe during settling, but an empty listing cannot justify
+    // deleting the member and its endpoint before the pending create lands.
+    f.ok(&["drain", "1"], None);
+    let declared = fs::read(f.root.join("members.toml")).unwrap();
+    let removed = f.run(&["remove", "1"], None);
+    assert!(!removed.status.success());
+    assert!(String::from_utf8_lossy(&removed.stderr).contains("settling"));
+    assert_eq!(fs::read(f.root.join("members.toml")).unwrap(), declared);
+    assert_eq!(f.inventory()["members"][0]["member"], 1);
     // Model completion by the engine after the old CLI has been killed. Only
     // the engine record, never an old hub map, crosses the process boundary.
     let pending: Value =
@@ -624,6 +633,12 @@ fn restart_settles_delayed_engine_completion_and_keeps_over_budget_inventory_rea
     f.wait_settled();
     let view = f.inventory();
     assert_eq!(view["members"][0]["inventory_complete"], true);
+    assert_eq!(view["members"][0]["state"], "draining");
+    assert_eq!(view["members"][0]["sandboxes"][0]["state"], "created");
+    assert_eq!(
+        view["members"][0]["sandboxes"][0]["handle"],
+        format!("1:{id}")
+    );
     assert_eq!(view["members"][0]["free"]["sandbox_slots"], 0);
     assert_eq!(view["members"][0]["sandboxes"].as_array().unwrap().len(), 1);
     assert!(
@@ -646,6 +661,8 @@ fn restart_settles_delayed_engine_completion_and_keeps_over_budget_inventory_rea
     f.ok(&["release", &format!("1:{id}")], None);
     assert_eq!(f.inventory()["members"][0]["inventory_complete"], true);
     f.ok(&["release", &format!("1:{legacy_id}")], None);
+    f.ok(&["remove", "1"], None);
+    assert!(f.inventory()["members"].as_array().unwrap().is_empty());
     f.stop(Signal::TERM);
 }
 
@@ -741,4 +758,167 @@ fn several_stalled_members_leave_inventory_release_and_drain_usable_and_expired_
     );
     f.release(&first);
     f.stop(Signal::TERM);
+}
+
+fn late_create_stays_created(restart: bool) {
+    let mut f = Fixture::new(false);
+    f.operation_ms = 2500;
+    f.members(2, 2);
+    f.start();
+    let old_pid = f.hub.as_ref().unwrap().id();
+    f.write("delay-create", "");
+    let mut command = f.command();
+    if !restart {
+        // The request expires well before the adapter's configured limit,
+        // while this same hub process remains alive and can serve a retry.
+        command.env("HOMEPOOL_REQUEST_TIMEOUT_MS", "1000");
+    }
+    let mut client = command
+        .args(["--socket", "hub.sock", "place", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    client
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::to_string(&placement("late-create", false, &[1]))
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+    f.wait_file("pending-create");
+    if restart {
+        f.stop(Signal::TERM);
+    }
+    let failed = client.wait_with_output().unwrap();
+    assert!(!failed.status.success());
+    if restart {
+        f.start(); // Wait through the entire new process's settle period.
+        assert_ne!(f.hub.as_ref().unwrap().id(), old_pid);
+    } else {
+        assert_eq!(f.hub.as_ref().unwrap().id(), old_pid);
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("Docker create deadline exceeded")
+        );
+    }
+    let empty = f.inventory();
+    assert_eq!(empty["settling"], false);
+    assert!(
+        empty["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["inventory_complete"] == true
+                && m["sandboxes"].as_array().unwrap().is_empty())
+    );
+    // Permit a strict retry on B before the original create on A completes.
+    // The pending RPC belongs to the engine; its dead CLI cannot issue start.
+    fs::remove_file(f.root.join("delay-create")).unwrap();
+    let running = f.ok(
+        &["place", "--json"],
+        Some(placement("late-create", false, &[2])),
+    );
+    assert_eq!(running["member"], 2);
+    let pending: Value =
+        serde_json::from_slice(&fs::read(f.root.join("pending-create")).unwrap()).unwrap();
+    let late_id = pending["id"].as_str().unwrap();
+    let mut engine = f.engine();
+    engine["items"][late_id] = pending.clone();
+    f.save_engine(&engine);
+    let view = f.inventory();
+    let observations: Vec<_> = view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|m| m["sandboxes"].as_array().unwrap())
+        .collect();
+    assert_eq!(observations.len(), 2);
+    assert!(
+        observations
+            .iter()
+            .all(|s| s["sandbox_id"] == "late-create")
+    );
+    assert_eq!(
+        observations
+            .iter()
+            .filter(|s| s["state"] == "running")
+            .count(),
+        1
+    );
+    assert_eq!(
+        observations
+            .iter()
+            .filter(|s| s["state"] == "created")
+            .count(),
+        1
+    );
+    let late_handle = format!("1:{late_id}");
+    assert_eq!(view["members"][0]["sandboxes"][0]["handle"], late_handle);
+    assert_eq!(view["members"][0]["sandboxes"][0]["state"], "created");
+    assert_eq!(view["members"][0]["free"]["cpu_millicores"], 800);
+    assert_eq!(
+        view["members"][0]["free"]["memory_bytes"],
+        268435456 - 33554432
+    );
+    assert_eq!(view["members"][0]["free"]["sandbox_slots"], 1);
+    f.release(&running);
+    let only_late = f.inventory();
+    assert!(
+        only_late["members"][1]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(only_late["members"][0]["sandboxes"][0]["state"], "created");
+    assert!(
+        !f.run(
+            &["place", "--json"],
+            Some(placement("late-create", false, &[1]))
+        )
+        .status
+        .success()
+    );
+    assert_eq!(
+        f.engine()["items"][late_id]["state"],
+        "created",
+        "the late record is never started"
+    );
+    f.ok(&["release", &late_handle], None);
+    let released = f.inventory();
+    assert!(
+        released["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(released["members"][0]["free"]["cpu_millicores"], 1000);
+    assert_eq!(released["members"][0]["free"]["memory_bytes"], 268435456);
+    assert_eq!(released["members"][0]["free"]["sandbox_slots"], 2);
+    assert!(
+        !f.engine()["items"]
+            .as_object()
+            .unwrap()
+            .contains_key(late_id)
+    );
+    assert!(
+        released["members"][1]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    f.stop(Signal::TERM);
+}
+
+#[test]
+fn late_create_after_a_short_request_never_starts_and_holds_capacity() {
+    late_create_stays_created(false);
+}
+
+#[test]
+fn late_create_after_sigterm_and_full_settle_never_starts_and_holds_capacity() {
+    late_create_stays_created(true);
 }

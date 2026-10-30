@@ -236,6 +236,11 @@ fn execute(
             Ok(json!({"member": members[0].id.0}))
         }
         Request::Remove { member } => {
+            if inventory.settling {
+                return Err(
+                    "cannot remove a member while the hub is settling previous operations".into(),
+                );
+            }
             let id = MemberId(member);
             if config.pool.member(id).map_err(|e| e.to_string())?.state != MemberState::Draining {
                 return Err("drain member before removing it".into());
