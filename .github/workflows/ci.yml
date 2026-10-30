@@ -47,8 +47,9 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
         run: |
+          cargo test -p homepool-adapter-docker --lib --locked -- --ignored
           docker pull alpine:3.22
-          cargo test -p homepool-adapter-docker --test engine --locked -- --ignored --test-threads=1
+          cargo test -p homepool-adapter-docker --test engine --locked -- --ignored --test-threads=1 --nocapture
 
   structure:
     name: structure

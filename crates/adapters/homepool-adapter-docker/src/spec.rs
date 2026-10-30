@@ -3,7 +3,10 @@ use homepool_core::MemberId;
 use crate::{
     error::Error,
     model::SandboxSpec,
-    settings::{ENV_STDIN_PATH, MANAGED_LABEL, MEMBER_LABEL, MILLICORES_PER_CPU, SANDBOX_LABEL},
+    settings::{
+        CPU_LIMIT_QUANTUM_MILLICORES, ENV_STDIN_PATH, MANAGED_LABEL, MEMBER_LABEL,
+        MILLICORES_PER_CPU, SANDBOX_LABEL,
+    },
 };
 
 pub(crate) fn create_args(member: MemberId, spec: &SandboxSpec) -> Result<Vec<String>, Error> {
@@ -21,6 +24,14 @@ pub(crate) fn create_args(member: MemberId, spec: &SandboxSpec) -> Result<Vec<St
     }
     if spec.command.iter().any(|arg| arg.contains('\0')) {
         return Err(Error::InvalidInput("command"));
+    }
+    if !spec
+        .cpu_millicores
+        .is_multiple_of(CPU_LIMIT_QUANTUM_MILLICORES)
+    {
+        return Err(Error::CpuLimitNotAligned {
+            cpu_millicores: spec.cpu_millicores,
+        });
     }
     // Docker represents NanoCPUs and memory with signed 64-bit integers.
     if spec.cpu_millicores == 0

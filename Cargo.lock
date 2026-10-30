@@ -35,6 +35,7 @@ name = "homepool-adapter-docker"
 version = "0.1.0"
 dependencies = [
  "homepool-core",
+ "rustix",
  "serde",
  "serde_json",
 ]

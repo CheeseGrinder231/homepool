@@ -9,6 +9,7 @@ mod adapter;
 mod command;
 mod endpoint;
 mod error;
+mod limits;
 mod model;
 mod settings;
 mod spec;
@@ -20,3 +21,6 @@ pub use model::{BindMount, EngineCapacity, Environment, Sandbox, SandboxSpec};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod deadline_tests;

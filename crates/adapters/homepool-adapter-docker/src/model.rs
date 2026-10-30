@@ -62,7 +62,7 @@ pub struct SandboxSpec {
     /// Nonsecret logical identity, recorded in `homepool.sandbox`.
     pub sandbox_id: String,
     pub image: String,
-    /// Nonzero CPU limit in millicores.
+    /// Nonzero CPU limit in millicores; must be a multiple of 10.
     pub cpu_millicores: u64,
     /// Nonzero memory limit in bytes (subject to engine minimums).
     pub memory_bytes: u64,
@@ -79,6 +79,13 @@ pub struct Sandbox {
     pub sandbox_id: String,
     /// Docker's state, such as `running`, `exited`, or `created`.
     pub state: String,
+    /// Conservative CPU bound from NanoCPUs and CFS quota/period, rounded up to
+    /// the next 10 millicores to cover runtime quota normalization. `None` means
+    /// no finite quota: never account it as zero usage.
+    /// CPU affinity and parent cgroups can further restrict actual execution.
+    pub cpu_millicores: Option<u64>,
+    /// Hard memory ceiling in bytes. `None` means unlimited, not zero usage.
+    pub memory_bytes: Option<u64>,
 }
 
 /// Engine totals, without inferred free capacity or sandbox-slot policy.
