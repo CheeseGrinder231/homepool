@@ -5,15 +5,20 @@ mod private;
 mod protocol;
 mod settings;
 mod status;
+mod storage;
 
 use protocol::Request;
 use std::{
     env,
     io::{self, Read, Write},
     process::ExitCode,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
-fn run() -> Result<(), String> {
+fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
     let options = arguments::parse(env::args_os().skip(1))?;
     let output = match options.command.as_str() {
         "help" => format!("{}\n", arguments::USAGE),
@@ -33,7 +38,12 @@ fn run() -> Result<(), String> {
                 hub::serve(&path, &socket)?;
                 String::new()
             } else {
-                status::render(&settings::load(&path)?, options.json)?
+                let pool = settings::load(&path)?;
+                let storage = options
+                    .garage_config
+                    .map(|config| storage::probe(config, interrupted))
+                    .transpose()?;
+                status::render(&pool, options.json, storage)?
             }
         }
         command => {
@@ -93,11 +103,17 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let interrupted = Arc::new(AtomicUsize::new(0));
+    let result = match run(&interrupted) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("homepool: {error}");
             ExitCode::FAILURE
         }
+    };
+    match interrupted.load(Ordering::SeqCst) as i32 {
+        signal_hook::consts::SIGINT => ExitCode::from(130),
+        signal_hook::consts::SIGTERM => ExitCode::from(143),
+        _ => result,
     }
 }

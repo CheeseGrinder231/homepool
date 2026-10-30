@@ -1,9 +1,10 @@
 use std::{ffi::OsString, path::PathBuf};
-pub const USAGE: &str = "Usage: homepool [--config FILE] [--socket FILE] COMMAND\nCommands: status [--json], hub, inventory [--json], place --json, release HANDLE, add FILE, remove MEMBER, drain MEMBER\nplace reads a JSON placement specification from stdin. See docs/hub.md.";
+pub const USAGE: &str = "Usage: homepool [--config FILE] [--socket FILE] COMMAND\nCommands: status [--json] [--garage-config FILE], hub, inventory [--json], place --json, release HANDLE, add FILE, remove MEMBER, drain MEMBER\nplace reads a JSON placement specification from stdin. See docs/hub.md.";
 
 pub struct Options {
     pub config: Option<PathBuf>,
     pub socket: Option<PathBuf>,
+    pub garage_config: Option<PathBuf>,
     pub json: bool,
     pub command: String,
     pub operand: Option<OsString>,
@@ -14,6 +15,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
     let mut options = Options {
         config: None,
         socket: None,
+        garage_config: None,
         json: false,
         command: String::new(),
         operand: None,
@@ -27,11 +29,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
             options.command = "version".into();
             return Ok(options);
         }
-        if arg == "--config" || arg == "--socket" {
+        if arg == "--config" || arg == "--socket" || arg == "--garage-config" {
             let selected = if arg == "--config" {
                 &mut options.config
-            } else {
+            } else if arg == "--socket" {
                 &mut options.socket
+            } else {
+                &mut options.garage_config
             };
             if selected.is_some() {
                 return Err(format!(
@@ -91,6 +95,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
     }
     if options.config.is_some() && !["status", "hub"].contains(&options.command.as_str()) {
         return Err("--config is only supported by status and hub".into());
+    }
+    if options.garage_config.is_some() && options.command != "status" {
+        return Err("--garage-config is only supported by status".into());
     }
     Ok(options)
 }

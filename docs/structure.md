@@ -14,8 +14,9 @@ lints: unsafe code is forbidden and Clippy's `all` group is denied.
 | app | Core and adapters |
 
 Core holds pure types and logic, with no I/O. Adapters live under
-`crates/adapters/`, including the Docker engine adapter. Applications include the CLI and any future
-hub. The `xtask` development tool belongs to app. A missing assignment or an unknown
+`crates/adapters/`, including the Docker engine and Garage adapters. Each drives a
+separate installed program. Applications include the CLI and any future hub.
+The `xtask` development tool belongs to app. A missing assignment or an unknown
 layer fails the check. The three allowed directions are fixed by the checker, so
 editing the configuration cannot silently loosen the rules.
 

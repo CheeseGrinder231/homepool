@@ -1,9 +1,10 @@
 # Private member file
 
 `homepool status` reads one UTF-8 TOML file and displays its declared members,
-tiers, states, capabilities and resource budgets. It performs no network probes
-or runtime discovery. States and budgets reflect the file, not observed health,
-current usage or measured free capacity.
+tiers, states, capabilities and resource budgets. By default it performs no network
+probes or runtime discovery. States and budgets reflect the file, not observed
+health, current usage or measured free capacity. The optional Garage probe below
+adds live storage counters without changing these declarations.
 
 Copy [the placeholder example](examples/members.toml) to a private location
 outside this repository, restrict its permissions to its owner, then edit the copy.
@@ -65,7 +66,8 @@ The schema currently needs neither names nor network addresses.
 
 ## Diagnostics
 
-Failures exit with code `1` and write a diagnostic to stderr. Failures before output
+Failures exit with code `1`, except signal cancellation described below, and write
+a diagnostic to stderr. Failures before output
 begins leave stdout empty, including with `--json`. Output failures, such as a reader
 closing a pipe, may leave partial output (including incomplete JSON) on stdout.
 Successful status exits with code `0`.
@@ -90,7 +92,8 @@ the relevant option or environment variable before a file is selected.
 Members are ordered by ascending numeric ID, independent of input order.
 Keys, types, enum spellings and null handling are
 stable for version 1; consumers should parse JSON rather than depend on whitespace
-or object key order. No paths, timestamps or transient runtime data are included.
+or object key order. Without the live option below, no paths, timestamps or
+transient runtime data are included.
 
 For a single member with ID 1 and empty capabilities:
 
@@ -102,8 +105,57 @@ When compute is present, `compute` is an object with exactly `cpu_millicores`,
 `memory_bytes` and `sandbox_slots`, each a JSON integer in the ranges above.
 An empty pool is `{"version":1,"members":[]}`. Consumers must preserve large integer
 values exactly; some JSON runtimes need an integer-aware parser beyond their
-native floating-point range. JSON reports the same declarations as the human
+native floating-point range. Default JSON reports the same declarations as the human
 output; `compute: null` distinguishes no compute from an all-zero compute budget.
+
+## Optional live Garage storage
+
+```sh
+cargo run -p homepool-cli -- --config "$HOMEPOOL_CONFIG" status --garage-config "$GARAGE_CONFIG"
+cargo run -p homepool-cli -- --config "$HOMEPOOL_CONFIG" status --garage-config "$GARAGE_CONFIG" --json
+```
+
+`--garage-config FILE` selects the existing Garage program's private configuration.
+It may occur before or after `status`, once only. It has no implicit environment
+fallback. The installed `garage` executable must be available on `PATH`.
+Only this explicit option performs live probes, through Garage's configured RPC
+connection. No admin token or S3 credential is accepted as a command argument.
+See [Garage setup and consumer isolation](garage.md).
+
+During a live Garage probe, Ctrl-C (`SIGINT`) and `SIGTERM` request cooperative
+cancellation. The CLI stops the local Garage process group, including wrapper
+descendants, and reaps its direct child before exiting with code `130` for SIGINT
+or `143` for SIGTERM. A pending probe produces no stdout and reports the fixed
+sanitized cancellation diagnostic. Cancellation of a mutation has the same unknown
+outcome as a deadline: inspect Garage privately before retrying; no operation is
+automatically retried. Uncatchable termination cannot perform this cleanup.
+
+After the probe returns and child cleanup is complete, SIGINT and SIGTERM use
+ordinary Unix signal termination, including when status output is blocked on a
+stalled pipe. Shells report `130` or `143`, respectively; partial output may remain.
+
+This is an additive, opt-in extension of status JSON version 1: with the option,
+the top-level object also contains `storage`. Without the option, this field is
+omitted and the previous JSON shape is unchanged. The member-file schema is unchanged.
+The `storage` object has four unsigned 64-bit integer fields:
+
+| Field | Meaning |
+| --- | --- |
+| `buckets` | Number of buckets with a reserved `homepool-consumer-ID` global alias. |
+| `objects` | Sum of completed object counts in those buckets. |
+| `used_bytes` | Sum of logical completed-object bytes. |
+| `unfinished_upload_bytes` | Sum of unfinished multipart-upload bytes, separate from `used_bytes`. |
+
+Each bucket is counted once even if it has multiple aliases. Other buckets are
+excluded. Counters may lag recent writes/deletes and do not measure physical disk
+usage, replication overhead or remaining member capacity. An empty store returns
+zero counters. Other probe failures, malformed counters or overflowing sums exit `1`,
+leaves stdout empty and reports a fixed diagnostic without subprocess output,
+configuration paths, credentials or server error bodies. No credentials or node
+addresses are included in successful status output either.
+
+Human output includes the single-copy warning: **a single-node layout keeps a
+single copy; it is not a backup.** The same warning applies when using JSON.
 
 ## Optional Docker endpoints and lifecycle
 
