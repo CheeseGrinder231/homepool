@@ -5,7 +5,8 @@ use std::fmt::Write;
 use homepool_core::{ComputeBudget, MemberState, Pool, Tier};
 use serde::Serialize;
 
-use crate::settings::SCHEMA_VERSION;
+/// Version of the status JSON output contract, independent of the member-file schema.
+const STATUS_JSON_VERSION: u64 = 1;
 
 #[derive(Serialize)]
 struct Status {
@@ -46,7 +47,7 @@ impl From<ComputeBudget> for Budget {
 
 pub fn render(pool: &Pool, json: bool) -> Result<String, String> {
     let status = Status {
-        version: SCHEMA_VERSION,
+        version: STATUS_JSON_VERSION,
         members: pool
             .members()
             .map(|member| MemberStatus {
@@ -97,4 +98,18 @@ pub fn render(pool: &Pool, json: bool) -> Result<String, String> {
         .expect("write to String");
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_json_v1_contract() {
+        assert_eq!(STATUS_JSON_VERSION, 1);
+        assert_eq!(
+            render(&Pool::default(), true).unwrap(),
+            "{\"version\":1,\"members\":[]}\n"
+        );
+    }
 }
