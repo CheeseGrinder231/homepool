@@ -202,9 +202,16 @@ fn ownership_requires_all_three_labels_and_exact_member_and_id() {
         id: id.clone(),
         labels: Some(labels),
         state: "running".into(),
+        limits: crate::limits::Limits {
+            nano_cpus: 1_250_000_000,
+            cpu_quota: 0,
+            cpu_period: 0,
+            memory_bytes: 64 * 1024 * 1024,
+        },
     };
     let unlabelled: Observation = serde_json::from_value(serde_json::json!({
-        "id": id, "labels": null, "state": "created"
+        "id": id, "labels": null, "state": "created",
+        "limits": {"nano_cpus": 0, "cpu_quota": 0, "cpu_period": 0, "memory_bytes": 0}
     }))
     .unwrap();
     assert!(matches!(
@@ -235,5 +242,181 @@ fn ownership_requires_all_three_labels_and_exact_member_and_id() {
     ));
     for invalid in ["--all", "", "short"] {
         assert!(validate_id(invalid).is_err());
+    }
+}
+
+#[test]
+fn inventory_limits_round_up_and_unbounded_is_not_zero() {
+    use crate::limits::Limits;
+    for (nano_cpus, cpu_quota, cpu_period, expected) in [
+        (1_250_000_000, 0, 0, Some(1250)),
+        (500_000_001, 0, 0, Some(510)),
+        (0, 0, 0, None),
+        (0, -1, 100_000, None),
+        (0, 25_001, 100_000, Some(260)),
+        (0, 50_000, 0, Some(500)),
+        (0, 50_001, 0, Some(510)),
+        (0, 25_001, 200_000, Some(130)),
+        (501_000_000, 0, 0, Some(510)),
+        (0, 1, 0, Some(10)),
+        (2_000_000_000, 50_000, 100_000, Some(500)),
+    ] {
+        let limits = Limits {
+            nano_cpus,
+            cpu_quota,
+            cpu_period,
+            memory_bytes: 0,
+        };
+        assert_eq!(limits.cpu_millicores().unwrap(), expected);
+    }
+    for (cpu_quota, cpu_period) in [(-2, 100_000), (i64::MAX, 1), (i64::MAX, 500)] {
+        assert!(
+            Limits {
+                nano_cpus: 0,
+                cpu_quota,
+                cpu_period,
+                memory_bytes: 0
+            }
+            .cpu_millicores()
+            .is_err()
+        );
+    }
+    let id = "a".repeat(64);
+    let observation = |nano_cpus, memory_bytes| {
+        serde_json::from_value(serde_json::json!({
+        "id": id, "state": "running",
+        "labels": {"homepool.managed": "true", "homepool.member": "7", "homepool.sandbox": "sandbox-a"},
+        "limits": {"nano_cpus": nano_cpus, "cpu_quota": 0, "cpu_period": 0, "memory_bytes": memory_bytes}
+    })).unwrap()
+    };
+    let sized =
+        owned_observation(MemberId(7), &id, observation(1_250_000_000, 67_108_864)).unwrap();
+    assert_eq!(sized.cpu_millicores, Some(1250));
+    assert_eq!(sized.memory_bytes, Some(67_108_864));
+    let unbounded = owned_observation(MemberId(7), &id, observation(0, 0)).unwrap();
+    assert_eq!(unbounded.cpu_millicores, None);
+    assert_eq!(unbounded.memory_bytes, None);
+    assert!(
+        serde_json::from_value::<Observation>(
+            serde_json::json!({"id": id, "state": "running", "labels": {}})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn deadlines_reject_invalid_configuration_and_expired_work() {
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+    let docker = Docker::new(Endpoint::unix("/run/unused.sock").unwrap(), MemberId(7));
+    assert!(
+        docker
+            .clone()
+            .with_operation_timeout(Duration::ZERO)
+            .is_err()
+    );
+    assert!(docker.with_operation_timeout(Duration::MAX).is_err());
+    // An expired operation must not even launch the transport.
+    assert!(matches!(
+        command::execute(
+            &mut Command::new("no-such-program"),
+            "test",
+            &[],
+            Instant::now()
+        ),
+        Err(Error::Deadline("test"))
+    ));
+}
+
+#[test]
+fn transport_streams_both_pipes_and_redacts_failures() {
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+    let input = vec![b'x'; 256 * 1024];
+    let mut echo = Command::new("sh");
+    echo.args(["-c", "head -c 131072 /dev/zero; cat"]);
+    let output = command::execute(
+        &mut echo,
+        "test",
+        &input,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+    assert_eq!(&output[..131072], vec![0; 131072]);
+    assert_eq!(&output[131072..], input);
+    let mut failure = Command::new("sh");
+    failure.args(["-c", "echo dummy-secret >&2; exit 19"]);
+    let error = command::execute(
+        &mut failure,
+        "test",
+        &input,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Command { code: Some(19), .. }));
+    assert!(!format!("{error:?} {error}").contains("dummy-secret"));
+}
+
+#[test]
+fn recovery_errors_preserve_distinct_redacted_command_causes() {
+    let id = "a".repeat(64);
+    let error = crate::adapter::start_created(&id, |operation, _| {
+        Err(Error::Command {
+            operation,
+            code: Some(if operation == "start" { 19 } else { 23 }),
+        })
+    })
+    .unwrap_err();
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .to_string()
+            .contains("exit Some(19)")
+    );
+    let Error::StartFailed {
+        container_id,
+        start_error,
+        cleanup_error,
+        outcome_uncertain,
+    } = error
+    else {
+        panic!("recovery error")
+    };
+    assert_eq!(container_id, id);
+    assert!(outcome_uncertain);
+    assert!(matches!(
+        *start_error,
+        Error::Command {
+            operation: "start",
+            code: Some(19)
+        }
+    ));
+    assert!(matches!(
+        *cleanup_error.unwrap(),
+        Error::Command {
+            operation: "cleanup",
+            code: Some(23)
+        }
+    ));
+}
+
+#[test]
+fn starts_reject_unaligned_cpu_before_contacting_the_engine() {
+    let docker = Docker::new(Endpoint::unix("/run/unused.sock").unwrap(), MemberId(7));
+    let mut request = spec();
+    for cpu_millicores in [1, 9, 501, 1251] {
+        request.cpu_millicores = cpu_millicores;
+        assert!(
+            matches!(docker.start(&request), Err(Error::CpuLimitNotAligned { cpu_millicores: rejected }) if rejected == cpu_millicores)
+        );
+    }
+    for (cpu_millicores, formatted) in [(10, "0.010"), (510, "0.510"), (1250, "1.250")] {
+        request.cpu_millicores = cpu_millicores;
+        let args = spec::create_args(MemberId(7), &request).unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--cpus", formatted]));
     }
 }

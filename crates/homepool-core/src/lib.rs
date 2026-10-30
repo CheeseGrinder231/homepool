@@ -76,7 +76,8 @@ pub struct SandboxRequest {
     pub preferences: Vec<MemberId>,
 }
 
-/// Pool-local reservation identity, allocated monotonically and never reused.
+/// Pool-local reservation identity. New allocations advance past all imported ids.
+/// Callers restoring work must retain the same id for the same allocation.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ReservationId(pub u64);
 
@@ -103,6 +104,10 @@ pub enum Error {
     NoCapacity,
     /// The reservation is absent or has already been released.
     UnknownReservation(ReservationId),
+    /// Importing would overwrite an outstanding allocation.
+    DuplicateReservation(ReservationId),
+    /// An imported allocation must consume exactly one sandbox slot.
+    InvalidAllocation,
     /// All pool-local reservation identifiers have been issued.
     ReservationIdsExhausted,
 }
@@ -114,6 +119,8 @@ impl fmt::Display for Error {
             Self::UnknownMember(id) => write!(f, "unknown member {}", id.0),
             Self::NoCapacity => f.write_str("no member has enough free compute capacity"),
             Self::UnknownReservation(id) => write!(f, "unknown reservation {}", id.0),
+            Self::DuplicateReservation(id) => write!(f, "duplicate reservation {}", id.0),
+            Self::InvalidAllocation => f.write_str("allocation must consume exactly one slot"),
             Self::ReservationIdsExhausted => f.write_str("reservation identifiers exhausted"),
         }
     }
@@ -144,7 +151,8 @@ impl Entry {
 }
 
 /// In-memory membership and accounting, initially empty. Budgets describe capacity
-/// dedicated to this pool; callers must reserve existing work before admitting more.
+/// dedicated to this pool; callers must import existing work before admitting more.
+/// Keep members inactive until their complete inventory has been accounted for.
 /// Members and reservations can only be read through shared references or snapshots.
 #[derive(Debug, Default)]
 pub struct Pool {
@@ -252,18 +260,44 @@ impl Pool {
                 sandbox_slots: 1,
             },
         };
-        // Placement proved these additions fit the fixed member budget.
-        let used = &mut self
+        self.import_allocation(reservation)
+    }
+
+    /// Records existing work on its exact member, regardless of admission state.
+    /// The caller supplies the stable reservation id (for example, from a mapping
+    /// keyed by a sandbox's full engine handle), CPU, memory, and exactly one slot.
+    /// Duplicate outstanding ids, unknown members, and allocations exceeding any
+    /// declared budget are rejected atomically. No alternate member is selected.
+    ///
+    /// Importing never activates a member. Keep incomplete or failed inventories
+    /// draining or unreachable, including if an import fails. Only admit new work
+    /// after accounting for the entire inventory. New reservation ids advance past
+    /// the highest imported id; callers must not repurpose ids for different work.
+    pub fn import_allocation(&mut self, allocation: Reservation) -> Result<Reservation, Error> {
+        if self.reservations.contains_key(&allocation.id) {
+            return Err(Error::DuplicateReservation(allocation.id));
+        }
+        if allocation.budget.sandbox_slots != 1 {
+            return Err(Error::InvalidAllocation);
+        }
+        let entry = self
             .members
-            .get_mut(&member_id)
-            .expect("placed member")
-            .used;
-        used.cpu_millicores += reservation.budget.cpu_millicores;
-        used.memory_bytes += reservation.budget.memory_bytes;
-        used.sandbox_slots += 1;
-        self.reservations.insert(reservation.id, reservation);
-        self.last_reservation_id = next_id;
-        Ok(reservation)
+            .get_mut(&allocation.member_id)
+            .ok_or(Error::UnknownMember(allocation.member_id))?;
+        let total = entry.member.capabilities.compute.ok_or(Error::NoCapacity)?;
+        let budget = allocation.budget;
+        if budget.cpu_millicores > total.cpu_millicores - entry.used.cpu_millicores
+            || budget.memory_bytes > total.memory_bytes - entry.used.memory_bytes
+            || budget.sandbox_slots > total.sandbox_slots - entry.used.sandbox_slots
+        {
+            return Err(Error::NoCapacity);
+        }
+        entry.used.cpu_millicores += budget.cpu_millicores;
+        entry.used.memory_bytes += budget.memory_bytes;
+        entry.used.sandbox_slots += budget.sandbox_slots;
+        self.reservations.insert(allocation.id, allocation);
+        self.last_reservation_id = self.last_reservation_id.max(allocation.id.0);
+        Ok(allocation)
     }
 
     /// Iterates over outstanding reservations in ascending reservation-id order.
