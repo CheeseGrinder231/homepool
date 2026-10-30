@@ -773,3 +773,119 @@ fn source_inventory_skips_fixtures_docs_non_rust_and_empty_files() {
     repo.git(&["add", "."]);
     assert!(check(repo.root(), Some("HEAD")).is_ok());
 }
+
+#[test]
+fn tuple_field_chains_are_code_but_bare_macro_addresses_still_count() {
+    let repo = Repository::new();
+    let fields = ".0".repeat(4);
+    let numeric_fields = fields.strip_prefix('.').unwrap();
+    repo.write(
+        "src/lib.rs",
+        &format!(
+            r#"
+pub fn fields(value: ((((u8,),),),)) -> u8 {{ value{fields} }}
+pub fn parenthesized(value: ((((u8,),),),)) -> u8 {{ (value){fields} }}
+pub fn spaced(value: ((((u8,),),),)) -> u8 {{ (value) . /* field */ {numeric_fields} }}
+pub const MACRO: &str = stringify!((value){fields});
+"#
+        ),
+    );
+    let output = Command::new("cargo")
+        .args(["check", "--offline", "--locked"])
+        .current_dir(repo.root())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "tuple field controls must compile");
+    assert!(check(repo.root(), Some("HEAD")).is_ok());
+    let address = Ipv4Addr::new(10, 20, 30, 40);
+    repo.write(
+        "src/lib.rs",
+        &format!(
+            r#"
+#[doc = stringify!({address})]
+pub const BARE: &str = stringify!({address});
+pub const TEXT: &str = "(value){fields}";
+// (value){fields}
+"#
+        ),
+    );
+    let findings = literals::scan(repo.root(), &[PathBuf::from("src/lib.rs")], "").unwrap();
+    assert_eq!(findings.len(), 4, "{findings:?}");
+    assert!(findings.iter().all(|f| f.ends_with("IPv4 literal")));
+}
+
+#[test]
+fn version_context_exempts_metadata_but_not_standalone_addresses() {
+    let repo = Repository::new();
+    let address = Ipv4Addr::new(10, 20, 30, 40);
+    for version in [
+        format!("1.2.3+{address}"),
+        format!("1.2.3-beta+build.{address}"),
+        format!("1.2.3-{address}"),
+        format!("1.2.3-{address}+build"),
+    ] {
+        for (file, text) in [
+            ("version.txt", format!("version = {version}\n")),
+            (
+                "version.rs",
+                format!("// {version}\nconst VERSION: &str = {version:?};\n"),
+            ),
+        ] {
+            repo.write(file, &text);
+            let findings = literals::scan(repo.root(), &[PathBuf::from(file)], "").unwrap();
+            assert!(findings.is_empty(), "{file}: {findings:?}");
+        }
+    }
+    for text in [
+        address.to_string(),
+        format!("+{address}"),
+        format!("endpoint+{address}"),
+        format!("1.2+{address}"),
+        format!("{address}+{address}"),
+        format!("1.2.3+ {address}"),
+        format!("1.2.3+{address}+extra"),
+    ] {
+        assert!(!literals::in_line(&text).is_empty(), "{text}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exclusions_do_not_allow_symlinks_in_current_or_historical_inventory() {
+    use std::os::unix::fs::symlink;
+    let repo = Repository::new();
+    for file in [
+        "docs/link.txt",
+        "NOTES.md",
+        "LICENSE",
+        "xtask/tests/fixtures/link.rs",
+    ] {
+        let path = repo.root().join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A dangling link must fail too, without trying to read its target.
+        symlink("missing-target", &path).unwrap();
+        repo.git(&["add", file]);
+        let files = history::working_files(repo.root()).unwrap();
+        assert!(
+            literals::scan(repo.root(), &files, "")
+                .unwrap_err()
+                .contains("symlinks"),
+            "{file}"
+        );
+        assert!(
+            check(repo.root(), Some("HEAD"))
+                .unwrap_err()
+                .contains("symlinks")
+        );
+        let head = repo.commit();
+        assert!(
+            history::Snapshot::create(repo.root(), &head)
+                .err()
+                .unwrap()
+                .contains("unsupported Git tree entry")
+        );
+        repo.git(&["rm", file]);
+        repo.commit();
+        assert!(check(repo.root(), Some("HEAD")).is_ok());
+    }
+}

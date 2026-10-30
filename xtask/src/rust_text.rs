@@ -69,10 +69,38 @@ pub fn tokens(source: &str) -> Vec<Token<'_>> {
         .collect()
 }
 
+/// Dots and numeric fields following an expression-ending token. Keep macro
+/// input here: bare macro addresses have no preceding field-projection dot.
+pub fn field_projections(source: &str) -> Vec<Range<usize>> {
+    tokens(source)
+        .windows(3)
+        .filter(|window| {
+            let [previous, dot, field] = window else {
+                unreachable!()
+            };
+            dot.kind == T::Dot
+                && (matches!(previous.kind, T::Ident | T::RawIdent | T::Literal { .. })
+                    || matches!(previous.text, ")" | "]" | "}" | "?"))
+                && matches!(
+                    field.kind,
+                    T::Literal {
+                        kind: L::Int { .. } | L::Float { .. },
+                        ..
+                    }
+                )
+        })
+        .map(|window| window[1].start..window[2].start + window[2].text.len())
+        .collect()
+}
+
 pub fn closing(tokens: &[Token<'_>], start: usize) -> Option<usize> {
+    delimiter_end(tokens.iter().skip(start).map(|token| token.text)).map(|end| start + end)
+}
+
+fn delimiter_end<'a>(tokens: impl Iterator<Item = &'a str>) -> Option<usize> {
     let mut depth = 0;
-    for (i, token) in tokens.iter().enumerate().skip(start) {
-        match token.text {
+    for (i, text) in tokens.enumerate() {
+        match text {
             "{" | "(" | "[" => depth += 1,
             "}" | ")" | "]" => {
                 depth -= 1;
@@ -112,19 +140,7 @@ pub fn code_tokens(source: &str) -> Vec<Token<'_>> {
                 .peek()
                 .is_some_and(|t| matches!(t.text, "{" | "(" | "["))
             {
-                let mut depth = 0;
-                for input in iter.by_ref() {
-                    match input.text {
-                        "{" | "(" | "[" => depth += 1,
-                        "}" | ")" | "]" => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                delimiter_end(iter.by_ref().map(|token| token.text));
                 continue;
             }
         }
