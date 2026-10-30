@@ -661,3 +661,115 @@ fn only_the_exact_lockfile_registry_source_is_exempt() {
         1
     );
 }
+
+#[test]
+fn compilable_block_local_modules_keep_distinct_namespaces() {
+    for (name, source, expected) in [
+        (
+            "local and module-level names",
+            include_str!("../tests/fixtures/structure/modules-local-shadow.rs"),
+            0,
+        ),
+        (
+            "names in separate blocks",
+            include_str!("../tests/fixtures/structure/modules-local-blocks.rs"),
+            0,
+        ),
+        (
+            "cycle inside a local module",
+            include_str!("../tests/fixtures/structure/modules-local-cycle.rs"),
+            2,
+        ),
+    ] {
+        let repo = Repository::new();
+        repo.write("src/lib.rs", source);
+        let output = Command::new("cargo")
+            .args(["check", "--offline", "--locked"])
+            .current_dir(repo.root())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{name} must compile");
+        let measured = measure(
+            repo.root(),
+            &history::working_files(repo.root()).unwrap(),
+            &history::repository_url(repo.root()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            measured.counts.module_cycles, expected,
+            "{name}: {:?}",
+            measured.findings
+        );
+    }
+}
+
+#[test]
+fn new_counts_and_issue_linked_allowances_work_end_to_end() {
+    for (metric, files, amount) in [
+        (
+            "module_cycles",
+            vec![(
+                "src/lib.rs",
+                include_str!("../tests/fixtures/structure/modules-fail.rs"),
+            )],
+            3,
+        ),
+        (
+            "source_copies",
+            vec![("copy.rs", "pub fn value() -> u8 { 1 }\n")],
+            1,
+        ),
+        (
+            "settings_in_code",
+            vec![("src/lib.rs", "const RETRY_COUNT: u8 = 3;\n")],
+            1,
+        ),
+    ] {
+        let repo = Repository::new();
+        for (path, text) in files {
+            repo.write(path, text);
+        }
+        let base = repo.git(&["rev-parse", "HEAD"]);
+        assert!(
+            check(repo.root(), Some(&base))
+                .unwrap_err()
+                .contains(metric)
+        );
+        let repository = history::repository_url(repo.root()).unwrap();
+        // The issue URL also contributes one instance literal.
+        repo.write("structure/allowances.toml", &format!(
+            "[[allowances]]\nid = 'debt'\nmetric = '{metric}'\namount = {amount}\nreason = 'temporary fixture debt'\nissue = '{repository}/issues/8'\n\n[[allowances]]\nid = 'issue-links'\nmetric = 'instance_literals'\namount = 2\nreason = 'fixture allowance issue links'\nissue = '{repository}/issues/8'\n"));
+        assert!(check(repo.root(), Some(&base)).is_ok(), "{metric}");
+        let head = repo.commit();
+        assert!(
+            check(repo.root(), Some(&base)).is_ok(),
+            "committed {metric}"
+        );
+        assert!(
+            check(repo.root(), Some(&head)).is_ok(),
+            "historical {metric}"
+        );
+    }
+}
+
+#[test]
+fn source_inventory_skips_fixtures_docs_non_rust_and_empty_files() {
+    let repo = Repository::new();
+    let source = "const RETRY_COUNT: u8 = 3;\n";
+    for path in ["xtask/tests/fixtures/copy.rs", "docs/copy.rs", "input.txt"] {
+        repo.write(path, source);
+    }
+    for path in ["empty.rs", "other-empty.rs"] {
+        repo.write(path, "");
+    }
+    assert!(check(repo.root(), Some("HEAD")).is_ok());
+    repo.write("untracked.rs", source);
+    assert!(
+        check(repo.root(), Some("HEAD"))
+            .unwrap_err()
+            .contains("settings_in_code")
+    );
+    repo.write("untracked.rs", "pub fn independent() {}\n");
+    repo.git(&["add", "."]);
+    assert!(check(repo.root(), Some("HEAD")).is_ok());
+}

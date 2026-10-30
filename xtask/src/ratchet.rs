@@ -1,4 +1,4 @@
-use crate::config::{Allowance, Counts, METRICS};
+use crate::config::{Allowance, Counts, DEBT_METRICS, METRICS};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn validate_allowances(allowances: &[Allowance], issue_prefix: &str) -> Result<(), String> {
@@ -8,7 +8,7 @@ pub fn validate_allowances(allowances: &[Allowance], issue_prefix: &str) -> Resu
         if entry.id.trim().is_empty() || !ids.insert(&entry.id) {
             return Err("allowances require nonempty, unique ids".into());
         }
-        if !["instance_literals", "layer_violations"].contains(&entry.metric.as_str())
+        if !DEBT_METRICS.contains(&entry.metric.as_str())
             || entry.amount == 0
             || entry.reason.trim().is_empty()
             || number.is_empty()
