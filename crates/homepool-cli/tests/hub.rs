@@ -1055,6 +1055,10 @@ fn invalid_profiles_fail_on_read_and_add_without_docker_calls() {
             "runner",
             "volumes = [{name = 'cache', target = 'relative'}]",
         ),
+        (
+            "runner",
+            "volumes = [{name = 'cache.data', target = '/cache'}]",
+        ),
         ("runner", "volumes = [{name = 'cache', target = '/ca,che'}]"),
         (
             "runner",
@@ -1290,7 +1294,7 @@ binds = [{{source = {}, target = "/input", read_only = true}}]
     f.start();
     // Volumes intentionally outlive release; only the test owns their cleanup.
     let volume = ProfileVolume {
-        name: format!("homepool-3-{identity}-cache"),
+        name: format!("homepool-3-{identity}.cache"),
         container_name: format!("homepool-3-{identity}"),
     };
     let placed = f.ok(
@@ -1348,4 +1352,97 @@ binds = [{{source = {}, target = "/input", read_only = true}}]
             .status
             .success()
     );
+}
+
+#[test]
+#[ignore = "requires a local Docker engine and alpine:3.22"]
+fn real_profile_volumes_keep_ambiguous_boundaries_and_retained_data_separate() {
+    let mut f = Fixture::new(true);
+    let base = f.root.file_name().unwrap().to_str().unwrap();
+    let identities = [format!("{base}-job-a"), format!("{base}-job")];
+    f.write(
+        "members.toml",
+        &format!(
+            r#"{}
+[members.capabilities.compute.profiles.runner]
+volumes = [{{name = "cache", target = "/cache"}}, {{name = "a-cache", target = "/a-cache"}}]
+"#,
+            f.member(4, "active", 1000, 2)
+        ),
+    );
+    let volumes: Vec<_> = identities
+        .iter()
+        .flat_map(|identity| {
+            ["cache", "a-cache"].map(|suffix| ProfileVolume {
+                name: format!("homepool-4-{identity}.{suffix}"),
+                container_name: format!("homepool-4-{identity}"),
+            })
+        })
+        .collect();
+    f.start();
+    for retained in [false, true] {
+        let mut placements = Vec::new();
+        let mut names = std::collections::BTreeSet::new();
+        for (index, identity) in identities.iter().enumerate() {
+            let placed = f.ok(
+                &["place", "--json"],
+                Some(profile_placement(identity, "runner")),
+            );
+            let container = placed["handle"]
+                .as_str()
+                .unwrap()
+                .split_once(':')
+                .unwrap()
+                .1;
+            f.created.borrow_mut().push((4, container.into()));
+            let inspected = profile_docker(&["container", "inspect", container]);
+            assert!(inspected.status.success());
+            let details: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+            let mounts = details[0]["Mounts"].as_array().unwrap();
+            for suffix in ["cache", "a-cache"] {
+                let target = format!("/{suffix}");
+                let mount = mounts
+                    .iter()
+                    .find(|mount| mount["Destination"] == target)
+                    .unwrap();
+                assert_eq!(mount["Name"], format!("homepool-4-{identity}.{suffix}"));
+                assert!(names.insert(mount["Name"].as_str().unwrap().to_string()));
+                let file = format!("{target}/value");
+                let expected = format!("{index}-{suffix}");
+                if !retained {
+                    assert!(
+                        profile_docker(&[
+                            "container",
+                            "exec",
+                            container,
+                            "sh",
+                            "-c",
+                            "printf '%s' \"$1\" > \"$2\"",
+                            "sh",
+                            &expected,
+                            &file
+                        ])
+                        .status
+                        .success()
+                    );
+                } else {
+                    let read = profile_docker(&["container", "exec", container, "cat", &file]);
+                    assert!(read.status.success());
+                    assert_eq!(read.stdout, expected.as_bytes());
+                }
+            }
+            placements.push(placed);
+        }
+        assert_eq!(names.len(), 4);
+        for placed in &placements {
+            f.release(placed);
+        }
+        for volume in &volumes {
+            assert!(
+                profile_docker(&["volume", "inspect", &volume.name])
+                    .status
+                    .success()
+            );
+        }
+    }
 }

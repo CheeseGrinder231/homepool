@@ -43,11 +43,12 @@ Use the returned full container id for `stop` and `remove`.
 ownership before acting. Container ids are validated as full hexadecimal ids.
 Labels identify management scope; an engine administrator can forge them, so they
 are not an authorization boundary. Removing a running container fails: stop it
-first. Volumes are never deleted. Profile volume names append the validated volume
-suffix to the deterministic container name; its fixed alphanumeric prefix makes
-the result legal for every accepted sandbox identity, even identities starting
-with punctuation. Release and container removal retain these volumes. If starting fails after creation, the adapter
-attempts cleanup; a cleanup failure returns the container id for manual recovery.
+first. Volumes are never deleted. Profile volume names use
+`<deterministic-container-name>.<suffix>`; suffixes forbid dots, so splitting at
+the last dot uniquely recovers both parts. The fixed alphanumeric container
+prefix makes the result legal for every accepted sandbox identity, even
+identities starting with punctuation. Release and container removal retain these
+volumes. If starting fails after creation, the adapter attempts cleanup; a cleanup failure returns the container id for manual recovery.
 Communication failures can leave an unknown result; reconcile with `list` before
 retrying creation. List errors, including concurrent removal, are returned rather
 than converted into empty results. Capacity reads report engine CPU and memory

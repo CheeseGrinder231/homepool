@@ -33,7 +33,7 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
-/// Names are nonempty ASCII identifiers, also safe as Docker volume suffixes.
+/// Profile names are nonempty ASCII identifiers.
 pub fn valid_name(name: &str) -> bool {
     name.bytes()
         .next()
@@ -66,6 +66,7 @@ impl LaunchProfile {
         }
         if self.volumes.iter().any(|m| {
             !valid_name(&m.name)
+                || m.name.contains('.')
                 || m.name.len() > MAX_VOLUME_SUFFIX_BYTES
                 || !valid_mount_path(&m.target)
         }) {
@@ -104,12 +105,14 @@ impl LaunchProfile {
                 format!("{}:{}", mount.target, mount.options),
             ]);
         }
+        // Suffixes exclude dot, so the last dot uniquely separates the exact
+        // container name (which may contain dots) from the volume suffix.
         for mount in &self.volumes {
             let read_only = if mount.read_only { ",readonly" } else { "" };
             args.extend([
                 "--mount".into(),
                 format!(
-                    "type=volume,src={container}-{},dst={}{read_only}",
+                    "type=volume,src={container}.{},dst={}{read_only}",
                     mount.name, mount.target
                 ),
             ]);

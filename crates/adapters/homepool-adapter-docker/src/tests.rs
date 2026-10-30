@@ -489,7 +489,7 @@ fn profile_arguments_are_typed_and_volume_names_preserve_every_valid_identity() 
     for identity in ["-", "_", ".", "Abc-_.123", &"x".repeat(128)] {
         request.sandbox_id = identity.into();
         let args = spec::create_args(MemberId(u64::MAX), &request).unwrap();
-        let volume = format!("homepool-{}-{identity}-cache", u64::MAX);
+        let volume = format!("homepool-{}-{identity}.cache", u64::MAX);
         assert!(volume.bytes().next().unwrap().is_ascii_alphanumeric());
         assert!(
             volume
@@ -542,4 +542,37 @@ fn volume_suffix_limit_fits_the_longest_sandbox_and_member_identity() {
     assert_eq!(name.len(), 255);
     request.profile.volumes[0].name.push('v');
     assert!(spec::create_args(MemberId(u64::MAX), &request).is_err());
+}
+
+#[test]
+fn volume_boundaries_are_unique_with_multiple_suffixes_in_one_profile() {
+    let mut request = spec();
+    for name in ["cache", "a-cache"] {
+        request.profile.volumes.push(VolumeMount {
+            name: name.into(),
+            target: format!("/{name}"),
+            read_only: false,
+        });
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for identity in ["job-a", "job", "job.cache", "job."] {
+        request.sandbox_id = identity.into();
+        for arg in spec::create_args(MemberId(1), &request).unwrap() {
+            if let Some(mount) = arg.strip_prefix("type=volume,src=") {
+                let (name, _) = mount.split_once(',').unwrap();
+                let (container, suffix) = name.rsplit_once('.').unwrap();
+                assert_eq!(container, format!("homepool-1-{identity}"));
+                assert!(request.profile.volumes.iter().any(|v| v.name == suffix));
+                assert!(
+                    names.insert(name.to_string()),
+                    "volume names must be distinct"
+                );
+            }
+        }
+    }
+    assert_eq!(names.len(), 8);
+    assert!(names.contains("homepool-1-job-a.cache"));
+    assert!(names.contains("homepool-1-job.a-cache"));
+    request.profile.volumes[0].name = "cache.data".into();
+    assert!(spec::create_args(MemberId(1), &request).is_err());
 }

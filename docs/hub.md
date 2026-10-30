@@ -127,7 +127,8 @@ profile or one offered only by full or draining members has no eligible capacity
 After inventory and selection, swap below the requested memory is rejected with
 `profile memory swap must be at least requested memory` before reserving capacity
 or creating a container. Profile settings may differ between members offering the
-same name; the selected member's settings apply.
+same name; the selected member's settings apply. A swap rejection on the selected
+member does not fall back to another member.
 Omitting `profile` preserves existing Docker arguments. The request accepts no
 launch flags, mount paths, volumes or profile settings.
 
@@ -308,7 +309,7 @@ and exactly one container per member and identity.
 With a disposable Docker engine and `alpine:3.22` pulled, run:
 
 ```sh
-cargo test -p homepool-cli --test hub -- --ignored --nocapture
+cargo test -p homepool-cli --test hub -- --ignored --test-threads=1 --nocapture
 ```
 
 This repeats the actual-process restart and drain test with real running

@@ -92,9 +92,10 @@ the relevant option or environment variable before a file is selected.
 `version` versions this output contract independently of the member-file schema.
 Members are ordered by ascending numeric ID, independent of input order.
 Keys, types, enum spellings and null handling are
-stable for version 1; consumers should parse JSON rather than depend on whitespace
-or object key order. Without the live option below, no paths, timestamps or
-transient runtime data are included.
+stable for version 1; additive optional keys may be introduced without a version
+change. Consumers must ignore unknown optional keys and should parse JSON rather
+than depend on whitespace or object key order. Without the live option below, no
+paths, timestamps or transient runtime data are included.
 
 For a single member with ID 1 and empty capabilities:
 
@@ -102,10 +103,11 @@ For a single member with ID 1 and empty capabilities:
 {"version":1,"members":[{"id":1,"tier":"core","state":"active","capabilities":{"compute":null,"storage_bytes":0}}]}
 ```
 
-When compute is present, `compute` is an object with exactly `cpu_millicores`,
+When compute is present, `compute` has three required keys: `cpu_millicores`,
 `memory_bytes` and `sandbox_slots`, each a JSON integer in the ranges above.
-When profiles are declared, compute also includes `profiles`, a sorted array of
-names only; an empty array is omitted. Profile settings and paths never appear
+The optional `profiles` key is an additive version-1 extension: when profiles are
+declared, it contains a sorted array of names only; an empty array is omitted.
+Output without profiles is unchanged. Profile settings and paths never appear
 in either human or JSON status output.
 An empty pool is `{"version":1,"members":[]}`. Consumers must preserve large integer
 values exactly; some JSON runtimes need an integer-aware parser beyond their
@@ -174,12 +176,12 @@ See [hub.md](hub.md) for endpoint examples, private-file requirements, atomic
 
 The owner may define typed launch settings under
 `members[].capabilities.compute.profiles.<name>`. Existing version 1 files remain
-valid. Profile and volume suffix names start with an ASCII letter or digit and
-contain only ASCII letters, digits, dash, underscore and dot. Names are
-case-sensitive. Volume suffixes have at most 96 bytes so the complete name fits
-a 255-byte local volume directory component even with the longest sandbox and
-member identities. A profile can be empty; omitted booleans default to `false` and
-omitted mount arrays default to empty.
+valid. Profile names start with an ASCII letter or digit and contain only ASCII
+letters, digits, dash, underscore and dot. Volume suffixes follow the same rule
+except that dot is forbidden. Names are case-sensitive. Volume suffixes have at
+most 96 bytes so the complete name fits a 255-byte local volume directory
+component even with the longest sandbox and member identities. A profile can be
+empty; omitted booleans default to `false` and omitted mount arrays default to empty.
 
 ```toml
 [members.capabilities.compute.profiles.runner]
@@ -212,8 +214,14 @@ privileged containers on a member offering it. On a rootless engine this stays
 inside the engine's user namespace. On a rootful engine it is effectively root
 on the member. Define privileged profiles only where that access is intended.
 
-Each volume is named `homepool-<member-id>-<sandbox-id>-<name>`, using the existing
-deterministic container name and the configured suffix. Different sandbox
-identities get separate volumes. `release` never deletes volumes. Reusing the
+Each volume is named `homepool-<member-id>-<sandbox-id>.<name>`, using the existing
+deterministic container name, a dot and the configured suffix. Because the suffix
+cannot contain dots, the last dot uniquely separates it from the container name,
+even when the sandbox identity contains dots or dashes. For example, `job-a` with
+suffix `cache` and `job` with suffix `a-cache` produce distinct volumes
+`homepool-1-job-a.cache` and `homepool-1-job.a-cache`. The maximum suffix length
+remains 96 bytes: `255 - (9 + 20 + 1 + 128 + 1)`, accounting for the fixed prefix,
+member ID, dash, sandbox identity and suffix dot. Different sandbox identities
+get separate volumes. `release` never deletes volumes. Reusing the
 same identity on the same member after release reuses its volume; the owner
 manages retained data and removes volumes separately.
