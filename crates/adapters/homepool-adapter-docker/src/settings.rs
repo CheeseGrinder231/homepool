@@ -14,6 +14,10 @@ pub(crate) const MEMBER_LABEL: &str = "homepool.member";
 pub(crate) const SANDBOX_LABEL: &str = "homepool.sandbox";
 pub(crate) const STOP_SECONDS: &str = "10";
 pub(crate) const MILLICORES_PER_CPU: u64 = 1_000;
+/// Runtime systemd quota translation rounds fractional CPU percentages upward.
+/// One percent of a CPU is 10 millicores: use this quantum for conservative
+/// inventory bounds and require aligned starts so reserved and applied CPU agree.
+pub(crate) const CPU_LIMIT_QUANTUM_MILLICORES: u64 = 10;
 /// Docker's zero HostConfig.CpuPeriod selects the Linux CFS default: 100 ms,
 /// expressed in microseconds, including when only --cpu-quota is specified.
 pub(crate) const DEFAULT_CPU_PERIOD_MICROS: u64 = 100_000;

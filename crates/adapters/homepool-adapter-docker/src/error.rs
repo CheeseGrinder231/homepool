@@ -1,9 +1,15 @@
 use std::fmt;
 
+use crate::settings::CPU_LIMIT_QUANTUM_MILLICORES;
+
 /// Redacted failures: never contain Docker's raw output or environment values.
 #[derive(Debug)]
 pub enum Error {
     InvalidInput(&'static str),
+    /// Starts require CPU limits aligned to the runtime's accounting quantum.
+    CpuLimitNotAligned {
+        cpu_millicores: u64,
+    },
     Io(&'static str),
     /// The local transport was terminated; remote mutation may still have happened.
     Deadline(&'static str),
@@ -29,6 +35,10 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CpuLimitNotAligned { cpu_millicores } => write!(
+                f,
+                "CPU limit {cpu_millicores} millicores must be a multiple of {CPU_LIMIT_QUANTUM_MILLICORES}"
+            ),
             Self::InvalidInput(field) => write!(f, "invalid {field}"),
             Self::Deadline(operation) => write!(f, "Docker {operation} deadline exceeded"),
             Self::Io(operation) => write!(f, "Docker {operation} I/O failed"),

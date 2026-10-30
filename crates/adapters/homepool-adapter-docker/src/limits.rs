@@ -1,6 +1,9 @@
 use serde::Deserialize;
 
-use crate::{error::Error, settings::DEFAULT_CPU_PERIOD_MICROS};
+use crate::{
+    error::Error,
+    settings::{CPU_LIMIT_QUANTUM_MILLICORES, DEFAULT_CPU_PERIOD_MICROS},
+};
 
 /// Only resource configuration is projected; never the container environment.
 #[derive(Deserialize)]
@@ -28,9 +31,17 @@ impl Limits {
         } else {
             None
         };
-        Ok(match (nano, quota) {
+        let ceiling = match (nano, quota) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
-        })
+        };
+        ceiling
+            .map(|value| {
+                value
+                    .div_ceil(CPU_LIMIT_QUANTUM_MILLICORES)
+                    .checked_mul(CPU_LIMIT_QUANTUM_MILLICORES)
+                    .ok_or(Error::Protocol("inspect limits"))
+            })
+            .transpose()
     }
 }

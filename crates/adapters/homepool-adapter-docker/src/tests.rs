@@ -250,12 +250,15 @@ fn inventory_limits_round_up_and_unbounded_is_not_zero() {
     use crate::limits::Limits;
     for (nano_cpus, cpu_quota, cpu_period, expected) in [
         (1_250_000_000, 0, 0, Some(1250)),
-        (500_000_001, 0, 0, Some(501)),
+        (500_000_001, 0, 0, Some(510)),
         (0, 0, 0, None),
         (0, -1, 100_000, None),
-        (0, 25_001, 100_000, Some(251)),
+        (0, 25_001, 100_000, Some(260)),
         (0, 50_000, 0, Some(500)),
-        (0, 1, 0, Some(1)),
+        (0, 50_001, 0, Some(510)),
+        (0, 25_001, 200_000, Some(130)),
+        (501_000_000, 0, 0, Some(510)),
+        (0, 1, 0, Some(10)),
         (2_000_000_000, 50_000, 100_000, Some(500)),
     ] {
         let limits = Limits {
@@ -266,7 +269,7 @@ fn inventory_limits_round_up_and_unbounded_is_not_zero() {
         };
         assert_eq!(limits.cpu_millicores().unwrap(), expected);
     }
-    for (cpu_quota, cpu_period) in [(-2, 100_000), (i64::MAX, 1)] {
+    for (cpu_quota, cpu_period) in [(-2, 100_000), (i64::MAX, 1), (i64::MAX, 500)] {
         assert!(
             Limits {
                 nano_cpus: 0,
@@ -399,4 +402,21 @@ fn recovery_errors_preserve_distinct_redacted_command_causes() {
             code: Some(23)
         }
     ));
+}
+
+#[test]
+fn starts_reject_unaligned_cpu_before_contacting_the_engine() {
+    let docker = Docker::new(Endpoint::unix("/run/unused.sock").unwrap(), MemberId(7));
+    let mut request = spec();
+    for cpu_millicores in [1, 9, 501, 1251] {
+        request.cpu_millicores = cpu_millicores;
+        assert!(
+            matches!(docker.start(&request), Err(Error::CpuLimitNotAligned { cpu_millicores: rejected }) if rejected == cpu_millicores)
+        );
+    }
+    for (cpu_millicores, formatted) in [(10, "0.010"), (510, "0.510"), (1250, "1.250")] {
+        request.cpu_millicores = cpu_millicores;
+        let args = spec::create_args(MemberId(7), &request).unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--cpus", formatted]));
+    }
 }

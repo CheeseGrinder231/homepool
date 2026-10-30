@@ -19,7 +19,10 @@ underscore to avoid remote-shell interpretation by older Docker clients.
 Create `Docker::new(endpoint, MemberId(...))` to scope operations to one member.
 `start` creates and starts a `SandboxSpec` with CPU in millicores, memory in bytes,
 bind mounts, environment, and an optional nonsecret command override. Both resource
-limits must be positive. Bind mount sources refer to the **engine's** filesystem,
+limits must be positive. CPU requests must be multiples of 10 millicores;
+`start` rejects other precision with `Error::CpuLimitNotAligned` before creating
+anything. Callers reserve that same aligned CPU amount. Bind mount sources refer
+to the **engine's** filesystem,
 including over SSH. Paths containing CSV separators or quotes are rejected.
 The sandbox id is a descriptive label, not a uniqueness or retry guarantee.
 Use the returned full container id for `stop` and `remove`.
@@ -68,9 +71,15 @@ An incomplete or failed list is never evidence that a sandbox is absent.
 ## Restart accounting
 
 `Sandbox` includes `cpu_millicores: Option<u64>` and `memory_bytes: Option<u64>`.
-CPU is the tighter configured NanoCPUs or CFS quota/period ceiling, rounded up to
-whole millicores to avoid undercounting. Docker's zero/default CPU period resolves
-to the 100,000-microsecond CFS default, so a quota-only value of 50,000 means
+CPU is a conservative bound on the tighter configured NanoCPUs or CFS
+quota/period ceiling, rounded up to the next 10 millicores (already aligned values
+stay unchanged). The runtime's systemd quota translation rounds fractional CPU
+percentages upward: one percent of a CPU is 10 millicores. Merely rounding to a
+whole millicore could report 501 when the applied cgroup permits 510. The named
+`CPU_LIMIT_QUANTUM_MILLICORES` constant in adapter settings covers that normalization
+for both NanoCPUs and quota-only inventory. Requiring aligned starts keeps the CPU
+amount callers reserve equal to what is applied. Docker's zero/default CPU period
+resolves to the 100,000-microsecond CFS default, so a quota-only value of 50,000 means
 500 millicores. The protocol default is documented in the adapter settings module.
 Memory is the configured hard byte limit.
 A missing finite ceiling is `None`, never a zero-sized allocation. CPU affinity,
@@ -144,8 +153,11 @@ expires the private test clock after readiness. The same seam covers blocked std
 inherited pipes, start expiry, and rollback expiry. Tests assert transport
 termination, direct-child reaping, and pipe closure; an outer watchdog detects hangs
 without making startup speed a correctness condition. Unit tests also cover large
-simultaneous pipe traffic. Engine tests cover quota-only inventory and lifecycle.
-They never contact an SSH host.
+simultaneous pipe traffic. Engine tests cover quota-only inventory and lifecycle,
+and compare non-aligned quota-only and NanoCPU observations with applied cgroup
+CPU limits; inventory must never report less than the cgroup permits. If controller
+files are not exposed, the case is explicitly logged as unavailable so the PR
+validation report can identify that limitation. Tests never contact an SSH host.
 
 ## Manual SSH verification
 
