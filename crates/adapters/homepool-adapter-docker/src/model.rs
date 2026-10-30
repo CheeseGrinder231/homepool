@@ -1,6 +1,10 @@
 use std::{collections::BTreeMap, fmt};
 
-use crate::{error::Error, settings::MAX_ENV_LINE_BYTES};
+use crate::{
+    error::Error,
+    profile::{BindMount, LaunchProfile},
+    settings::MAX_ENV_LINE_BYTES,
+};
 
 /// Environment values, including secrets. Debug output always redacts values.
 /// Values travel only through the Docker CLI's stdin, never its arguments.
@@ -47,14 +51,6 @@ impl fmt::Debug for Environment {
     }
 }
 
-/// A bind mount. The source belongs to the engine's machine, even over SSH.
-#[derive(Clone, Debug)]
-pub struct BindMount {
-    pub source: String,
-    pub target: String,
-    pub read_only: bool,
-}
-
 /// A sandbox to create and start. Image, identity, mount paths, and command must
 /// contain no secrets; place secret values in `environment` instead.
 #[derive(Debug)]
@@ -67,6 +63,8 @@ pub struct SandboxSpec {
     /// Nonzero memory limit in bytes (subject to engine minimums).
     pub memory_bytes: u64,
     pub mounts: Vec<BindMount>,
+    /// Typed settings selected by the owner; never raw Docker arguments.
+    pub profile: LaunchProfile,
     pub environment: Environment,
     /// Nonsecret override for the image's default command; empty keeps it.
     pub command: Vec<String>,

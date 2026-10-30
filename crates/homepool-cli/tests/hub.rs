@@ -998,3 +998,451 @@ fn late_create_after_a_short_request_never_starts_and_holds_capacity() {
 fn late_create_after_sigterm_and_full_settle_never_starts_and_holds_capacity() {
     late_create_stays_created(true);
 }
+
+fn profile_placement(name: &str, profile: &str) -> Value {
+    json!({"sandbox_id":name,"image":"alpine:3.22","cpu_millicores":100,"memory_bytes":33554432,"profile":profile,"command":["sh","-c","trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"]})
+}
+
+#[test]
+fn invalid_profiles_fail_on_read_and_add_without_docker_calls() {
+    let mut f = Fixture::new(false);
+    f.start();
+    let cases = [
+        ("bad/name", ""),
+        ("", ""),
+        ("bad,name", ""),
+        ("bad\nname", ""),
+        ("-option", ""),
+        ("runner", "pids_limit = 0"),
+        ("runner", "shm_bytes = 0"),
+        ("runner", "memory_swap_bytes = 0"),
+        ("runner", "pids_limit = -1"),
+        ("runner", "privileged = 1"),
+        ("runner", "flags = ['--privileged']"),
+        (
+            "runner",
+            "binds = [{source = 'relative', target = '/input'}]",
+        ),
+        (
+            "runner",
+            "binds = [{source = '/srv/input', target = 'relative'}]",
+        ),
+        (
+            "runner",
+            "binds = [{source = '/srv/in,put', target = '/input'}]",
+        ),
+        (
+            "runner",
+            "binds = [{source = '/srv/input', target = '/in,put'}]",
+        ),
+        (
+            "runner",
+            "binds = [{source = '/srv/in\"put', target = '/input'}]",
+        ),
+        (
+            "runner",
+            "binds = [{source = \"/srv/in\\nput\", target = '/input'}]",
+        ),
+        (
+            "runner",
+            "binds = [{source = '/srv/input', target = \"/in\\u0000put\"}]",
+        ),
+        (
+            "runner",
+            "volumes = [{name = '../cache', target = '/cache'}]",
+        ),
+        (
+            "runner",
+            "volumes = [{name = 'cache', target = 'relative'}]",
+        ),
+        (
+            "runner",
+            "volumes = [{name = 'cache.data', target = '/cache'}]",
+        ),
+        ("runner", "volumes = [{name = 'cache', target = '/ca,che'}]"),
+        (
+            "runner",
+            "volumes = [{name = 'cache', target = \"/ca\\tche\"}]",
+        ),
+        ("runner", "tmpfs = [{target = 'relative', options = 'rw'}]"),
+        (
+            "runner",
+            "tmpfs = [{target = '/scratch:ro', options = 'rw'}]",
+        ),
+        ("runner", "tmpfs = [{target = '/scr,atch', options = 'rw'}]"),
+        (
+            "runner",
+            "tmpfs = [{target = \"/scr\\natch\", options = 'rw'}]",
+        ),
+        (
+            "runner",
+            "tmpfs = [{target = '/scratch', options = 'rw:ro'}]",
+        ),
+        (
+            "runner",
+            "tmpfs = [{target = '/scratch', options = 'rw;exec'}]",
+        ),
+        (
+            "runner",
+            "tmpfs = [{target = '/scratch', options = \"rw\\nexec\"}]",
+        ),
+        (
+            "runner",
+            "tmpfs = [{target = '/scratch', options = 'rw size=1m'}]",
+        ),
+        (
+            "runner",
+            "tmpfs = [{target = '/scratch', options = 'rw', unknown = true}]",
+        ),
+    ];
+    let oversized = format!(
+        "volumes = [{{name = '{}', target = '/cache'}}]",
+        "v".repeat(97)
+    );
+    // add must not probe an engine, even for rejected member definitions.
+    f.write("stall", "");
+    for (name, fields) in cases.into_iter().chain([("runner", oversized.as_str())]) {
+        let document = format!(
+            "{}\n[members.capabilities.compute.profiles.{}]\n{fields}\n",
+            f.member(2, "active", 1000, 2),
+            serde_json::to_string(name).unwrap()
+        );
+        f.write("addition.toml", &document);
+        let status = f.run(&["--config", "addition.toml", "status", "--json"], None);
+        assert!(
+            !status.status.success(),
+            "accepted profile {name}: {fields}"
+        );
+        assert!(status.stdout.is_empty());
+        let add = f.run(&["add", "addition.toml"], None);
+        assert!(
+            !add.status.success(),
+            "added invalid profile {name}: {fields}"
+        );
+        assert!(String::from_utf8_lossy(&add.stderr).contains("invalid member addition"));
+        assert!(
+            !f.root.join("transport").exists(),
+            "invalid profile contacted Docker"
+        );
+    }
+}
+
+#[test]
+fn profiles_arrive_through_add_and_survive_drain_and_restart() {
+    let mut f = Fixture::new(false);
+    f.start();
+    let addition = format!(
+        "{}\n[members.capabilities.compute.profiles.runner]\npids_limit = 100\n",
+        f.member(2, "active", 1000, 1)
+    );
+    f.write("addition.toml", &addition);
+    f.ok(&["add", "addition.toml"], None);
+    let missing = f.run(
+        &["place", "--json"],
+        Some(profile_placement("missing", "absent")),
+    );
+    assert!(!missing.status.success());
+    let placed = f.ok(
+        &["place", "--json"],
+        Some(profile_placement("profile-one", "runner")),
+    );
+    assert_eq!(placed["member"], 2);
+    let full = f.run(
+        &["place", "--json"],
+        Some(profile_placement("profile-two", "runner")),
+    );
+    assert!(!full.status.success());
+    f.ok(&["drain", "2"], None);
+    f.stop(Signal::TERM);
+    f.start();
+    assert_eq!(
+        f.inventory()["members"][1]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    f.release(&placed);
+    let drained = f.run(
+        &["place", "--json"],
+        Some(profile_placement("profile-three", "runner")),
+    );
+    assert!(!drained.status.success());
+    let plain = f.place("plain", 100, 33554432);
+    assert_eq!(plain["member"], 1);
+    f.release(&plain);
+    f.ok(&["remove", "2"], None);
+    assert!(
+        !fs::read_to_string(f.root.join("members.toml"))
+            .unwrap()
+            .contains("runner")
+    );
+}
+
+#[test]
+fn selected_profile_swap_below_memory_is_rejected_before_create() {
+    let mut f = Fixture::new(false);
+    f.write(
+        "members.toml",
+        &format!(
+            "{}\n[members.capabilities.compute.profiles.runner]\nmemory_swap_bytes = 16777216\n",
+            f.member(1, "active", 1000, 2)
+        ),
+    );
+    let second = format!(
+        "{}\n[members.capabilities.compute.profiles.runner]\nmemory_swap_bytes = 67108864\n",
+        f.member(2, "active", 1000, 2)
+    );
+    let first = fs::read_to_string(f.root.join("members.toml")).unwrap();
+    f.write(
+        "members.toml",
+        &format!("{first}{}", second.strip_prefix("version = 1\n").unwrap()),
+    );
+    f.start();
+    let failed = f.run(
+        &["place", "--json"],
+        Some(profile_placement("swap-too-small", "runner")),
+    );
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr)
+            .contains("profile memory swap must be at least requested memory")
+    );
+    assert!(!f.root.join("engine.json").exists());
+    assert_eq!(f.inventory()["members"][0]["free"]["sandbox_slots"], 2);
+    let mut request = profile_placement("swap-fits-selected-member", "runner");
+    request["preferences"] = json!([2]);
+    let placed = f.ok(&["place", "--json"], Some(request));
+    assert_eq!(placed["member"], 2);
+    f.release(&placed);
+}
+
+#[test]
+fn placement_accepts_only_a_profile_name_and_no_direct_launch_settings() {
+    let f = Fixture::new(false);
+    for (key, value) in [
+        ("profile", json!({"privileged":true})),
+        ("privileged", json!(true)),
+        ("binds", json!([])),
+        ("volumes", json!([])),
+        ("tmpfs", json!([])),
+        ("flags", json!(["--privileged"])),
+    ] {
+        let mut request = profile_placement("invalid", "runner");
+        request[key] = value;
+        let failed = f.run(&["place", "--json"], Some(request));
+        assert!(!failed.status.success());
+        assert!(String::from_utf8_lossy(&failed.stderr).contains("invalid placement JSON"));
+    }
+}
+
+fn profile_docker(args: &[&str]) -> Output {
+    Command::new("docker")
+        .arg("--host")
+        .arg(
+            std::env::var("HOMEPOOL_TEST_DOCKER_SOCKET")
+                .map(|socket| format!("unix://{socket}"))
+                .unwrap_or_else(|_| "unix:///var/run/docker.sock".into()),
+        )
+        .env_remove("DOCKER_CONTEXT")
+        .env_remove("DOCKER_HOST")
+        .env_remove("DOCKER_TLS")
+        .env_remove("DOCKER_TLS_VERIFY")
+        .env_remove("DOCKER_CERT_PATH")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+struct ProfileVolume {
+    name: String,
+    container_name: String,
+}
+impl Drop for ProfileVolume {
+    fn drop(&mut self) {
+        // Remove this test's exact container first, including after assertions.
+        let _ = profile_docker(&["container", "rm", "--force", &self.container_name]);
+        let _ = profile_docker(&["volume", "rm", &self.name]);
+    }
+}
+
+#[test]
+#[ignore = "requires a local Docker engine and alpine:3.22"]
+fn real_profile_placement_inspects_every_field_and_release_keeps_volume() {
+    let mut f = Fixture::new(true);
+    let identity = f.root.file_name().unwrap().to_str().unwrap().to_string();
+    let input = f.root.join("input");
+    fs::create_dir(&input).unwrap();
+    let profile = format!(
+        r#"
+[members.capabilities.compute.profiles.runner]
+privileged = true
+pids_limit = 100
+shm_bytes = 16777216
+memory_swap_bytes = 67108864
+tmpfs = [{{target = "/scratch", options = "rw,size=8m,mode=1770"}}]
+volumes = [{{name = "cache", target = "/cache", read_only = true}}]
+binds = [{{source = {}, target = "/input", read_only = true}}]
+"#,
+        serde_json::to_string(input.to_str().unwrap()).unwrap()
+    );
+    f.write(
+        "members.toml",
+        &format!("{}{profile}", f.member(3, "active", 1000, 2)),
+    );
+    f.start();
+    // Volumes intentionally outlive release; only the test owns their cleanup.
+    let volume = ProfileVolume {
+        name: format!("homepool-3-{identity}.cache"),
+        container_name: format!("homepool-3-{identity}"),
+    };
+    let placed = f.ok(
+        &["place", "--json"],
+        Some(profile_placement(&identity, "runner")),
+    );
+    assert_eq!(placed["member"], 3);
+    let container = placed["handle"]
+        .as_str()
+        .unwrap()
+        .split_once(':')
+        .unwrap()
+        .1;
+    f.created.borrow_mut().push((3, container.into()));
+    let inspected = profile_docker(&["container", "inspect", container]);
+    assert!(inspected.status.success());
+    let details: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    let host = &details[0]["HostConfig"];
+    assert_eq!(host["Privileged"], true);
+    assert_eq!(host["PidsLimit"], 100);
+    assert_eq!(host["ShmSize"], 16777216);
+    assert_eq!(host["MemorySwap"], 67108864);
+    assert_eq!(host["Memory"], 33554432);
+    assert_eq!(host["NanoCpus"], 100000000);
+    assert_eq!(host["Tmpfs"]["/scratch"], "rw,size=8m,mode=1770");
+    assert_eq!(host["RestartPolicy"]["Name"], "no");
+    let mounts = details[0]["Mounts"].as_array().unwrap();
+    let cache = mounts
+        .iter()
+        .find(|m| m["Destination"] == "/cache")
+        .unwrap();
+    assert_eq!(cache["Type"], "volume");
+    assert_eq!(cache["Name"], volume.name);
+    assert_eq!(cache["RW"], false);
+    let bind = mounts
+        .iter()
+        .find(|m| m["Destination"] == "/input")
+        .unwrap();
+    assert_eq!(bind["Type"], "bind");
+    assert_eq!(bind["Source"], input.to_str().unwrap());
+    assert_eq!(bind["RW"], false);
+    // A fresh hub accounts for this ordinary bounded allocation unchanged.
+    f.stop(Signal::TERM);
+    f.start();
+    assert_eq!(
+        f.inventory()["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    f.release(&placed);
+    assert!(
+        profile_docker(&["volume", "inspect", &volume.name])
+            .status
+            .success()
+    );
+}
+
+#[test]
+#[ignore = "requires a local Docker engine and alpine:3.22"]
+fn real_profile_volumes_keep_ambiguous_boundaries_and_retained_data_separate() {
+    let mut f = Fixture::new(true);
+    let base = f.root.file_name().unwrap().to_str().unwrap();
+    let identities = [format!("{base}-job-a"), format!("{base}-job")];
+    f.write(
+        "members.toml",
+        &format!(
+            r#"{}
+[members.capabilities.compute.profiles.runner]
+volumes = [{{name = "cache", target = "/cache"}}, {{name = "a-cache", target = "/a-cache"}}]
+"#,
+            f.member(4, "active", 1000, 2)
+        ),
+    );
+    let volumes: Vec<_> = identities
+        .iter()
+        .flat_map(|identity| {
+            ["cache", "a-cache"].map(|suffix| ProfileVolume {
+                name: format!("homepool-4-{identity}.{suffix}"),
+                container_name: format!("homepool-4-{identity}"),
+            })
+        })
+        .collect();
+    f.start();
+    for retained in [false, true] {
+        let mut placements = Vec::new();
+        let mut names = std::collections::BTreeSet::new();
+        for (index, identity) in identities.iter().enumerate() {
+            let placed = f.ok(
+                &["place", "--json"],
+                Some(profile_placement(identity, "runner")),
+            );
+            let container = placed["handle"]
+                .as_str()
+                .unwrap()
+                .split_once(':')
+                .unwrap()
+                .1;
+            f.created.borrow_mut().push((4, container.into()));
+            let inspected = profile_docker(&["container", "inspect", container]);
+            assert!(inspected.status.success());
+            let details: Value = serde_json::from_slice(&inspected.stdout).unwrap();
+            let mounts = details[0]["Mounts"].as_array().unwrap();
+            for suffix in ["cache", "a-cache"] {
+                let target = format!("/{suffix}");
+                let mount = mounts
+                    .iter()
+                    .find(|mount| mount["Destination"] == target)
+                    .unwrap();
+                assert_eq!(mount["Name"], format!("homepool-4-{identity}.{suffix}"));
+                assert!(names.insert(mount["Name"].as_str().unwrap().to_string()));
+                let file = format!("{target}/value");
+                let expected = format!("{index}-{suffix}");
+                if !retained {
+                    assert!(
+                        profile_docker(&[
+                            "container",
+                            "exec",
+                            container,
+                            "sh",
+                            "-c",
+                            "printf '%s' \"$1\" > \"$2\"",
+                            "sh",
+                            &expected,
+                            &file
+                        ])
+                        .status
+                        .success()
+                    );
+                } else {
+                    let read = profile_docker(&["container", "exec", container, "cat", &file]);
+                    assert!(read.status.success());
+                    assert_eq!(read.stdout, expected.as_bytes());
+                }
+            }
+            placements.push(placed);
+        }
+        assert_eq!(names.len(), 4);
+        for placed in &placements {
+            f.release(placed);
+        }
+        for volume in &volumes {
+            assert!(
+                profile_docker(&["volume", "inspect", &volume.name])
+                    .status
+                    .success()
+            );
+        }
+    }
+}

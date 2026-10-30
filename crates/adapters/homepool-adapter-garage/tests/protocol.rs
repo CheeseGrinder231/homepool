@@ -74,6 +74,7 @@ impl Drop for Fake {
 fn member(storage_bytes: u64) -> Member {
     Member {
         id: MemberId(7),
+        profiles: Default::default(),
         tier: Tier::Core,
         state: MemberState::Active,
         capabilities: Capabilities {

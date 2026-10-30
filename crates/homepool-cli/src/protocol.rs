@@ -45,6 +45,8 @@ pub struct Placement {
     #[serde(default)]
     pub preferences: Vec<u64>,
     #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
     pub environment: std::collections::BTreeMap<String, String>,
@@ -228,6 +230,23 @@ pub fn connect(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn placement_socket_schema_accepts_only_the_profile_name() {
+        let base = serde_json::json!({"deadline_monotonic_ms":1,"op":"place","sandbox_id":"example","image":"alpine:3.22","cpu_millicores":100,"memory_bytes":33554432,"profile":"runner"});
+        assert!(serde_json::from_value::<super::Message>(base.clone()).is_ok());
+        for (key, value) in [
+            ("privileged", serde_json::json!(true)),
+            ("binds", serde_json::json!([])),
+            ("volumes", serde_json::json!([])),
+            ("flags", serde_json::json!([])),
+            ("profile", serde_json::json!({"privileged":true})),
+        ] {
+            let mut input = base.clone();
+            input[key] = value;
+            assert!(serde_json::from_value::<super::Message>(input).is_err());
+        }
+    }
+
     #[test]
     fn inventory_rejects_unknown_fields() {
         assert!(

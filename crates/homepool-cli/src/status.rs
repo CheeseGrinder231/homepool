@@ -36,6 +36,8 @@ struct Budget {
     cpu_millicores: u64,
     memory_bytes: u64,
     sandbox_slots: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    profiles: Vec<String>,
 }
 
 impl From<ComputeBudget> for Budget {
@@ -44,6 +46,7 @@ impl From<ComputeBudget> for Budget {
             cpu_millicores: value.cpu_millicores,
             memory_bytes: value.memory_bytes,
             sandbox_slots: value.sandbox_slots,
+            profiles: Vec::new(),
         }
     }
 }
@@ -66,7 +69,11 @@ pub fn render(pool: &Pool, json: bool, storage: Option<StorageUsage>) -> Result<
                     MemberState::Unreachable => "unreachable",
                 },
                 capabilities: Capabilities {
-                    compute: member.capabilities.compute.map(Budget::from),
+                    compute: member.capabilities.compute.map(|b| {
+                        let mut budget = Budget::from(b);
+                        budget.profiles = member.profiles.iter().cloned().collect();
+                        budget
+                    }),
                     storage_bytes: member.capabilities.storage_bytes,
                 },
             })
@@ -95,6 +102,10 @@ pub fn render(pool: &Pool, json: bool, storage: Option<StorageUsage>) -> Result<
                 budget.cpu_millicores, budget.memory_bytes, budget.sandbox_slots
             )
             .expect("write to String");
+            if !budget.profiles.is_empty() {
+                write!(output, "profiles: {}; ", budget.profiles.join(", "))
+                    .expect("write to String");
+            }
         } else {
             output.push_str("compute: none; ");
         }

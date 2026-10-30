@@ -3,6 +3,7 @@ use super::*;
 fn member(id: u64, cpu: u64, memory: u64, slots: u32) -> Member {
     Member {
         id: MemberId(id),
+        profiles: Default::default(),
         tier: Tier::Core,
         state: MemberState::Active,
         capabilities: Capabilities {
@@ -28,6 +29,7 @@ fn request(cpu: u64, memory: u64) -> SandboxRequest {
     SandboxRequest {
         cpu_millicores: cpu,
         memory_bytes: memory,
+        profile: None,
         preferences: Vec::new(),
     }
 }
@@ -462,4 +464,26 @@ fn importing_the_last_id_preserves_accounting_on_exhaustion() {
         pool.reserve(&request(0, 0)),
         Err(Error::ReservationIdsExhausted)
     );
+}
+
+#[test]
+fn profiles_filter_eligibility_without_overriding_capacity_or_state() {
+    let mut offered = member(2, 4, 8, 1);
+    offered.profiles.insert("runner".into());
+    let mut pool = pool([member(1, 20, 40, 3), offered]);
+    let mut request = request(4, 8);
+    request.profile = Some("missing".into());
+    assert_eq!(pool.place(&request), Err(Error::NoCapacity));
+    request.profile = Some("runner".into());
+    request.preferences = vec![MemberId(1)];
+    assert_eq!(pool.place(&request), Ok(MemberId(2)));
+    let allocation = pool.reserve(&request).unwrap();
+    assert_eq!(pool.place(&request), Err(Error::NoCapacity));
+    pool.release(allocation.id).unwrap();
+    for state in [MemberState::Draining, MemberState::Unreachable] {
+        pool.set_state(MemberId(2), state).unwrap();
+        assert_eq!(pool.place(&request), Err(Error::NoCapacity));
+    }
+    request.profile = None;
+    assert_eq!(pool.place(&request), Ok(MemberId(1)));
 }

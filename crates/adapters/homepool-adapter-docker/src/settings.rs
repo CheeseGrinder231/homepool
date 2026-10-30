@@ -27,4 +27,9 @@ pub(crate) const INSPECT_FORMAT: &str = r#"{"id":{{json .Id}},"labels":{{json .C
 pub(crate) const CAPACITY_FORMAT: &str =
     r#"{"cpus":{{json .NCPU}},"memory_bytes":{{json .MemTotal}}}"#;
 
+/// Keep local volume directory components within 255 bytes even with a u64
+/// member ID (20 digits), a 128-byte sandbox identity, the ID dash and the
+/// unambiguous suffix dot: 255 - (9 + 20 + 1 + 128 + 1) = 96.
+pub(crate) const MAX_VOLUME_SUFFIX_BYTES: usize = 96;
+
 pub(crate) const ID_FORMAT: &str = "{{json .Id}}";

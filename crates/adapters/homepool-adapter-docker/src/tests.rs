@@ -15,6 +15,7 @@ fn spec() -> SandboxSpec {
         image: "alpine:3.22".into(),
         cpu_millicores: 1250,
         memory_bytes: 64 * 1024 * 1024,
+        profile: Default::default(),
         mounts: vec![],
         environment: Environment::default(),
         command: vec!["sleep".into(), "60".into()],
@@ -431,4 +432,147 @@ fn enclosing_deadline_prevents_a_new_mutation() {
         adapter.start(&spec()),
         Err(Error::Deadline("create"))
     ));
+}
+
+#[test]
+fn no_profile_preserves_the_exact_create_arguments() {
+    assert_eq!(
+        spec::create_args(MemberId(7), &spec()).unwrap(),
+        [
+            "container",
+            "create",
+            "--name",
+            "homepool-7-sandbox-a",
+            "--label",
+            "homepool.managed=true",
+            "--label",
+            "homepool.member=7",
+            "--label",
+            "homepool.sandbox=sandbox-a",
+            "--cpus",
+            "1.250",
+            "--memory",
+            "67108864",
+            "--env-file",
+            "/dev/stdin",
+            "--",
+            "alpine:3.22",
+            "sleep",
+            "60"
+        ]
+    );
+}
+
+#[test]
+fn profile_arguments_are_typed_and_volume_names_preserve_every_valid_identity() {
+    let mut request = spec();
+    request.profile = LaunchProfile {
+        privileged: true,
+        pids_limit: Some(100),
+        shm_bytes: Some(33554432),
+        memory_swap_bytes: Some(request.memory_bytes),
+        tmpfs: vec![TmpfsMount {
+            target: "/scratch".into(),
+            options: "rw,size=16m,mode=1777".into(),
+        }],
+        volumes: vec![VolumeMount {
+            name: "cache".into(),
+            target: "/cache".into(),
+            read_only: true,
+        }],
+        binds: vec![BindMount {
+            source: "/srv/input".into(),
+            target: "/input".into(),
+            read_only: true,
+        }],
+    };
+    for identity in ["-", "_", ".", "Abc-_.123", &"x".repeat(128)] {
+        request.sandbox_id = identity.into();
+        let args = spec::create_args(MemberId(u64::MAX), &request).unwrap();
+        let volume = format!("homepool-{}-{identity}.cache", u64::MAX);
+        assert!(volume.bytes().next().unwrap().is_ascii_alphanumeric());
+        assert!(
+            volume
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        );
+        for (flag, value) in [
+            ("--pids-limit", "100"),
+            ("--shm-size", "33554432"),
+            ("--memory-swap", "67108864"),
+            ("--tmpfs", "/scratch:rw,size=16m,mode=1777"),
+            ("--mount", "type=bind,src=/srv/input,dst=/input,readonly"),
+            (
+                "--mount",
+                &format!("type=volume,src={volume},dst=/cache,readonly"),
+            ),
+        ] {
+            assert!(args.windows(2).any(|pair| pair == [flag, value]));
+        }
+        assert!(args.contains(&"--privileged".into()));
+        assert!(!args.iter().any(|arg| arg.starts_with("--restart")));
+        assert_eq!(
+            &args[args.len() - 4..],
+            ["--", "alpine:3.22", "sleep", "60"]
+        );
+    }
+}
+
+#[test]
+fn volume_suffix_limit_fits_the_longest_sandbox_and_member_identity() {
+    let mut request = spec();
+    request.sandbox_id = "x".repeat(128);
+    request.profile.volumes.push(VolumeMount {
+        name: "v".repeat(96),
+        target: "/cache".into(),
+        read_only: false,
+    });
+    let args = spec::create_args(MemberId(u64::MAX), &request).unwrap();
+    let mount = args
+        .iter()
+        .find(|arg| arg.starts_with("type=volume,"))
+        .unwrap();
+    let name = mount
+        .split("src=")
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap();
+    assert_eq!(name.len(), 255);
+    request.profile.volumes[0].name.push('v');
+    assert!(spec::create_args(MemberId(u64::MAX), &request).is_err());
+}
+
+#[test]
+fn volume_boundaries_are_unique_with_multiple_suffixes_in_one_profile() {
+    let mut request = spec();
+    for name in ["cache", "a-cache"] {
+        request.profile.volumes.push(VolumeMount {
+            name: name.into(),
+            target: format!("/{name}"),
+            read_only: false,
+        });
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for identity in ["job-a", "job", "job.cache", "job."] {
+        request.sandbox_id = identity.into();
+        for arg in spec::create_args(MemberId(1), &request).unwrap() {
+            if let Some(mount) = arg.strip_prefix("type=volume,src=") {
+                let (name, _) = mount.split_once(',').unwrap();
+                let (container, suffix) = name.rsplit_once('.').unwrap();
+                assert_eq!(container, format!("homepool-1-{identity}"));
+                assert!(request.profile.volumes.iter().any(|v| v.name == suffix));
+                assert!(
+                    names.insert(name.to_string()),
+                    "volume names must be distinct"
+                );
+            }
+        }
+    }
+    assert_eq!(names.len(), 8);
+    assert!(names.contains("homepool-1-job-a.cache"));
+    assert!(names.contains("homepool-1-job.a-cache"));
+    request.profile.volumes[0].name = "cache.data".into();
+    assert!(spec::create_args(MemberId(1), &request).is_err());
 }

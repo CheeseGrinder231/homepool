@@ -58,6 +58,8 @@ pub struct Member {
     pub tier: Tier,
     /// Current admission state.
     pub state: MemberState,
+    /// Offered launch profile names; settings belong to the caller.
+    pub profiles: std::collections::BTreeSet<String>,
     /// Declared resource limits.
     pub capabilities: Capabilities,
 }
@@ -70,6 +72,8 @@ pub struct SandboxRequest {
     pub cpu_millicores: u64,
     /// Required memory in bytes.
     pub memory_bytes: u64,
+    /// Required launch profile name, if any.
+    pub profile: Option<String>,
     /// Preferred member ids, highest priority first. Empty means no preference.
     /// Unlisted members follow listed ones. Missing or ineligible ids are skipped;
     /// duplicate ids use their first position. Preferences never override fit.
@@ -219,7 +223,11 @@ impl Pool {
             .values()
             .filter_map(|entry| {
                 let free = entry.free_budget();
-                if free.sandbox_slots == 0
+                if request
+                    .profile
+                    .as_ref()
+                    .is_some_and(|name| !entry.member.profiles.contains(name))
+                    || free.sandbox_slots == 0
                     || free.cpu_millicores < request.cpu_millicores
                     || free.memory_bytes < request.memory_bytes
                 {

@@ -11,13 +11,17 @@ mod endpoint;
 mod error;
 mod limits;
 mod model;
+mod profile;
 mod settings;
 mod spec;
 
 pub use adapter::Docker;
 pub use endpoint::Endpoint;
 pub use error::Error;
-pub use model::{BindMount, EngineCapacity, Environment, Sandbox, SandboxSpec};
+pub use model::{EngineCapacity, Environment, Sandbox, SandboxSpec};
+pub use profile::{
+    BindMount, LaunchProfile, TmpfsMount, VolumeMount, valid_name as valid_profile_name,
+};
 
 #[cfg(test)]
 mod tests;

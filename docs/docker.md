@@ -19,7 +19,13 @@ underscore to avoid remote-shell interpretation by older Docker clients.
 Create `Docker::new(endpoint, MemberId(...))` to scope operations to one member.
 `start` creates and starts a `SandboxSpec` with CPU in millicores, memory in bytes,
 bind mounts, environment, and an optional nonsecret command override. Both resource
-limits must be positive. CPU requests must be multiples of 10 millicores;
+limits must be positive. `SandboxSpec::profile` carries typed `LaunchProfile`
+settings selected by the owner: privileged mode, PID, shared-memory and total
+memory-plus-swap limits, tmpfs mounts, named volumes and binds. Defaults append
+no arguments; sandboxes still receive no restart policy. Profile settings are
+validated before create and encoded directly into argv without a shell. The
+`--` delimiter before the image is retained. Swap below requested memory is
+rejected before create. CPU requests must be multiples of 10 millicores;
 `start` rejects other precision with `Error::CpuLimitNotAligned` before creating
 anything. Callers reserve that same aligned CPU amount. Bind mount sources refer
 to the **engine's** filesystem,
@@ -37,12 +43,24 @@ Use the returned full container id for `stop` and `remove`.
 ownership before acting. Container ids are validated as full hexadecimal ids.
 Labels identify management scope; an engine administrator can forge them, so they
 are not an authorization boundary. Removing a running container fails: stop it
-first. Volumes are never deleted. If starting fails after creation, the adapter
-attempts cleanup; a cleanup failure returns the container id for manual recovery.
+first. Volumes are never deleted. Profile volume names use
+`<deterministic-container-name>.<suffix>`; suffixes forbid dots, so splitting at
+the last dot uniquely recovers both parts. The fixed alphanumeric container
+prefix makes the result legal for every accepted sandbox identity, even
+identities starting with punctuation. Release and container removal retain these
+volumes. If starting fails after creation, the adapter attempts cleanup; a cleanup failure returns the container id for manual recovery.
 Communication failures can leave an unknown result; reconcile with `list` before
 retrying creation. List errors, including concurrent removal, are returned rather
 than converted into empty results. Capacity reads report engine CPU and memory
 totals; free capacity, slot counts, and placement remain caller policy.
+
+Anyone who can reach the owner-only hub socket can select a privileged profile
+and start privileged containers on that member. On a rootless engine this stays
+inside the engine's user namespace. On a rootful engine it is effectively root on
+the member. Bind paths refer to the engine filesystem and follow the same
+absolute-path, CSV-separator and control-character rules as ordinary binds.
+Tmpfs targets also forbid colon, and options use a restricted ASCII character
+set. See [members.md](members.md) for the owner-controlled schema.
 
 ## Deadlines and reconciliation
 
@@ -172,7 +190,9 @@ simultaneous pipe traffic. Engine tests cover quota-only inventory and lifecycle
 and compare non-aligned quota-only and NanoCPU observations with applied cgroup
 CPU limits; inventory must never report less than the cgroup permits. If controller
 files are not exposed, the case is explicitly logged as unavailable so the PR
-validation report can identify that limitation. Tests never contact an SSH host.
+validation report can identify that limitation. Tests never contact an SSH host. The hub engine suite also places a profile using
+every field, checks them through `docker inspect`, restarts to verify accounting,
+and confirms release retains the named volume before test-only cleanup.
 
 ## Manual SSH verification
 

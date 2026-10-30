@@ -159,7 +159,7 @@ fn example_covers_tiers_states_capabilities_and_budget_shape() {
             "members": [
                 {"id": 1, "tier": "core", "state": "active", "capabilities": {
                     "storage_bytes": 107374182400_u64,
-                    "compute": {"cpu_millicores": 2000, "memory_bytes": 4294967296_u64, "sandbox_slots": 2}
+                    "compute": {"cpu_millicores": 2000, "memory_bytes": 4294967296_u64, "sandbox_slots": 2, "profiles": ["runner"]}
                 }},
                 {"id": 2, "tier": "burst", "state": "unreachable", "capabilities": {
                     "storage_bytes": 53687091200_u64, "compute": null
@@ -184,6 +184,7 @@ fn example_covers_tiers_states_capabilities_and_budget_shape() {
         "2000 millicores",
         "4294967296 memory bytes",
         "2 sandbox slots",
+        "profiles: runner",
         "107374182400 bytes",
         "compute: none",
         "2  burst  unreachable",

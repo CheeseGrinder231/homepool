@@ -93,6 +93,21 @@ pub fn encode(config: &Configuration) -> String {
         if let Some(b) = member.capabilities.compute {
             out.push_str(&format!("[members.capabilities.compute]\ncpu_millicores = {}\nmemory_bytes = {}\nsandbox_slots = {}\n", b.cpu_millicores, b.memory_bytes, b.sandbox_slots));
         }
+        if let Some(profiles) = config.profiles.get(&member.id) {
+            // Serialize a fully qualified table tree so mount-array headers stay
+            // inside their profile when attached to the current member.
+            let tree = std::collections::BTreeMap::from([(
+                "members",
+                std::collections::BTreeMap::from([(
+                    "capabilities",
+                    std::collections::BTreeMap::from([(
+                        "compute",
+                        std::collections::BTreeMap::from([("profiles", profiles)]),
+                    )]),
+                )]),
+            )]);
+            out.push_str(&toml::to_string(&tree).expect("typed profile serialization"));
+        }
         if let Some(endpoint) = config.docker.get(&member.id) {
             out.push_str("[members.docker]\n");
             // String escaping is shared with TOML's basic-string syntax.

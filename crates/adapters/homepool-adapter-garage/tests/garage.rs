@@ -196,6 +196,7 @@ fn single_node_portion_scoped_consumers_and_cross_container_s3() {
     let node_id = status["nodes"][0]["id"].as_str().expect("node ID");
     let member = Member {
         id: MemberId(1),
+        profiles: Default::default(),
         tier: Tier::Core,
         state: MemberState::Active,
         capabilities: Capabilities {

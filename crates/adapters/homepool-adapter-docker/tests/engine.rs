@@ -41,6 +41,7 @@ fn spec() -> SandboxSpec {
         image: "alpine:3.22".into(),
         cpu_millicores: 500,
         memory_bytes: 64 * 1024 * 1024,
+        profile: Default::default(),
         mounts: vec![],
         environment: Environment::default(),
         // Handle stop immediately, without waiting for the stop timeout.
@@ -282,6 +283,7 @@ fn restart_inventory_restores_differently_sized_running_sandboxes() {
     use std::collections::BTreeMap;
     let member = Member {
         id: MemberId(4),
+        profiles: Default::default(),
         tier: Tier::Core,
         state: MemberState::Active,
         capabilities: Capabilities {
@@ -306,6 +308,7 @@ fn restart_inventory_restores_differently_sized_running_sandboxes() {
             .reserve(&SandboxRequest {
                 cpu_millicores,
                 memory_bytes,
+                profile: None,
                 preferences: vec![],
             })
             .unwrap();

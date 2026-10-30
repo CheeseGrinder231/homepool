@@ -7,7 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use homepool_adapter_docker::Endpoint;
+use homepool_adapter_docker::{
+    BindMount, Endpoint, LaunchProfile, TmpfsMount, VolumeMount, valid_profile_name,
+};
 use homepool_core::{Capabilities, ComputeBudget, Member, MemberId, MemberState, Pool, Tier};
 use toml::{
     Spanned,
@@ -62,6 +64,7 @@ pub fn parse(path: &Path, source: &str) -> Result<Pool, String> {
 pub struct Configuration {
     pub pool: Pool,
     pub docker: BTreeMap<MemberId, DockerEndpoint>,
+    pub profiles: BTreeMap<MemberId, BTreeMap<String, LaunchProfile>>,
 }
 
 #[derive(Clone)]
@@ -119,9 +122,24 @@ pub fn parse_configuration(path: &Path, source: &str) -> Result<Configuration, S
     })?;
     let mut pool = Pool::default();
     let mut docker = BTreeMap::new();
+    let mut profiles = BTreeMap::new();
     for (index, value) in entries.iter().enumerate() {
         let field = format!("members[{index}]");
-        let member = document.member(value, &field)?;
+        let mut member = document.member(value, &field)?;
+        if let Some(compute) = value
+            .get_ref()
+            .as_table()
+            .and_then(|t| t.get("capabilities"))
+            .and_then(|v| v.get_ref().as_table())
+            .and_then(|t| t.get("compute"))
+            .and_then(|v| v.get_ref().as_table())
+            && let Some(value) = compute.get("profiles")
+        {
+            let declared =
+                document.profiles(value, &format!("{field}.capabilities.compute.profiles"))?;
+            member.profiles = declared.keys().cloned().collect();
+            profiles.insert(member.id, declared);
+        }
         let table = value.get_ref().as_table().expect("validated member table");
         if let Some(value) = table.get("docker") {
             let field = format!("{field}.docker");
@@ -173,7 +191,11 @@ pub fn parse_configuration(path: &Path, source: &str) -> Result<Configuration, S
             )
         })?;
     }
-    Ok(Configuration { pool, docker })
+    Ok(Configuration {
+        pool,
+        docker,
+        profiles,
+    })
 }
 
 struct Document<'a> {
@@ -283,6 +305,7 @@ impl Document<'_> {
             tier,
             state,
             capabilities,
+            profiles: Default::default(),
         })
     }
 
@@ -308,12 +331,132 @@ impl Document<'_> {
         })
     }
 
+    fn string(
+        &self,
+        table: &DeTable<'_>,
+        start: usize,
+        field: &str,
+        key: &str,
+    ) -> Result<String, String> {
+        let value = self.required(table, start, field, key)?;
+        value.get_ref().as_str().map(str::to_owned).ok_or_else(|| {
+            self.error(
+                value.span().start,
+                &field_name(field, key),
+                "expected a string",
+            )
+        })
+    }
+
+    fn boolean(&self, table: &DeTable<'_>, field: &str, key: &str) -> Result<bool, String> {
+        table
+            .get(key)
+            .map(|v| {
+                v.get_ref().as_bool().ok_or_else(|| {
+                    self.error(
+                        v.span().start,
+                        &field_name(field, key),
+                        "expected a boolean",
+                    )
+                })
+            })
+            .transpose()
+            .map(|v| v.unwrap_or(false))
+    }
+
+    fn profiles(
+        &self,
+        value: &Spanned<DeValue<'_>>,
+        field: &str,
+    ) -> Result<BTreeMap<String, LaunchProfile>, String> {
+        let mut profiles = BTreeMap::new();
+        for (name, value) in self.table(value, field)?.iter() {
+            let field = field_name(field, name.get_ref());
+            if !valid_profile_name(name.get_ref()) {
+                return Err(self.error(name.span().start, &field, "invalid profile name"));
+            }
+            let table = self.table(value, &field)?;
+            self.fields(
+                table,
+                &field,
+                &[
+                    "privileged",
+                    "pids_limit",
+                    "shm_bytes",
+                    "memory_swap_bytes",
+                    "tmpfs",
+                    "volumes",
+                    "binds",
+                ],
+            )?;
+            let limit = |key| {
+                table
+                    .get(key)
+                    .map(|v| self.unsigned(v, &field_name(&field, key), i64::MAX as u64))
+                    .transpose()
+            };
+            let mut profile = LaunchProfile {
+                privileged: self.boolean(table, &field, "privileged")?,
+                pids_limit: limit("pids_limit")?,
+                shm_bytes: limit("shm_bytes")?,
+                memory_swap_bytes: limit("memory_swap_bytes")?,
+                ..Default::default()
+            };
+            for key in ["tmpfs", "volumes", "binds"] {
+                if let Some(value) = table.get(key) {
+                    let field = field_name(&field, key);
+                    let array = value.get_ref().as_array().ok_or_else(|| {
+                        self.error(value.span().start, &field, "expected an array")
+                    })?;
+                    for (index, value) in array.iter().enumerate() {
+                        let field = format!("{field}[{index}]");
+                        let table = self.table(value, &field)?;
+                        let allowed: &[&str] = match key {
+                            "tmpfs" => &["target", "options"],
+                            "volumes" => &["name", "target", "read_only"],
+                            _ => &["source", "target", "read_only"],
+                        };
+                        self.fields(table, &field, allowed)?;
+                        let string = |key| self.string(table, value.span().start, &field, key);
+                        let target = string("target")?;
+                        match key {
+                            "tmpfs" => profile.tmpfs.push(TmpfsMount {
+                                target,
+                                options: string("options")?,
+                            }),
+                            "volumes" => profile.volumes.push(VolumeMount {
+                                target,
+                                name: string("name")?,
+                                read_only: self.boolean(table, &field, "read_only")?,
+                            }),
+                            _ => profile.binds.push(BindMount {
+                                target,
+                                source: string("source")?,
+                                read_only: self.boolean(table, &field, "read_only")?,
+                            }),
+                        }
+                    }
+                }
+            }
+            profile
+                .validate()
+                .map_err(|e| self.error(value.span().start, &field, &e.to_string()))?;
+            profiles.insert(name.get_ref().to_string(), profile);
+        }
+        Ok(profiles)
+    }
+
     fn compute(&self, value: &Spanned<DeValue<'_>>, field: &str) -> Result<ComputeBudget, String> {
         let table = self.table(value, field)?;
         self.fields(
             table,
             field,
-            &["cpu_millicores", "memory_bytes", "sandbox_slots"],
+            &[
+                "cpu_millicores",
+                "memory_bytes",
+                "sandbox_slots",
+                "profiles",
+            ],
         )?;
         let get = |key, max| {
             let v = self.required(table, value.span().start, field, key)?;
@@ -414,5 +557,67 @@ mod tests {
         let path = Path::new("members.toml");
         assert!(parse(path, "version = 1\nmembers = []").is_ok());
         assert!(parse(path, "version = 2\nmembers = []").is_err());
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    fn source(profile: &str) -> String {
+        format!(
+            "version = 1\n[[members]]\nid = 1\ntier = 'core'\nstate = 'active'\n[members.capabilities.compute]\ncpu_millicores = 1000\nmemory_bytes = 268435456\nsandbox_slots = 2\n[members.capabilities.compute.profiles.runner]\n{profile}\n"
+        )
+    }
+
+    #[test]
+    fn profiles_survive_canonical_member_updates_and_status_contains_only_names() {
+        let original = source(
+            r#"privileged = true
+pids_limit = 128
+shm_bytes = 33554432
+memory_swap_bytes = 134217728
+tmpfs = [{target = "/scratch", options = "rw,size=16m"}]
+volumes = [{name = "cache", target = "/cache", read_only = true}]
+binds = [{source = "/srv/input", target = "/input", read_only = true}]"#,
+        );
+        let path = Path::new("members.toml");
+        let original = format!(
+            "{original}\n[members.capabilities.compute.profiles.\"build.debug\"]\n[members.capabilities.compute.profiles.empty]\n"
+        );
+        let config = parse_configuration(path, &original).unwrap();
+        let encoded = crate::private::encode(&config);
+        let restored = parse_configuration(path, &encoded).unwrap();
+        assert_eq!(crate::private::encode(&restored), encoded);
+        let status: serde_json::Value =
+            serde_json::from_str(&crate::status::render(&restored.pool, true, None).unwrap())
+                .unwrap();
+        assert_eq!(
+            status["members"][0]["capabilities"]["compute"]["profiles"],
+            serde_json::json!(["build.debug", "empty", "runner"])
+        );
+        assert!(!restored.profiles[&MemberId(1)]["empty"].privileged);
+        let p = &restored.profiles[&MemberId(1)]["runner"];
+        assert!(p.privileged);
+        assert_eq!(p.pids_limit, Some(128));
+        assert_eq!(p.shm_bytes, Some(33554432));
+        assert_eq!(p.memory_swap_bytes, Some(134217728));
+        assert_eq!(p.tmpfs[0].options, "rw,size=16m");
+        assert_eq!(p.volumes[0].name, "cache");
+        assert!(p.volumes[0].read_only);
+        assert_eq!(p.binds[0].source, "/srv/input");
+        assert!(p.binds[0].read_only);
+        for json in [true, false] {
+            let output = crate::status::render(&restored.pool, json, None).unwrap();
+            assert!(output.contains("runner"));
+            for private in [
+                "privileged",
+                "pids_limit",
+                "/srv/input",
+                "/cache",
+                "/scratch",
+            ] {
+                assert!(!output.contains(private));
+            }
+        }
     }
 }
