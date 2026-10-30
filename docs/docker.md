@@ -183,3 +183,28 @@ fail earlier.
    from process arguments and labels. Container inspection can read its environment.
 5. Call `stop()` then `remove()` with the returned id and confirm `list()` no longer
    contains it. Repeat with a bind mount whose source exists on the remote member.
+
+## Hub cancellation and budget shrink recovery
+
+`Docker::with_cancellation(Arc<AtomicBool>)` shares a cooperative cancellation
+flag. Once set, it stays cancelled until the caller deliberately replaces or
+resets it. Every transport checks it before spawning and inside the existing
+poll loop. Cancellation kills the process group, reaps the CLI and closes its
+pipes, returning the fixed redacted `Error::Cancelled`. Start rollback uses the
+same flag; cancellation may therefore appear in both `StartFailed` causes, with
+`outcome_uncertain: true`. A mutation cancelled after reaching the engine has the
+same unknown-outcome rule as a deadline. Reconcile before retrying it. Adapters
+install no signal handlers; the hub owns scoped SIGINT/SIGTERM registration.
+
+For example, suppose a member runs sandboxes limited to 200 and 700 millicores,
+and its declared budget is reduced from 1,000 to 500 before the hub restarts.
+The hub inventories both full container handles. The 700-millicore allocation
+cannot be imported; the member remains unreachable for admission even if the
+200-millicore import succeeded. That partial ledger is never complete capacity.
+Use `homepool inventory --json` to inspect both observed handles, then
+`homepool release "$LARGE_SANDBOX_HANDLE"` to stop and remove the rejected work.
+A subsequent complete inventory imports the remaining 200 millicores and can
+restore the declared active state with 300 millicores free. Alternatively, restore
+a sufficient declared budget before restarting. If inspection or removal fails,
+keep admission closed and reconcile privately; neither a timeout nor a missing
+partial entry proves that work ended. See [hub.md](hub.md) for the local API.

@@ -13,6 +13,8 @@ pub enum Error {
     Io(&'static str),
     /// The local transport was terminated; remote mutation may still have happened.
     Deadline(&'static str),
+    /// The local transport was cancelled; mutation outcome remains unknown.
+    Cancelled,
     Command {
         operation: &'static str,
         code: Option<i32>,
@@ -40,6 +42,7 @@ impl fmt::Display for Error {
                 "CPU limit {cpu_millicores} millicores must be a multiple of {CPU_LIMIT_QUANTUM_MILLICORES}"
             ),
             Self::InvalidInput(field) => write!(f, "invalid {field}"),
+            Self::Cancelled => f.write_str("Docker operation cancelled; reconcile before retrying"),
             Self::Deadline(operation) => write!(f, "Docker {operation} deadline exceeded"),
             Self::Io(operation) => write!(f, "Docker {operation} I/O failed"),
             Self::Command { operation, code } => write!(

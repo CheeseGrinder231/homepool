@@ -2,6 +2,7 @@ use std::{
     io::{self, Read, Write},
     os::unix::process::CommandExt,
     process::{Child, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -38,8 +39,15 @@ pub(crate) fn run(
     args: &[String],
     input: &[u8],
     deadline: Instant,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<u8>, Error> {
-    execute(&mut command(endpoint, args), operation, input, deadline)
+    execute_poll(
+        &mut command(endpoint, args),
+        operation,
+        input,
+        || deadline.saturating_duration_since(Instant::now()),
+        cancelled,
+    )
 }
 
 // Own the CLI and its SSH descendants as one transport. Every return path kills
@@ -56,6 +64,7 @@ impl Drop for Transport {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn execute(
     command: &mut Command,
     operation: &'static str,
@@ -69,12 +78,32 @@ pub(crate) fn execute(
 
 // Private clock seam: production derives remaining time from the single public
 // operation deadline. Tests can expire it after controlled transport readiness.
+#[cfg(test)]
 pub(crate) fn execute_with_remaining(
     command: &mut Command,
     operation: &'static str,
     input: &[u8],
-    mut remaining: impl FnMut() -> Duration,
+    remaining: impl FnMut() -> Duration,
 ) -> Result<Vec<u8>, Error> {
+    execute_poll(
+        command,
+        operation,
+        input,
+        remaining,
+        &AtomicBool::new(false),
+    )
+}
+
+pub(crate) fn execute_poll(
+    command: &mut Command,
+    operation: &'static str,
+    input: &[u8],
+    mut remaining: impl FnMut() -> Duration,
+    cancelled: &AtomicBool,
+) -> Result<Vec<u8>, Error> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(Error::Cancelled);
+    }
     if remaining().is_zero() {
         return Err(Error::Deadline(operation));
     }
@@ -97,6 +126,9 @@ pub(crate) fn execute_with_remaining(
     let mut eof = false;
     let mut input_failed = false;
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
         let time_left = remaining();
         if time_left.is_zero() {
             return Err(Error::Deadline(operation));
@@ -148,6 +180,9 @@ pub(crate) fn execute_with_remaining(
             && eof
             && stdin.is_none()
         {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(Error::Cancelled);
+            }
             if status.exit_status() != Some(0) {
                 return Err(Error::Command {
                     operation,

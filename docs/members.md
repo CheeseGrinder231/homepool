@@ -104,3 +104,12 @@ An empty pool is `{"version":1,"members":[]}`. Consumers must preserve large int
 values exactly; some JSON runtimes need an integer-aware parser beyond their
 native floating-point range. JSON reports the same declarations as the human
 output; `compute: null` distinguishes no compute from an all-zero compute budget.
+
+## Optional Docker endpoints and lifecycle
+
+Members may also contain a strict `docker` table: either `socket` (an absolute
+local Unix socket path), or `host` with optional `port` and `remote_socket` for SSH.
+These private values are validated and omitted from status output. Existing
+files without endpoints retain the same declaration-only status behavior.
+See [hub.md](hub.md) for endpoint examples, private-file requirements, atomic
+`add`/`remove` updates and persistent `drain` behavior.

@@ -19,3 +19,6 @@ see [the member file guide](docs/members.md) for setup and the versioned JSON fo
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
+
+The [local hub](docs/hub.md) places sandboxes over an owner-only Unix socket and
+rebuilds accounting from member inventory after a restart.

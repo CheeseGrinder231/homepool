@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -25,6 +26,7 @@ pub struct Docker {
     endpoint: Endpoint,
     member: MemberId,
     operation_timeout: Duration,
+    cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +43,7 @@ impl Docker {
             endpoint,
             member,
             operation_timeout: OPERATION_TIMEOUT,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -53,6 +56,13 @@ impl Docker {
         }
         self.operation_timeout = timeout;
         Ok(self)
+    }
+
+    /// Shares a cooperative cancellation flag. Cancellation terminates and reaps
+    /// the local transport; mutations may still have reached the engine.
+    pub fn with_cancellation(mut self, cancelled: Arc<AtomicBool>) -> Self {
+        self.cancelled = cancelled;
+        self
     }
 
     fn deadline(&self) -> Result<Instant, Error> {
@@ -171,7 +181,14 @@ impl Docker {
         args: Vec<String>,
         input: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        command::run(&self.endpoint, operation, &args, input, deadline)
+        command::run(
+            &self.endpoint,
+            operation,
+            &args,
+            input,
+            deadline,
+            &self.cancelled,
+        )
     }
 
     fn owned(&self, deadline: Instant, id: &str) -> Result<Sandbox, Error> {

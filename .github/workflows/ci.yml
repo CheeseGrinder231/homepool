@@ -45,6 +45,7 @@ jobs:
           cargo test -p homepool-adapter-docker --lib --locked -- --ignored
           docker pull alpine:3.22
           cargo test -p homepool-adapter-docker --test engine --locked -- --ignored --test-threads=1 --nocapture
+          cargo test -p homepool-cli --test hub --locked -- --ignored --nocapture
 
   structure:
     name: structure
