@@ -1,10 +1,12 @@
 use std::{ffi::OsString, path::PathBuf};
-pub const USAGE: &str = "Usage: homepool [--config FILE] [--socket FILE] COMMAND\nCommands: status [--json] [--garage-config FILE], hub, inventory [--json], place --json, release HANDLE, add FILE, remove MEMBER, drain MEMBER\nplace reads a JSON placement specification from stdin. See docs/hub.md.";
+pub const USAGE: &str = "Usage: homepool [--config FILE] [--socket FILE] COMMAND\nCommands: status [--json] [--garage-config FILE], hub, inventory [--json], place --json, release HANDLE, add FILE, remove MEMBER, drain MEMBER, stage-storage MEMBER NODE ZONE --garage-config FILE, apply-storage VERSION --garage-config FILE, create-consumer ID --garage-config FILE --credentials-file FILE\nplace reads a JSON placement specification from stdin. See docs/hub.md.";
 
 pub struct Options {
     pub config: Option<PathBuf>,
     pub socket: Option<PathBuf>,
     pub garage_config: Option<PathBuf>,
+    pub credentials_file: Option<PathBuf>,
+    pub storage_operands: Vec<OsString>,
     pub json: bool,
     pub command: String,
     pub operand: Option<OsString>,
@@ -16,6 +18,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
         config: None,
         socket: None,
         garage_config: None,
+        credentials_file: None,
+        storage_operands: Vec::new(),
         json: false,
         command: String::new(),
         operand: None,
@@ -29,13 +33,23 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
             options.command = "version".into();
             return Ok(options);
         }
-        if arg == "--config" || arg == "--socket" || arg == "--garage-config" {
+        if [
+            "--config",
+            "--socket",
+            "--garage-config",
+            "--credentials-file",
+        ]
+        .iter()
+        .any(|option| arg == *option)
+        {
             let selected = if arg == "--config" {
                 &mut options.config
             } else if arg == "--socket" {
                 &mut options.socket
-            } else {
+            } else if arg == "--garage-config" {
                 &mut options.garage_config
+            } else {
+                &mut options.credentials_file
             };
             if selected.is_some() {
                 return Err(format!(
@@ -62,6 +76,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
                 "add",
                 "remove",
                 "drain",
+                "stage-storage",
+                "apply-storage",
+                "create-consumer",
             ]
             .iter()
             .any(|c| arg == *c)
@@ -72,8 +89,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
             && !arg.to_string_lossy().starts_with('-')
         {
             options.operand = Some(arg);
+        } else if is_storage_command(&options.command) && !arg.to_string_lossy().starts_with('-') {
+            options.storage_operands.push(arg);
         } else {
-            return Err(format!("unexpected argument: {}", arg.to_string_lossy()));
+            return Err("unexpected argument".into());
         }
     }
     if options.command.is_empty() {
@@ -93,11 +112,43 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
     if options.socket.is_some() && options.command == "status" {
         return Err("status reads declarations; use inventory for the hub".into());
     }
-    if options.config.is_some() && !["status", "hub"].contains(&options.command.as_str()) {
-        return Err("--config is only supported by status and hub".into());
+    if options.socket.is_some() && is_storage_command(&options.command) {
+        return Err("--socket is not supported by storage commands".into());
     }
-    if options.garage_config.is_some() && options.command != "status" {
-        return Err("--garage-config is only supported by status".into());
+    if options.config.is_some()
+        && !["status", "hub"].contains(&options.command.as_str())
+        && !is_storage_command(&options.command)
+    {
+        return Err("--config is only supported by status, hub and storage commands".into());
+    }
+    if options.garage_config.is_some()
+        && options.command != "status"
+        && !is_storage_command(&options.command)
+    {
+        return Err("--garage-config is only supported by status and storage commands".into());
+    }
+    if options.credentials_file.is_some() && options.command != "create-consumer" {
+        return Err("--credentials-file is only supported by create-consumer".into());
+    }
+    if is_storage_command(&options.command) {
+        if options.garage_config.is_none() {
+            return Err("storage commands require --garage-config FILE".into());
+        }
+        let expected = if options.command == "stage-storage" {
+            3
+        } else {
+            1
+        };
+        if options.storage_operands.len() != expected {
+            return Err("storage command requires its documented operands".into());
+        }
+        if options.command == "create-consumer" && options.credentials_file.is_none() {
+            return Err("create-consumer requires --credentials-file FILE".into());
+        }
     }
     Ok(options)
+}
+
+pub fn is_storage_command(command: &str) -> bool {
+    ["stage-storage", "apply-storage", "create-consumer"].contains(&command)
 }

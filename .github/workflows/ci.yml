@@ -46,6 +46,14 @@ jobs:
         run: |
           cargo test -p homepool-adapter-garage --test garage --locked -- --ignored | tee "$RUNNER_TEMP/garage-tests.log"
           grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/garage-tests.log"
+      - name: Garage storage commands and S3 credentials file
+        timeout-minutes: 5
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          cargo test -p homepool-cli --test garage --locked -- --ignored | tee "$RUNNER_TEMP/garage-cli-tests.log"
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/garage-cli-tests.log"
       - name: Test the Docker adapter against the runner engine
         shell: bash
         env:

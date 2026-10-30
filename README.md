@@ -4,12 +4,17 @@ Pool your own machines into one personal cloud.
 
 homepool joins the computers you already own into a single pool. A lean hub keeps the registry of members and decides where work goes. Members add what they offer: compute for sandboxes, a portion of their disk for shared storage, and services. Everything else stays on the machine it belongs to.
 
-**Status:** member-file status, Docker sandbox management through a local hub, and a Garage storage adapter work today; there is no release yet.
+**Status:** member-file status, Docker sandbox management through a local hub, and Garage storage commands work today; there is no release yet.
 `homepool status` reads a private member file and reports its declared contributions;
 see [the member file guide](docs/members.md) for setup and the versioned JSON format.
 
 The [local hub](docs/hub.md) places sandboxes over an owner-only Unix socket and
 rebuilds accounting from member inventory after a restart.
+
+The [Garage storage guide](docs/garage.md) covers `stage-storage`, `apply-storage`
+and `create-consumer`. They use an existing Garage installation directly, with
+consumer credentials written only to a new private file. **A single-node layout
+keeps a single copy. It is not a backup.**
 
 ## Principles
 
