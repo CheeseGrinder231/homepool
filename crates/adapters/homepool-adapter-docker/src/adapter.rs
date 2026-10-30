@@ -14,8 +14,8 @@ use crate::{
     limits::Limits,
     model::{EngineCapacity, Sandbox, SandboxSpec},
     settings::{
-        CAPACITY_FORMAT, INSPECT_FORMAT, MANAGED_LABEL, MEMBER_LABEL, MILLICORES_PER_CPU,
-        OPERATION_TIMEOUT, SANDBOX_LABEL, STOP_SECONDS,
+        CAPACITY_FORMAT, ID_FORMAT, INSPECT_FORMAT, MANAGED_LABEL, MEMBER_LABEL,
+        MILLICORES_PER_CPU, OPERATION_TIMEOUT, SANDBOX_LABEL, STOP_SECONDS,
     },
     spec,
 };
@@ -26,6 +26,7 @@ pub struct Docker {
     endpoint: Endpoint,
     member: MemberId,
     operation_timeout: Duration,
+    request_deadline: Option<Instant>,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -38,11 +39,14 @@ pub(crate) struct Observation {
 }
 
 impl Docker {
+    pub const DEFAULT_OPERATION_TIMEOUT: Duration = OPERATION_TIMEOUT;
+
     pub fn new(endpoint: Endpoint, member: MemberId) -> Self {
         Self {
             endpoint,
             member,
             operation_timeout: OPERATION_TIMEOUT,
+            request_deadline: None,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -65,10 +69,23 @@ impl Docker {
         self
     }
 
+    /// Cap every operation by the enclosing request's absolute deadline.
+    /// Expiry prevents new CLI commands, including mutations.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.request_deadline = Some(
+            self.request_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+        self
+    }
+
     fn deadline(&self) -> Result<Instant, Error> {
-        Instant::now()
+        let deadline = Instant::now()
             .checked_add(self.operation_timeout)
-            .ok_or(Error::InvalidInput("operation timeout"))
+            .ok_or(Error::InvalidInput("operation timeout"))?;
+        Ok(self
+            .request_deadline
+            .map_or(deadline, |request| request.min(deadline)))
     }
 
     /// Lists running and stopped homepool sandboxes belonging to this member.
@@ -99,19 +116,52 @@ impl Docker {
 
     /// Creates then starts a sandbox. On a start failure, attempts to remove the
     /// created container. No environment values enter arguments or labels.
-    /// The sandbox identity is descriptive; it is not an idempotency key.
+    /// The engine enforces one container name per member and sandbox identity.
     pub fn start(&self, spec: &SandboxSpec) -> Result<Sandbox, Error> {
         let deadline = self.deadline()?;
         let args = spec::create_args(self.member, spec)?;
-        let output = self.run(deadline, "create", args, &spec.environment.stdin_bytes())?;
+        let output = match self.run(deadline, "create", args, &spec.environment.stdin_bytes()) {
+            Err(error @ Error::Command { .. }) => {
+                // Stderr can echo secrets. Diagnose conflicts through an exact
+                // name inspection instead; never retain raw engine diagnostics.
+                let existing = self.run(
+                    deadline,
+                    "identity",
+                    vec![
+                        "container".into(),
+                        "inspect".into(),
+                        "--format".into(),
+                        ID_FORMAT.into(),
+                        spec::container_name(self.member, &spec.sandbox_id),
+                    ],
+                    &[],
+                );
+                if existing
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
+                    .is_some_and(|id| validate_id(&id).is_ok())
+                {
+                    return Err(Error::IdentityConflict {
+                        sandbox_id: spec.sandbox_id.clone(),
+                    });
+                }
+                return Err(error);
+            }
+            result => result?,
+        };
         let id = std::str::from_utf8(&output)
             .map_err(|_| Error::Protocol("create"))?
             .trim();
         validate_id(id).map_err(|_| Error::Protocol("create"))?;
-        start_created(id, |operation, args| {
+        start_created(id, &spec.sandbox_id, |operation, args| {
             self.run(deadline, operation, args, &[])
         })?;
         self.owned(deadline, id)
+            .map_err(|source| Error::StartUnconfirmed {
+                container_id: id.into(),
+                sandbox_id: spec.sandbox_id.clone(),
+                source: Box::new(source),
+            })
     }
 
     /// Stops only a container carrying this member's homepool labels, allowing
@@ -250,6 +300,7 @@ pub(crate) fn owned_observation(
 // Keeping recovery here also lets tests expire either phase after readiness.
 pub(crate) fn start_created(
     id: &str,
+    sandbox_id: &str,
     mut run: impl FnMut(&'static str, Vec<String>) -> Result<Vec<u8>, Error>,
 ) -> Result<(), Error> {
     if let Err(start_error) = run("start", vec!["container".into(), "start".into(), id.into()]) {
@@ -261,6 +312,7 @@ pub(crate) fn start_created(
         .map(Box::new);
         return Err(Error::StartFailed {
             container_id: id.into(),
+            sandbox_id: sandbox_id.into(),
             start_error: Box::new(start_error),
             outcome_uncertain: cleanup_error.is_some(),
             cleanup_error,

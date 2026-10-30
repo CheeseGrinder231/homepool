@@ -245,6 +245,7 @@ fn failed_start_rolls_back_the_created_container() {
     let error = engine().start(&request).unwrap_err();
     let Error::StartFailed {
         container_id,
+        sandbox_id: _,
         start_error,
         cleanup_error,
         outcome_uncertain,
@@ -516,4 +517,36 @@ fn inventory_cpu_bounds_cover_applied_cgroup_limits() {
             "APPLIED_CPU_CHECK verified: {case}; reported={reported}, quota={quota}, period={period}"
         );
     }
+}
+
+#[test]
+#[ignore = "requires a local Docker engine and alpine:3.22"]
+fn engine_enforces_member_identity_uniqueness() {
+    let request = spec();
+    let adapter = engine();
+    let first = adapter.start(&request).unwrap();
+    let _first = Container(first.container_id.clone());
+    for _ in 0..2 {
+        assert!(
+            matches!(adapter.start(&request), Err(Error::IdentityConflict { sandbox_id }) if sandbox_id == request.sandbox_id)
+        );
+    }
+    adapter.stop(&first.container_id).unwrap();
+    assert!(matches!(
+        adapter.start(&request),
+        Err(Error::IdentityConflict { .. })
+    ));
+    let matching: Vec<_> = adapter
+        .list()
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.sandbox_id == request.sandbox_id)
+        .collect();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(matching[0].container_id, first.container_id);
+    // Names are per member, even when both members use one physical engine.
+    let other = Docker::new(endpoint(), MemberId(5))
+        .start(&request)
+        .unwrap();
+    let _other = Container(other.container_id);
 }

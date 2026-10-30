@@ -72,15 +72,33 @@ end-to-end deadline; see [docker.md](docker.md) for unknown mutation outcomes.
 
 `place --json` reads one placement specification from stdin. CPU and memory must
 be positive; CPU must be a multiple of 10 millicores. The engine can impose a
-larger minimum memory limit. `sandbox_id` is nonsecret and descriptive. The hub
-rejects a placement whose identity is already in its observed inventories, so
-inspect and release that work before intentionally reusing the identity.
+larger minimum memory limit. The caller-chosen, nonsecret `sandbox_id` is the
+idempotency key. The adapter uses a deterministic container name containing the
+member ID and the exact sandbox identity, so Docker refuses a second create of
+the same identity on that member with typed `IdentityConflict`. This applies to
+running, stopped and created containers while they exist; deleting the container
+removes its engine-owned name. There is no hub database or identity journal.
 
 ```sh
 printf '%s\n' '{"sandbox_id":"example-job","image":"alpine:3.22","cpu_millicores":200,"memory_bytes":33554432,"command":["sleep","300"]}' |
   homepool --socket "$HOMEPOOL_SOCKET" place --json
 homepool --socket "$HOMEPOOL_SOCKET" release "$SANDBOX_HANDLE"
 ```
+
+Placement is **strict by default**: if any member's inventory is incomplete,
+`place` rejects the request because the identity cannot be proved new pool-wide.
+The optional boolean `fresh` defaults to `false`. With `fresh: true`, the caller
+promises that this identity has **never been submitted before**. The hub may then
+place it on a member whose complete inventory is accounted for, while other
+members are unknown. **A retry must never set `fresh: true`.** An identity already
+observed on any member is always rejected, even with `fresh`.
+
+A scheduler that needs to keep working while a burst member is offline generates
+a new identity and sets `fresh: true` for each new attempt. A lost response does
+not justify reusing that identity as fresh. Once members return, the scheduler
+reconciles possible orphaned work through `inventory` and `release`. The fresh
+promise is the caller's responsibility; it is not a durable uniqueness claim the
+hub can verify about an unavailable member.
 
 Optional `preferences` is an array of numeric member IDs; the core placement
 rules apply. Optional `command` is a string array; omission uses the image default.
@@ -90,14 +108,16 @@ use a private producer for secret-bearing placement input. Mounts are not expose
 by this small API. Placement returns `{"member":1,"handle":"1:<full-container-id>"}`.
 The handle is the member ID and full Docker container ID, independent of inventory
 order, process lifetime and the sandbox label. `release` stops and removes that
-exact observed managed container, including when the member is draining or its
-budget has shrunk. It does not remove volumes. Already absent handles return an
+exact managed container after verifying its ownership, including when the member
+is draining or its budget has shrunk. It does not remove volumes. Already absent handles return an
 error; a complete `inventory` confirms absence.
 
-Each request refreshes inventories before acting. Every member begins unreachable;
-only a complete, bounded inventory successfully imported into the declared budget
-can restore its declared admission state. Stopped and created containers retain
-their allocations until explicitly released. Unknown limits, failed inspection,
+Placement, inventory and removal requests refresh inventories before acting.
+Release checks only its exact member; drain and add update declarations without
+probing unrelated members. Every member begins unreachable. Only a complete,
+bounded inventory successfully imported into the declared budget can restore its
+declared admission state, after startup settling described below. Stopped and
+created containers retain their allocations until explicitly released. Unknown limits, failed inspection,
 unavailable engines, and rejected imports keep admission closed. Known observed
 handles are retained even when their imports fail. Free budgets on a closed member
 are zero; the inventory response distinguishes `inventory_complete: false` from
@@ -105,15 +125,52 @@ an accounted draining member. A failed inventory preserves prior observations as
 stale handles, never as evidence of free capacity. A fresh process uses only fresh
 member inventories to reconstruct its map. Numeric core reservation IDs are
 deterministic hashes of the full handle with collision detection; they are never
-external handles. A collision closes the affected member.
+external handles. A collision closes the affected member. A rejected import,
+including two observed containers competing for a one-slot budget, leaves all
+observed handles readable with the member closed; release can reconcile them.
 
-After an uncertain start or release, the hub never retries automatically. Inspect
-`inventory` and reconcile the observed handles before submitting more work. A
-successful listing describes current engine state, not completion of a remote
-mutation still being processed. In particular, do not blindly repeat a request
-when a response is lost or an engine was unreachable. Keep the member draining
-until private inspection settles a delayed mutation. Duplicate labels from
-external clients are visible as separate handles and remain separately accounted.
+After an uncertain start or release, the hub never retries automatically. Failed
+starts retain the adapter's known full container ID and sandbox identity, including
+when final inspection failed. Failed inventories preserve those observations and
+block the identity in this process until a successful inventory reconciles it.
+Inspect `inventory` and reconcile handles before retrying. Existing containers
+with duplicate labels from external or older clients remain separately accounted.
+
+## Restart settling and request deadlines
+
+Every new hub process closes admission for one full configured adapter operation
+limit: 60 seconds by default. `inventory` remains readable during this period,
+with `settling: true` and zero free budgets. When the period ends, a subsequent
+placement or inventory request re-reads inventories before opening admission.
+An earlier empty listing cannot activate a member. This allows a previous
+process's in-flight mutation to land or end before an empty inventory is trusted.
+The period also applies to fresh placements, and no hub-owned journal is used.
+
+There is a remaining limit: **a SIGKILLed hub can leave an orphaned local/SSH
+transport that outlives the settle period** and submits a mutation later. The
+period cannot fence that transport. Confirm its termination privately before
+restarting or admitting work. Engine names still prevent a second container on
+the same member; the pool-wide strict/fresh contract still applies across members.
+
+The CLI supplies one absolute monotonic request deadline, 120 seconds by default,
+starting before connection. It covers connection, socket queue wait, framing,
+inventory, mutations and the response. The server clamps it to its own maximum;
+queueing never resets it. Adapter operations receive the remaining absolute
+budget and cannot start a new command after expiry. Reads, writes and connection
+attempts are nonblocking and shutdown-aware. The server reserves 100 ms inside
+the deadline for the response. Inventory shares half the remaining work budget
+fairly among members, with every operation also capped by its adapter limit.
+Several stalled members therefore return incomplete entries while leaving time
+to observe a healthy member and send a usable response. A known release and drain
+do not wait on those unrelated probes. Expiry or a lost response can still leave
+a mutation's outcome uncertain; reconcile rather than blindly retrying.
+
+`HOMEPOOL_OPERATION_TIMEOUT_MS` sets the adapter limit and startup settle period;
+`HOMEPOOL_REQUEST_TIMEOUT_MS` sets the hub's maximum and CLI's total request wait.
+Values are positive integer milliseconds; the request limit must exceed 100 ms.
+Defaults live in the settings module. Keep the operation limit consistent across
+restarts; if reducing it, allow the previous limit to elapse before restarting.
+Tests use shorter configured limits while exercising the same process paths.
 
 ## Member lifecycle
 
@@ -141,13 +198,19 @@ identities and handles; keep it private.
 ## Local API version 1
 
 The CLI uses newline-delimited JSON over the same Unix socket. Each connection
-carries exactly one request and one response, at most 1 MiB per message. Reads and
-writes are nonblocking, bounded to 120 seconds and cancelled during shutdown.
-Requests are serialized; there is no job queue or scheduler beyond placement.
-For example, an inventory request is `{"op":"inventory"}`; placement is
-`{"op":"place",...placement fields...}`. Other operations are
-`{"op":"release","handle":"..."}`, `{"op":"drain","member":1}`,
-`{"op":"remove","member":1}`, and `{"op":"add","document":"..."}`.
+carries exactly one request and one response, at most 1 MiB per message.
+Requests are serialized; there is no scheduler beyond placement. Every request
+frame includes `deadline_monotonic_ms`, an unsigned integer expiry in milliseconds
+from the local `CLOCK_MONOTONIC` clock. Raw clients compute it before connecting,
+using their total wait budget; the CLI supplies it automatically. This metadata
+shares the JSON object with the operation fields. Without a valid deadline the
+frame is rejected. The same deadline applies to the entire connection.
+
+The operation fields are `{"op":"inventory"}`, or
+`{"op":"place",...placement fields...}` with optional `fresh`. Other operations
+are `{"op":"release","handle":"..."}`, `{"op":"drain","member":1}`,
+`{"op":"remove","member":1}`, and `{"op":"add","document":"..."}`;
+include the deadline metadata in each frame.
 Unknown fields and operations fail. Responses are
 `{"version":1,"result":{...},"error":null}` or
 `{"version":1,"result":null,"error":"..."}`. CLI commands unwrap `result`;
@@ -170,6 +233,12 @@ no old map, checks differently sized running sandbox inventory and occupied
 capacity, rejects duplicate work, drains across restart and releases old handles.
 The signal tests cancel stalled Docker wrappers and check transport termination.
 The adapter additionally tests child reaping and closure of inherited pipes.
+Regressions cover both two-member outage/retry scenarios, strict rejection and
+fresh placement on a healthy member, retained failed-start identities, delayed
+engine completion across a genuinely new hub process, readable one-slot
+budget rejection, and a queued request expiring behind multiple stalled members
+without starting work. Real-engine adapter tests check typed identity conflicts
+and exactly one container per member and identity.
 
 With a disposable Docker engine and `alpine:3.22` pulled, run:
 
@@ -181,5 +250,5 @@ This repeats the actual-process restart and drain test with real running
 containers. `HOMEPOOL_TEST_DOCKER_SOCKET` optionally selects a local engine socket.
 Tests use `TMPDIR` for private scratch and clean up test-created work. Procfs
 samples sum CPU seconds across the three hub processes and report the latest
-resident memory and greatest sampled process high-water mark during the test; the PR records measured values and test conditions. These are
-process measurements, excluding Docker, SSH and workload resource consumption.
+resident memory and greatest sampled process high-water mark during the test;
+the PR records measured values and test conditions. These are process measurements, excluding Docker, SSH and workload resource consumption.

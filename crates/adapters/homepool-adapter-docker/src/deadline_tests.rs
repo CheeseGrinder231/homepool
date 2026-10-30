@@ -198,7 +198,7 @@ fn recovery_timeout(timed_phase: &'static str) {
     let mut expired = false;
     let mut pipes = None;
     let mut phases = Vec::new();
-    let error = start_created(&id, |operation, args| {
+    let error = start_created(&id, "sandbox-a", |operation, args| {
         assert_eq!(args.last().unwrap(), &id);
         phases.push(operation);
         let mut cli = if operation == timed_phase {
@@ -230,6 +230,7 @@ fn recovery_timeout(timed_phase: &'static str) {
     assert!(!text.contains("dummy-secret"));
     let Error::StartFailed {
         container_id,
+        sandbox_id: _,
         start_error,
         cleanup_error,
         outcome_uncertain,

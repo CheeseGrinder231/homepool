@@ -362,6 +362,48 @@ pub const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120)
 pub const API_SIZE_LIMIT: usize = 1024 * 1024;
 pub const CPU_QUANTUM: u64 = 10;
 
+/// Reserve response time inside the same client-supplied request deadline.
+pub const RESPONSE_MARGIN: std::time::Duration = std::time::Duration::from_millis(100);
+
+#[derive(Clone, Copy)]
+pub struct Timing {
+    pub operation: std::time::Duration,
+    pub request: std::time::Duration,
+}
+impl Timing {
+    pub fn load() -> Result<Self, String> {
+        fn duration(
+            key: &str,
+            default: std::time::Duration,
+        ) -> Result<std::time::Duration, String> {
+            let duration = match std::env::var(key) {
+                Ok(value) => std::time::Duration::from_millis(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("{key} must be positive milliseconds"))?,
+                ),
+                Err(std::env::VarError::NotPresent) => default,
+                Err(_) => return Err(format!("invalid {key}")),
+            };
+            if duration.is_zero() || std::time::Instant::now().checked_add(duration).is_none() {
+                return Err(format!("invalid {key}"));
+            }
+            Ok(duration)
+        }
+        let timing = Self {
+            operation: duration(
+                "HOMEPOOL_OPERATION_TIMEOUT_MS",
+                homepool_adapter_docker::Docker::DEFAULT_OPERATION_TIMEOUT,
+            )?,
+            request: duration("HOMEPOOL_REQUEST_TIMEOUT_MS", API_TIMEOUT)?,
+        };
+        if timing.request <= RESPONSE_MARGIN {
+            return Err("request timeout must exceed the response margin (100 ms)".into());
+        }
+        Ok(timing)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

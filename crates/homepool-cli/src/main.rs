@@ -60,7 +60,7 @@ fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
                     .ok_or_else(|| "member must be an unsigned integer".to_string())
             };
             let request = match command {
-                "inventory" => Request::Inventory,
+                "inventory" => Request::Inventory {},
                 "place" => {
                     let mut input = Vec::new();
                     io::stdin()
@@ -86,7 +86,7 @@ fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
                 "remove" => Request::Remove { member: member()? },
                 _ => return Err(arguments::USAGE.into()),
             };
-            let result = hub::call(&socket, &request)?;
+            let result = hub::call(&socket, request)?;
             format!(
                 "{}\n",
                 serde_json::to_string(&result).map_err(|_| "could not encode output")?

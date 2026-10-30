@@ -26,3 +26,5 @@ pub(crate) const MAX_ENV_LINE_BYTES: usize = 65_535;
 pub(crate) const INSPECT_FORMAT: &str = r#"{"id":{{json .Id}},"labels":{{json .Config.Labels}},"state":{{json .State.Status}},"limits":{"nano_cpus":{{json .HostConfig.NanoCpus}},"cpu_quota":{{json .HostConfig.CpuQuota}},"cpu_period":{{json .HostConfig.CpuPeriod}},"memory_bytes":{{json .HostConfig.Memory}}}}"#;
 pub(crate) const CAPACITY_FORMAT: &str =
     r#"{"cpus":{{json .NCPU}},"memory_bytes":{{json .MemTotal}}}"#;
+
+pub(crate) const ID_FORMAT: &str = "{{json .Id}}";

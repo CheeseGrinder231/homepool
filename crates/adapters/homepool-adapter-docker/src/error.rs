@@ -21,11 +21,22 @@ pub enum Error {
     },
     Protocol(&'static str),
     NotManaged,
+    /// The engine already owns the deterministic name for this identity.
+    IdentityConflict {
+        sandbox_id: String,
+    },
+    /// Start may have succeeded; final inspection failed. Reconcile this handle.
+    StartUnconfirmed {
+        container_id: String,
+        sandbox_id: String,
+        source: Box<Error>,
+    },
     /// Creation succeeded but starting failed. Both causes are redacted.
     /// Failed cleanup leaves the final mutation outcome uncertain; reconcile
     /// this known container id before retrying or releasing its allocation.
     StartFailed {
         container_id: String,
+        sandbox_id: String,
         start_error: Box<Error>,
         /// `None` means rollback confirmed removal of the container.
         cleanup_error: Option<Box<Error>>,
@@ -51,8 +62,16 @@ impl fmt::Display for Error {
             ),
             Self::Protocol(operation) => write!(f, "invalid Docker {operation} response"),
             Self::NotManaged => f.write_str("container is not managed by this member"),
+            Self::IdentityConflict { .. } => {
+                f.write_str("sandbox identity already exists on this member")
+            }
+            Self::StartUnconfirmed { source, .. } => write!(
+                f,
+                "Docker start outcome unconfirmed: {source}; reconcile before retrying"
+            ),
             Self::StartFailed {
                 container_id,
+                sandbox_id: _,
                 start_error,
                 cleanup_error,
                 outcome_uncertain,
@@ -72,6 +91,26 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::StartFailed { start_error, .. } => Some(start_error.as_ref()),
+            Self::StartUnconfirmed { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl Error {
+    /// A created container's known handle and caller identity, even on failure.
+    pub fn known_sandbox(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::StartFailed {
+                container_id,
+                sandbox_id,
+                ..
+            }
+            | Self::StartUnconfirmed {
+                container_id,
+                sandbox_id,
+                ..
+            } => Some((container_id, sandbox_id)),
             _ => None,
         }
     }

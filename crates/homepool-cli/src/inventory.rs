@@ -1,30 +1,36 @@
 //! Rebuild accounting without interpreting failed or partial inventory as free.
-use crate::settings::Configuration;
+use crate::{protocol::Budget, settings::Configuration};
 use homepool_adapter_docker::{Docker, Sandbox};
 use homepool_core::{ComputeBudget, MemberId, MemberState, Pool, Reservation, ReservationId};
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::{collections::BTreeMap, time::Instant};
 
 pub struct Inventory {
     pub pool: Pool,
     pub observed: BTreeMap<MemberId, Vec<Sandbox>>,
     pub complete: BTreeMap<MemberId, bool>,
+    pub settling: bool,
 }
 
 pub fn adapter(
     config: &Configuration,
     member: MemberId,
-    cancelled: &Arc<AtomicBool>,
+    budget: &Budget,
 ) -> Result<Docker, String> {
     let endpoint = config
         .docker
         .get(&member)
         .ok_or("member has no Docker endpoint")?
         .endpoint()?;
-    Ok(Docker::new(endpoint, member).with_cancellation(Arc::clone(cancelled)))
+    budget.check()?;
+    Docker::new(endpoint, member)
+        .with_operation_timeout(budget.timing.operation)
+        .map(|adapter| {
+            adapter
+                .with_cancellation(std::sync::Arc::clone(&budget.cancelled))
+                .with_deadline(budget.deadline)
+        })
+        .map_err(|e| e.to_string())
 }
 
 // Deterministic FNV-1a on the unambiguous pair, with an explicit collision check
@@ -45,18 +51,30 @@ impl Inventory {
     pub fn rebuild(
         config: &Configuration,
         previous: BTreeMap<MemberId, Vec<Sandbox>>,
-        cancelled: &Arc<AtomicBool>,
+        budget: &Budget,
+        settled: bool,
     ) -> Result<Self, String> {
         let mut pool = Pool::default();
         let mut observed = BTreeMap::new();
         let mut complete = BTreeMap::new();
         let mut identities = BTreeMap::new();
-        for declared in config.pool.members() {
-            let mut member = declared.clone();
+        let members: Vec<_> = config.pool.members().collect();
+        let inventory_end =
+            Instant::now() + budget.deadline.saturating_duration_since(Instant::now()) / 2;
+        for (index, declared) in members.iter().enumerate() {
+            let mut member = (*declared).clone();
             member.state = MemberState::Unreachable;
             pool.add_member(member).map_err(|e| e.to_string())?;
-            let result = adapter(config, declared.id, cancelled)
-                .and_then(|a| a.list().map_err(|e| e.to_string()));
+            // Fair shares of half the remaining request budget keep later
+            // healthy members observable even when earlier members stall.
+            let remaining_members = u32::try_from(members.len() - index).unwrap_or(u32::MAX);
+            let share = inventory_end.saturating_duration_since(Instant::now()) / remaining_members;
+            let member_end = Instant::now() + share;
+            let result = adapter(config, declared.id, budget).and_then(|a| {
+                a.with_deadline(member_end)
+                    .list()
+                    .map_err(|e| e.to_string())
+            });
             let (sandboxes, mut known) = match result {
                 Ok(sandboxes) => (sandboxes, true),
                 Err(_) => (
@@ -96,7 +114,7 @@ impl Inventory {
             }
             // A rejected import retains every observed handle but closes admission.
             // The next complete rebuild is the only way to activate this member.
-            if known {
+            if known && settled {
                 pool.set_state(declared.id, declared.state)
                     .map_err(|e| e.to_string())?;
             }
@@ -107,11 +125,12 @@ impl Inventory {
             pool,
             observed,
             complete,
+            settling: !settled,
         })
     }
 
     pub fn render(&self) -> Value {
-        json!({"members": self.pool.members().map(|m| {
+        json!({"settling": self.settling, "members": self.pool.members().map(|m| {
             let free = self.pool.free_budget(m.id).expect("known member");
             json!({"member": m.id.0, "state": match m.state { MemberState::Active => "active", MemberState::Draining => "draining", MemberState::Unreachable => "unreachable" }, "inventory_complete": self.complete[&m.id], "free": {"cpu_millicores": free.cpu_millicores, "memory_bytes": free.memory_bytes, "sandbox_slots": free.sandbox_slots}, "sandboxes": self.observed[&m.id].iter().map(|s| json!({"handle": handle(m.id, &s.container_id), "sandbox_id": s.sandbox_id, "state": s.state, "cpu_millicores": s.cpu_millicores, "memory_bytes": s.memory_bytes})).collect::<Vec<_>>()})
         }).collect::<Vec<_>>()})

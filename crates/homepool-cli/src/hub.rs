@@ -2,10 +2,10 @@
 use crate::{
     inventory::{self, Inventory},
     private,
-    protocol::{self, Placement, Request, Response},
-    settings::{self, CPU_QUANTUM, Configuration, HUB_POLL_INTERVAL},
+    protocol::{self, Budget, Message, Placement, Request, Response},
+    settings::{self, CPU_QUANTUM, Configuration, HUB_POLL_INTERVAL, RESPONSE_MARGIN, Timing},
 };
-use homepool_adapter_docker::{Environment, SandboxSpec};
+use homepool_adapter_docker::{Environment, Sandbox, SandboxSpec};
 use homepool_core::{MemberId, MemberState, SandboxRequest};
 use serde_json::{Value, json};
 use signal_hook::{
@@ -19,13 +19,14 @@ use std::{
     fs, io,
     os::unix::{
         fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
+        net::UnixListener,
     },
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 struct Signals {
@@ -107,28 +108,60 @@ pub fn serve(config_path: &Path, socket: &Path) -> Result<(), String> {
         .set_nonblocking(true)
         .map_err(|_| "could not configure hub socket")?;
     let signals = Signals::new()?;
-    let mut inventory = Inventory::rebuild(&config, BTreeMap::new(), &signals.cancelled)?;
+    let timing = Timing::load()?;
+    let settle_until = Instant::now() + timing.operation;
+    // Expose inventory immediately, but never trust an empty startup listing
+    // for admission until one complete operation window has elapsed.
+    let closed = Budget {
+        deadline: Instant::now(),
+        timing,
+        cancelled: Arc::clone(&signals.cancelled),
+    };
+    let mut inventory = Inventory::rebuild(&config, BTreeMap::new(), &closed, false)?;
     while !signals.cancelled.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 stream
                     .set_nonblocking(true)
                     .map_err(|_| "could not configure API stream")?;
-                let request =
-                    protocol::read_line(&mut stream, &signals.cancelled).and_then(|bytes| {
-                        serde_json::from_slice::<Request>(&bytes)
+                let read_deadline = Instant::now() + timing.request;
+                let mut response_deadline = read_deadline;
+                let request = protocol::read_line(&mut stream, &signals.cancelled, read_deadline)
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<Message>(&bytes)
                             .map_err(|_| "invalid API request".into())
                     });
-                let result = request.and_then(|request| {
+                let result = request.and_then(|message| {
+                    response_deadline = message.deadline(read_deadline)?;
+                    let budget = Budget {
+                        deadline: response_deadline
+                            .checked_sub(RESPONSE_MARGIN)
+                            .ok_or("invalid request deadline")?,
+                        timing,
+                        cancelled: Arc::clone(&signals.cancelled),
+                    };
+                    budget.check()?;
                     config = private::load(config_path)?;
-                    let previous = std::mem::take(&mut inventory.observed);
-                    inventory = Inventory::rebuild(&config, previous, &signals.cancelled)?;
+                    // Release verifies its exact handle at the engine. Drain and
+                    // add edit declarations; none need unrelated member probes.
+                    if matches!(
+                        &message.request,
+                        Request::Inventory {} | Request::Place { .. } | Request::Remove { .. }
+                    ) {
+                        let previous = std::mem::take(&mut inventory.observed);
+                        inventory = Inventory::rebuild(
+                            &config,
+                            previous,
+                            &budget,
+                            Instant::now() >= settle_until,
+                        )?;
+                    }
                     execute(
-                        request,
+                        message.request,
                         config_path,
                         &mut config,
                         &mut inventory,
-                        &signals.cancelled,
+                        &budget,
                     )
                 });
                 let response = protocol::bytes(&Response::from_result(result)).or_else(|_| {
@@ -137,7 +170,12 @@ pub fn serve(config_path: &Path, socket: &Path) -> Result<(), String> {
                     )))
                 })?;
                 // A disconnected client never terminates the hub or retries work.
-                let _ = protocol::write_line(&mut stream, &response, &signals.cancelled);
+                let _ = protocol::write_line(
+                    &mut stream,
+                    &response,
+                    &signals.cancelled,
+                    response_deadline,
+                );
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 std::thread::sleep(HUB_POLL_INTERVAL)
@@ -154,25 +192,18 @@ fn execute(
     path: &Path,
     config: &mut Configuration,
     inventory: &mut Inventory,
-    cancelled: &Arc<AtomicBool>,
+    budget: &Budget,
 ) -> Result<Value, String> {
+    budget.check()?;
     match request {
-        Request::Inventory => Ok(inventory.render()),
-        Request::Place { spec } => place(spec, config, inventory, cancelled),
+        Request::Inventory {} => Ok(inventory.render()),
+        Request::Place { spec } => place(spec, config, inventory, budget),
         Request::Release { handle } => {
             let (member, container) = handle.split_once(':').ok_or("invalid sandbox handle")?;
             let member = MemberId(member.parse().map_err(|_| "invalid sandbox handle")?);
-            // Retain mappings even when a shrink prevented ledger imports.
-            if !inventory
-                .observed
-                .get(&member)
-                .is_some_and(|items| items.iter().any(|s| s.container_id == container))
-            {
-                return Err(
-                    "handle is absent from observed inventory; reconcile before retrying".into(),
-                );
-            }
-            let adapter = inventory::adapter(config, member, cancelled)?;
+            // Stop/remove independently verify ownership on this exact member;
+            // unrelated unavailable members cannot prevent reconciliation.
+            let adapter = inventory::adapter(config, member, budget)?;
             adapter
                 .stop(container)
                 .and_then(|_| adapter.remove(container))
@@ -184,6 +215,7 @@ fn execute(
                 .pool
                 .set_state(MemberId(member), MemberState::Draining)
                 .map_err(|e| e.to_string())?;
+            budget.check()?;
             private::save(path, config)?;
             Ok(json!({"member": member, "state": "draining"}))
         }
@@ -199,6 +231,7 @@ fn execute(
                 .add_member(members[0].clone())
                 .map_err(|e| e.to_string())?;
             config.docker.extend(addition.docker);
+            budget.check()?;
             private::save(path, config)?;
             Ok(json!({"member": members[0].id.0}))
         }
@@ -218,6 +251,7 @@ fn execute(
             }
             config.pool = pool;
             config.docker.remove(&id);
+            budget.check()?;
             private::save(path, config)?;
             Ok(json!({"removed": member}))
         }
@@ -228,8 +262,12 @@ fn place(
     spec: Placement,
     config: &Configuration,
     inventory: &mut Inventory,
-    cancelled: &Arc<AtomicBool>,
+    budget: &Budget,
 ) -> Result<Value, String> {
+    budget.check()?;
+    if inventory.settling {
+        return Err("hub is settling previous operations; admission remains closed".into());
+    }
     if spec.cpu_millicores == 0 || !spec.cpu_millicores.is_multiple_of(CPU_QUANTUM) {
         return Err("CPU request must be positive and a multiple of 10 millicores".into());
     }
@@ -242,6 +280,9 @@ fn place(
         return Err(
             "sandbox identity already observed; reconcile existing handles before retrying".into(),
         );
+    }
+    if !spec.fresh && inventory.complete.values().any(|known| !known) {
+        return Err("strict placement requires complete inventory of every member; fresh is only for a never-submitted identity".into());
     }
     let mut environment = Environment::default();
     for (key, value) in spec.environment {
@@ -257,7 +298,7 @@ fn place(
             preferences: spec.preferences.into_iter().map(MemberId).collect(),
         })
         .map_err(|e| e.to_string())?;
-    let adapter = inventory::adapter(config, allocation.member_id, cancelled)?;
+    let adapter = inventory::adapter(config, allocation.member_id, budget)?;
     let result = adapter.start(&SandboxSpec {
         sandbox_id: spec.sandbox_id,
         image: spec.image,
@@ -277,11 +318,28 @@ fn place(
                 .push(sandbox);
             Ok(json!({"member": allocation.member_id.0, "handle": handle}))
         }
-        Err(_) => {
-            // Never retry a mutation. Reconcile before serving another request.
-            let previous = std::mem::take(&mut inventory.observed);
-            *inventory = Inventory::rebuild(config, previous, cancelled)?;
-            Err("start failed; outcome may be uncertain; inspect inventory before retrying".into())
+        Err(error) => {
+            // Preserve a known created handle even if subsequent lists fail.
+            // A later successful inventory is the only reconciliation step.
+            if let Some((container_id, sandbox_id)) = error.known_sandbox() {
+                inventory
+                    .observed
+                    .entry(allocation.member_id)
+                    .or_default()
+                    .push(Sandbox {
+                        container_id: container_id.into(),
+                        sandbox_id: sandbox_id.into(),
+                        state: "unknown".into(),
+                        cpu_millicores: Some(allocation.budget.cpu_millicores),
+                        memory_bytes: Some(allocation.budget.memory_bytes),
+                    });
+            }
+            inventory.complete.insert(allocation.member_id, false);
+            inventory
+                .pool
+                .set_state(allocation.member_id, MemberState::Unreachable)
+                .map_err(|e| e.to_string())?;
+            Err(format!("{error}; inspect inventory before retrying"))
         }
     }
 }
@@ -293,16 +351,22 @@ fn check_socket(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn call(socket: &Path, request: &Request) -> Result<Value, String> {
+pub fn call(socket: &Path, request: Request) -> Result<Value, String> {
+    let timing = settings::Timing::load()?;
+    let deadline = Instant::now() + timing.request;
+    let message = Message::new(request, timing.request)?;
     check_socket(socket)?;
-    let mut stream = UnixStream::connect(socket).map_err(|_| "could not connect to hub socket")?;
-    stream
-        .set_nonblocking(true)
-        .map_err(|_| "could not configure API stream")?;
     let cancelled = AtomicBool::new(false);
-    protocol::write_line(&mut stream, &protocol::bytes(request)?, &cancelled)?;
-    let response: Response = serde_json::from_slice(&protocol::read_line(&mut stream, &cancelled)?)
-        .map_err(|_| "invalid hub response")?;
+    let mut stream = protocol::connect(socket, &cancelled, deadline)?;
+    protocol::write_line(
+        &mut stream,
+        &protocol::bytes(&message)?,
+        &cancelled,
+        deadline,
+    )?;
+    let response: Response =
+        serde_json::from_slice(&protocol::read_line(&mut stream, &cancelled, deadline)?)
+            .map_err(|_| "invalid hub response")?;
     if response.version != 1 {
         return Err("unsupported hub API version".into());
     }

@@ -20,6 +20,8 @@ struct Fixture {
     created: RefCell<Vec<(u64, String)>>,
     cpu_ticks: u64,
     peak_kib: u64,
+    operation_ms: u64,
+    request_ms: u64,
 }
 impl Fixture {
     fn new(real: bool) -> Self {
@@ -36,6 +38,8 @@ impl Fixture {
             created: RefCell::new(Vec::new()),
             cpu_ticks: 0,
             peak_kib: 0,
+            operation_ms: if real { 5000 } else { 1000 },
+            request_ms: if real { 30000 } else { 6000 },
         };
         if !real {
             fs::write(
@@ -57,7 +61,7 @@ impl Fixture {
             std::env::var("HOMEPOOL_TEST_DOCKER_SOCKET")
                 .unwrap_or_else(|_| "/var/run/docker.sock".into())
         } else {
-            "/run/member/docker.sock".into()
+            format!("/run/member/{id}.sock")
         };
         format!(
             "version = 1\n[[members]]\nid = {id}\ntier = \"core\"\nstate = \"{state}\"\n[members.capabilities.compute]\ncpu_millicores = {cpu}\nmemory_bytes = 268435456\nsandbox_slots = {slots}\n[members.docker]\nsocket = {}\n",
@@ -74,7 +78,12 @@ impl Fixture {
             .env_remove("HOMEPOOL_CONFIG")
             .env_remove("HOMEPOOL_SOCKET")
             .env_remove("XDG_CONFIG_HOME")
-            .env_remove("XDG_RUNTIME_DIR");
+            .env_remove("XDG_RUNTIME_DIR")
+            .env(
+                "HOMEPOOL_OPERATION_TIMEOUT_MS",
+                self.operation_ms.to_string(),
+            )
+            .env("HOMEPOOL_REQUEST_TIMEOUT_MS", self.request_ms.to_string());
         if !self.real {
             c.env(
                 "PATH",
@@ -84,7 +93,7 @@ impl Fixture {
         }
         c
     }
-    fn start(&mut self) {
+    fn spawn(&mut self) {
         self.hub = Some(
             self.command()
                 .args(["hub", "--config", "members.toml", "--socket", "hub.sock"])
@@ -94,16 +103,25 @@ impl Fixture {
                 .spawn()
                 .unwrap(),
         );
+    }
+    fn start(&mut self) {
+        self.spawn();
+        self.wait_settled();
+    }
+    fn wait_settled(&mut self) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             assert!(
                 self.hub.as_mut().unwrap().try_wait().unwrap().is_none(),
                 "hub exited during startup"
             );
-            if self.root.join("hub.sock").exists()
-                && self.run(&["inventory", "--json"], None).status.success()
-            {
-                break;
+            if self.root.join("hub.sock").exists() {
+                let output = self.run(&["inventory", "--json"], None);
+                if output.status.success()
+                    && serde_json::from_slice::<Value>(&output.stdout).unwrap()["settling"] == false
+                {
+                    break;
+                }
             }
             assert!(Instant::now() < deadline, "hub startup watchdog");
             std::thread::sleep(Duration::from_millis(10));
@@ -161,7 +179,7 @@ impl Fixture {
         serde_json::from_slice(&out.stdout).unwrap()
     }
     fn place(&self, name: &str, cpu: u64, memory: u64) -> Value {
-        let result = self.ok(&["place", "--json"], Some(json!({"sandbox_id": name, "image": "alpine:3.22", "cpu_millicores": cpu, "memory_bytes": memory, "command": ["sleep", "300"]})));
+        let result = self.ok(&["place", "--json"], Some(json!({"sandbox_id": name, "image": "alpine:3.22", "cpu_millicores": cpu, "memory_bytes": memory, "command": ["sh", "-c", "trap 'exit 0' TERM; while :; do sleep 1 & wait $!; done"]})));
         if self.real {
             let (member, container) = result["handle"].as_str().unwrap().split_once(':').unwrap();
             self.created
@@ -428,4 +446,299 @@ fn process_sample(pid: u32) -> (u64, u64, u64) {
             .unwrap()
     };
     (ticks, kib("VmRSS:"), kib("VmHWM:"))
+}
+
+fn placement(identity: &str, fresh: bool, preferences: &[u64]) -> Value {
+    json!({"sandbox_id": identity, "image": "alpine:3.22", "cpu_millicores": 200, "memory_bytes": 33554432, "command": ["sleep", "300"], "fresh": fresh, "preferences": preferences})
+}
+
+impl Fixture {
+    fn members(&self, count: u64, slots: u32) {
+        let mut config = String::from("version = 1\n");
+        for member in 1..=count {
+            config.push_str(
+                self.member(member, "active", 1000, slots)
+                    .strip_prefix("version = 1\n")
+                    .unwrap(),
+            );
+        }
+        self.write("members.toml", &config);
+    }
+    fn pending_client(&self, args: &[&str], input: Option<&Value>) -> Child {
+        let mut child = self
+            .command()
+            .args(["--socket", "hub.sock"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(serde_json::to_string(input).unwrap().as_bytes())
+                .unwrap();
+        }
+        child.stdin.take();
+        child
+    }
+    fn wait_file(&self, name: &str) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while !self.root.join(name).exists() {
+            assert!(Instant::now() < until, "engine readiness watchdog");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    fn engine(&self) -> Value {
+        serde_json::from_slice(&fs::read(self.root.join("engine.json")).unwrap()).unwrap()
+    }
+    fn save_engine(&self, engine: &Value) {
+        self.write("engine.json", &serde_json::to_string(engine).unwrap());
+    }
+}
+
+#[test]
+fn two_member_retries_are_strict_and_fresh_work_survives_an_outage() {
+    for failure in ["start", "inspect", "restart"] {
+        let mut f = Fixture::new(false);
+        f.members(2, 3);
+        f.start();
+        let submitted = placement("submitted-once", false, &[1]);
+        if failure != "restart" {
+            f.write(
+                if failure == "start" {
+                    "uncertain-unavailable-1"
+                } else {
+                    "unconfirmed-1"
+                },
+                "",
+            );
+            assert!(
+                !f.run(&["place", "--json"], Some(submitted.clone()))
+                    .status
+                    .success()
+            );
+            let view = f.inventory();
+            let observed = &view["members"][0]["sandboxes"];
+            assert_eq!(
+                observed.as_array().unwrap().len(),
+                1,
+                "known failed-start handle must survive failed inventory"
+            );
+            assert_eq!(observed[0]["sandbox_id"], "submitted-once");
+            let mut false_promise = submitted.clone();
+            false_promise["fresh"] = json!(true);
+            assert!(
+                !f.run(&["place", "--json"], Some(false_promise))
+                    .status
+                    .success(),
+                "observed identities are rejected even with fresh"
+            );
+        } else {
+            f.ok(&["place", "--json"], Some(submitted.clone()));
+            f.stop(Signal::TERM);
+            f.write("unavailable-1", "");
+            f.start(); // No old in-memory identities survive this new process.
+            assert!(
+                f.inventory()["members"][0]["sandboxes"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(
+            !f.run(&["place", "--json"], Some(submitted))
+                .status
+                .success()
+        );
+        assert!(
+            !f.run(
+                &["place", "--json"],
+                Some(placement("strict-new", false, &[]))
+            )
+            .status
+            .success()
+        );
+        let fresh = f.ok(
+            &["place", "--json"],
+            Some(placement("never-submitted", true, &[])),
+        );
+        assert_eq!(fresh["member"], 2);
+        assert_eq!(
+            f.engine()["items"]
+                .as_object()
+                .unwrap()
+                .values()
+                .filter(|s| s["labels"]["homepool.sandbox"] == "submitted-once")
+                .count(),
+            1
+        );
+        f.release(&fresh);
+        f.stop(Signal::TERM);
+    }
+}
+
+#[test]
+fn restart_settles_delayed_engine_completion_and_keeps_over_budget_inventory_readable() {
+    let mut f = Fixture::new(false);
+    f.operation_ms = 2500;
+    f.members(1, 1);
+    f.start();
+    let old_pid = f.hub.as_ref().unwrap().id();
+    f.write("delay-create", "");
+    let client = f.pending_client(
+        &["place", "--json"],
+        Some(&placement("delayed", false, &[])),
+    );
+    f.wait_file("pending-create");
+    f.stop(Signal::TERM);
+    assert!(!client.wait_with_output().unwrap().status.success());
+    f.spawn();
+    assert_ne!(f.hub.as_ref().unwrap().id(), old_pid);
+    f.wait_file("hub.sock");
+    let early = f.inventory();
+    assert_eq!(early["settling"], true);
+    assert!(
+        early["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for fresh in [false, true] {
+        let out = f.run(&["place", "--json"], Some(placement("delayed", fresh, &[])));
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("settling"));
+    }
+    // Model completion by the engine after the old CLI has been killed. Only
+    // the engine record, never an old hub map, crosses the process boundary.
+    let pending: Value =
+        serde_json::from_slice(&fs::read(f.root.join("pending-create")).unwrap()).unwrap();
+    let id = pending["id"].as_str().unwrap().to_owned();
+    let mut engine = f.engine();
+    engine["items"][&id] = pending.clone();
+    f.save_engine(&engine);
+    fs::remove_file(f.root.join("delay-create")).unwrap();
+    f.wait_settled();
+    let view = f.inventory();
+    assert_eq!(view["members"][0]["inventory_complete"], true);
+    assert_eq!(view["members"][0]["free"]["sandbox_slots"], 0);
+    assert_eq!(view["members"][0]["sandboxes"].as_array().unwrap().len(), 1);
+    assert!(
+        !f.run(&["place", "--json"], Some(placement("delayed", false, &[])))
+            .status
+            .success()
+    );
+    // Existing/legacy over-budget work must remain readable, including when
+    // two observations compete for a one-slot declared budget.
+    let legacy_id = "f".repeat(64);
+    let mut legacy = pending;
+    legacy["id"] = json!(legacy_id);
+    legacy["name"] = json!("legacy-duplicate");
+    engine["items"][&legacy_id] = legacy;
+    f.save_engine(&engine);
+    let over = f.inventory();
+    assert_eq!(over["members"][0]["inventory_complete"], false);
+    assert_eq!(over["members"][0]["free"]["sandbox_slots"], 0);
+    assert_eq!(over["members"][0]["sandboxes"].as_array().unwrap().len(), 2);
+    f.ok(&["release", &format!("1:{id}")], None);
+    assert_eq!(f.inventory()["members"][0]["inventory_complete"], true);
+    f.ok(&["release", &format!("1:{legacy_id}")], None);
+    f.stop(Signal::TERM);
+}
+
+#[test]
+fn several_stalled_members_leave_inventory_release_and_drain_usable_and_expired_queue_work_never_starts()
+ {
+    let mut f = Fixture::new(false);
+    f.operation_ms = 3000;
+    f.request_ms = 4000; // Two full member waits would exceed this request.
+    f.members(3, 3);
+    f.start();
+    let first = f.ok(
+        &["place", "--json"],
+        Some(placement("existing", false, &[3])),
+    );
+    f.write("stall-1", "");
+    f.write("stall-2", "");
+    let started = Instant::now();
+    let view = f.inventory();
+    assert!(started.elapsed() < Duration::from_millis(f.request_ms));
+    assert_eq!(view["members"][0]["inventory_complete"], false);
+    assert_eq!(view["members"][1]["inventory_complete"], false);
+    assert_eq!(view["members"][2]["inventory_complete"], true);
+    assert_eq!(
+        view["members"][2]["sandboxes"][0]["handle"],
+        first["handle"]
+    );
+    let placed = f.ok(
+        &["place", "--json"],
+        Some(placement("fresh-during-outage", true, &[3])),
+    );
+    let started = Instant::now();
+    f.release(&placed);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "release must not probe unrelated stalled members"
+    );
+    fs::remove_file(f.root.join("transport")).unwrap();
+    let waiting_inventory = f.pending_client(&["inventory", "--json"], None);
+    f.wait_file("transport");
+    // This client expires while its frame is queued behind the inventory.
+    // The server must use the original deadline, not grant a new window.
+    let mut queued = f
+        .command()
+        .env("HOMEPOOL_REQUEST_TIMEOUT_MS", "300")
+        .args(["--socket", "hub.sock", "place", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    queued
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::to_string(&placement("expired-in-queue", true, &[3]))
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+    let expired = queued.wait_with_output().unwrap();
+    assert!(!expired.status.success());
+    assert!(String::from_utf8_lossy(&expired.stderr).contains("deadline"));
+    assert!(
+        waiting_inventory
+            .wait_with_output()
+            .unwrap()
+            .status
+            .success()
+    );
+    // A subsequent response proves the queued frame has been processed.
+    let reconciled = f.inventory();
+    assert_eq!(
+        reconciled["members"][2]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !f.engine()["items"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|s| s["labels"]["homepool.sandbox"] == "expired-in-queue")
+    );
+    let started = Instant::now();
+    f.ok(&["drain", "3"], None);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "drain must not probe unrelated stalled members"
+    );
+    f.release(&first);
+    f.stop(Signal::TERM);
 }
