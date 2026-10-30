@@ -32,8 +32,10 @@ Text means valid UTF-8 without NUL bytes; other files are treated as binary and
 skipped. Local checks also include non-ignored untracked files before staging.
 The explicit exclusions are `docs/`, `*.md`, files named `LICENSE`, and
 `xtask/tests/fixtures/`. Generated files normally stay outside the Git inventory;
-tracked files under `target/` are still scanned. Symlinks fail closed. Historical
-scans use the exact Git tree's inventory, blob contents, and executable modes;
+tracked files under `target/` are still scanned. Symlinks and other unsupported
+entry types fail closed before any text exclusions, including excluded documentation
+and fixtures. Historical scans use the exact Git tree's inventory, blob contents,
+and executable modes;
 export attributes and checkout filters cannot omit or rewrite the evidence.
 
 Each finding reports its relative file, line, column, and category. The categories
@@ -43,7 +45,20 @@ Windows drive-qualified user profiles), email addresses, and HTTP or HTTPS URL
 literals with case-insensitive schemes. Sentence punctuation does not hide IPv6.
 IPv4 dotted-quads are checked across full Rust source text, including code and
 bare macro input, so `stringify!` and `doc = stringify!` cannot hide contiguous
-addresses. Rust sources are also tokenized with `ra-ap-rustc_lexer`: IPv6, home
+addresses. The code pass exempts numeric field projections after an identifier,
+literal, closing delimiter, or `?`, including whitespace and comments before the
+field. Strings and comments containing the same dotted text still count.
+
+In all text, IPv4 candidates inside version-shaped tokens are exempt: a three-part
+numeric core, optionally followed by `-` prerelease and/or `+` build metadata.
+Metadata consists of nonempty dot-separated ASCII alphanumeric or hyphen
+identifiers. For example, `1.2.3+192.0.2.1` is version context; a standalone
+four-part number or a quad after an arbitrary label and `+` is still an address
+candidate. This heuristic does not fully validate SemVer (for example, leading
+zeros are accepted). An actual address embedded in version metadata is also
+exempt; review must catch that trade-off under the accidental-leak threat model.
+
+Rust sources are also tokenized with `ra-ap-rustc_lexer`: IPv6, home
 paths, email addresses, and URLs are checked only in string-literal contents
 (including byte, C, and raw strings), comments, and shebang text. Literal suffixes
 are consumed with their token. Other text files use the plain-text scanner for
