@@ -2,8 +2,10 @@ mod config;
 mod history;
 mod layers;
 pub mod literals;
+mod modules;
 mod ratchet;
 mod rust_text;
+mod sources;
 
 use config::{Allowances, Counts, Layers, METRICS};
 use std::path::{Path, PathBuf};
@@ -20,14 +22,28 @@ fn measure(root: &Path, files: &[PathBuf], repository: &str) -> Result<Measureme
     let layers: Layers = config::read(root, "structure/layers.toml")?;
     let baseline = config::read(root, "structure/baseline.toml")?;
     let allowances: Allowances = config::read(root, "structure/allowances.toml")?;
-    let layer_findings = layers::violations(&layers::metadata(root)?, &layers)?;
+    let metadata = layers::metadata(root)?;
+    let layer_findings = layers::violations(&metadata, &layers)?;
     let literal_findings = literals::scan(root, files, repository)?;
+    let sources = sources::read(root, files)?;
+    let copies = sources::copies(&sources);
+    let settings = sources::settings(root, &sources, &metadata);
+    let cycles = modules::scan(root, &sources, &metadata)?;
     let counts = Counts {
         layer_violations: layer_findings.len() as u64,
         instance_literals: literal_findings.len() as u64,
         allowance_count: allowances.allowances.len() as u64,
+        module_cycles: cycles.count,
+        source_copies: copies.len() as u64,
+        settings_in_code: settings.len() as u64,
     };
-    let findings = layer_findings.into_iter().chain(literal_findings).collect();
+    let findings = layer_findings
+        .into_iter()
+        .chain(literal_findings)
+        .chain(copies)
+        .chain(settings)
+        .chain(cycles.findings)
+        .collect();
     Ok(Measurement {
         counts,
         baseline,

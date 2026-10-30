@@ -17,6 +17,14 @@ pub struct Metadata {
 pub struct Package {
     pub id: String,
     pub name: String,
+    pub manifest_path: std::path::PathBuf,
+    pub targets: Vec<Target>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Target {
+    pub name: String,
+    pub src_path: std::path::PathBuf,
 }
 
 #[derive(Debug, Deserialize)]

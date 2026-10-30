@@ -1,7 +1,21 @@
 use serde::Deserialize;
 use std::{collections::BTreeMap, fs, path::Path};
 
-pub const METRICS: [&str; 3] = ["layer_violations", "instance_literals", "allowance_count"];
+pub const DEBT_METRICS: [&str; 5] = [
+    "layer_violations",
+    "instance_literals",
+    "module_cycles",
+    "source_copies",
+    "settings_in_code",
+];
+pub const METRICS: [&str; 6] = [
+    "layer_violations",
+    "instance_literals",
+    "module_cycles",
+    "source_copies",
+    "settings_in_code",
+    "allowance_count",
+];
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -9,6 +23,13 @@ pub struct Counts {
     pub layer_violations: u64,
     pub instance_literals: u64,
     pub allowance_count: u64,
+    // Older base snapshots predate these metrics and have an implicit zero baseline.
+    #[serde(default)]
+    pub module_cycles: u64,
+    #[serde(default)]
+    pub source_copies: u64,
+    #[serde(default)]
+    pub settings_in_code: u64,
 }
 
 impl Counts {
@@ -17,6 +38,9 @@ impl Counts {
             "layer_violations" => self.layer_violations,
             "instance_literals" => self.instance_literals,
             "allowance_count" => self.allowance_count,
+            "module_cycles" => self.module_cycles,
+            "source_copies" => self.source_copies,
+            "settings_in_code" => self.settings_in_code,
             _ => unreachable!("validated metric"),
         }
     }

@@ -1,0 +1,10 @@
+const CONNECT_TIMEOUT_MS: u64 = 2000;
+static POLL_INTERVAL_SECS: u64 = 30;
+let mut retry_count = 3;
+let ref payload_size_limit = 4096_u64;
+const UPLOAD_SIZE_LIMIT_BYTES: usize = 8192;
+let listen_port: u16 = 8080;
+let storage_path = "data/pool";
+const CACHE_PATH: &str = r#"data/cache"#;
+let timeout_secs = 1.5_f64;
+let r#port = 443;
