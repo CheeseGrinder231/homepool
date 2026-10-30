@@ -7,3 +7,4 @@
 - Keep PRs small and focused. Run formatting, clippy, and workspace tests for Rust changes.
 - Keep CI on GitHub-hosted `ubuntu-latest` runners with read-only contents permissions. Pin actions to full commit SHAs with version comments. Do not use secrets or privileged PR triggers.
 - Do not set or override Git identity.
+- Report vulnerabilities privately through GitHub's "Report a vulnerability" page, never in public issues. See `SECURITY.md` for the reporting link and required details.
