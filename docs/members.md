@@ -54,6 +54,7 @@ new version.
 | `members[].capabilities.compute.cpu_millicores` | Required unsigned 64-bit integer when compute is present; 1,000 millicores is one CPU core. |
 | `members[].capabilities.compute.memory_bytes` | Required unsigned 64-bit integer when compute is present. |
 | `members[].capabilities.compute.sandbox_slots` | Required unsigned 32-bit integer when compute is present; maximum simultaneous sandboxes. |
+| `members[].capabilities.compute.profiles` | Optional table of named launch profiles; defaults to empty. |
 
 All resource amounts are integers, never floats or unit strings. Zero is valid.
 Unsigned 64-bit fields accept `0` through `18446744073709551615`; sandbox slots
@@ -103,6 +104,9 @@ For a single member with ID 1 and empty capabilities:
 
 When compute is present, `compute` is an object with exactly `cpu_millicores`,
 `memory_bytes` and `sandbox_slots`, each a JSON integer in the ranges above.
+When profiles are declared, compute also includes `profiles`, a sorted array of
+names only; an empty array is omitted. Profile settings and paths never appear
+in either human or JSON status output.
 An empty pool is `{"version":1,"members":[]}`. Consumers must preserve large integer
 values exactly; some JSON runtimes need an integer-aware parser beyond their
 native floating-point range. Default JSON reports the same declarations as the human
@@ -165,3 +169,51 @@ These private values are validated and omitted from status output. Existing
 files without endpoints retain the same declaration-only status behavior.
 See [hub.md](hub.md) for endpoint examples, private-file requirements, atomic
 `add`/`remove` updates and persistent `drain` behavior.
+
+## Named sandbox profiles
+
+The owner may define typed launch settings under
+`members[].capabilities.compute.profiles.<name>`. Existing version 1 files remain
+valid. Profile and volume suffix names start with an ASCII letter or digit and
+contain only ASCII letters, digits, dash, underscore and dot. Names are
+case-sensitive. Volume suffixes have at most 96 bytes so the complete name fits
+a 255-byte local volume directory component even with the longest sandbox and
+member identities. A profile can be empty; omitted booleans default to `false` and
+omitted mount arrays default to empty.
+
+```toml
+[members.capabilities.compute.profiles.runner]
+privileged = true
+pids_limit = 256
+shm_bytes = 67108864
+memory_swap_bytes = 536870912
+tmpfs = [{ target = "/scratch", options = "rw,size=64m,mode=1777" }]
+volumes = [{ name = "cache", target = "/cache", read_only = false }]
+binds = [{ source = "/srv/runner-input", target = "/input", read_only = true }]
+```
+
+`pids_limit`, `shm_bytes` and `memory_swap_bytes` are optional positive integers
+up to `9223372036854775807`, Docker's signed integer limit. Swap is the total
+memory-plus-swap limit and must be at least the placement's `memory_bytes`.
+`tmpfs` entries require `target` and `options`. Options accept only ASCII letters,
+digits, comma, equals, dot, underscore and dash. An empty options string uses
+Docker's defaults. Volume entries require `name` and `target`; bind entries require
+`source` and `target`. `read_only` defaults to `false` for both.
+
+All mount paths must be absolute and contain no commas, double quotes or control
+characters. Tmpfs targets additionally reject colon, which separates options.
+Bind sources refer to that member's engine filesystem. Unknown fields, bad names,
+paths, options, and zero or out-of-range limits fail when the file is read,
+including through `add`, before running Docker. Docker still validates supported
+options and engine-specific limits at creation.
+
+Anyone who can reach the owner-only hub socket can select a profile and start
+privileged containers on a member offering it. On a rootless engine this stays
+inside the engine's user namespace. On a rootful engine it is effectively root
+on the member. Define privileged profiles only where that access is intended.
+
+Each volume is named `homepool-<member-id>-<sandbox-id>-<name>`, using the existing
+deterministic container name and the configured suffix. Different sandbox
+identities get separate volumes. `release` never deletes volumes. Reusing the
+same identity on the same member after release reuses its volume; the owner
+manages retained data and removes volumes separately.

@@ -118,8 +118,31 @@ Optional `preferences` is an array of numeric member IDs; the core placement
 rules apply. Optional `command` is a string array; omission uses the image default.
 Optional `environment` is a map of explicit strings, sent over Docker stdin. Keep
 secret values out of shell history, process arguments, images and identities;
-use a private producer for secret-bearing placement input. Mounts are not exposed
-by this small API. Placement returns `{"member":1,"handle":"1:<full-container-id>"}`.
+use a private producer for secret-bearing placement input.
+
+Optional `profile` is a string naming a profile in the private member file.
+Only members declaring that exact name are eligible; capacity, preferences,
+strict/fresh inventory and the numeric ID tie-break rule still apply. An unknown
+profile or one offered only by full or draining members has no eligible capacity.
+After inventory and selection, swap below the requested memory is rejected with
+`profile memory swap must be at least requested memory` before reserving capacity
+or creating a container. Profile settings may differ between members offering the
+same name; the selected member's settings apply.
+Omitting `profile` preserves existing Docker arguments. The request accepts no
+launch flags, mount paths, volumes or profile settings.
+
+Placement returns `{"member":1,"handle":"1:<full-container-id>"}`.
+
+For example, add `"profile":"runner"` to the placement JSON above to select
+`members[].capabilities.compute.profiles.runner`. The member-file schema also
+applies to `add`; atomic rewrites preserve profiles across drain, removal of
+other members, and restart. Status shows names only. See [members.md](members.md)
+for all typed settings and validation rules.
+
+Anyone able to reach the owner-only socket can use an offered privileged profile.
+On a rootless Docker engine that privilege stays inside the engine's user
+namespace; on a rootful engine it is effectively root on the member.
+
 The handle is the member ID and full Docker container ID, independent of inventory
 order, process lifetime and the sandbox label. `release` stops and removes that
 exact managed container after verifying its ownership, including when the member

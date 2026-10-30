@@ -229,6 +229,7 @@ fn execute(
                 .add_member(members[0].clone())
                 .map_err(|e| e.to_string())?;
             config.docker.extend(addition.docker);
+            config.profiles.extend(addition.profiles);
             budget.check()?;
             private::save(path, config)?;
             Ok(json!({"member": members[0].id.0}))
@@ -254,6 +255,7 @@ fn execute(
             }
             config.pool = pool;
             config.docker.remove(&id);
+            config.profiles.remove(&id);
             budget.check()?;
             private::save(path, config)?;
             Ok(json!({"removed": member}))
@@ -293,13 +295,30 @@ fn place(
             .insert(&key, &value)
             .map_err(|e| e.to_string())?;
     }
+    let request = SandboxRequest {
+        cpu_millicores: spec.cpu_millicores,
+        memory_bytes: spec.memory_bytes,
+        profile: spec.profile.clone(),
+        preferences: spec.preferences.into_iter().map(MemberId).collect(),
+    };
+    let member = inventory.pool.place(&request).map_err(|e| e.to_string())?;
+    let profile = spec
+        .profile
+        .as_ref()
+        .and_then(|name| config.profiles.get(&member)?.get(name))
+        .cloned()
+        .unwrap_or_default();
+    if profile
+        .memory_swap_bytes
+        .is_some_and(|swap| swap < spec.memory_bytes)
+    {
+        return Err("profile memory swap must be at least requested memory".into());
+    }
+    // Selection is pure and deterministic; validation precedes reservation and
+    // container creation on the selected member. Inventory reads happen first.
     let allocation = inventory
         .pool
-        .reserve(&SandboxRequest {
-            cpu_millicores: spec.cpu_millicores,
-            memory_bytes: spec.memory_bytes,
-            preferences: spec.preferences.into_iter().map(MemberId).collect(),
-        })
+        .reserve(&request)
         .map_err(|e| e.to_string())?;
     let adapter = inventory::adapter(config, allocation.member_id, budget)?;
     let result = adapter.start(&SandboxSpec {
@@ -308,6 +327,7 @@ fn place(
         cpu_millicores: spec.cpu_millicores,
         memory_bytes: spec.memory_bytes,
         mounts: Vec::new(),
+        profile,
         environment,
         command: spec.command,
     });
@@ -409,6 +429,62 @@ pub fn call(socket: &Path, request: Request) -> Result<Value, String> {
 mod tests {
     use super::{Signals, bind_error};
     use std::{io, os::unix::process::ExitStatusExt, path::Path, process::Command};
+    #[test]
+    fn swap_validation_leaves_no_reservation_and_needs_no_adapter() {
+        let config = crate::settings::parse_configuration(
+            Path::new("members.toml"),
+            r#"
+version = 1
+[[members]]
+id = 1
+tier = "core"
+state = "active"
+[members.capabilities.compute]
+cpu_millicores = 1000
+memory_bytes = 268435456
+sandbox_slots = 2
+[members.capabilities.compute.profiles.runner]
+memory_swap_bytes = 16777216
+"#,
+        )
+        .unwrap();
+        let mut pool = homepool_core::Pool::default();
+        for member in config.pool.members() {
+            pool.add_member(member.clone()).unwrap();
+        }
+        let mut inventory = crate::inventory::Inventory {
+            pool,
+            observed: std::collections::BTreeMap::new(),
+            complete: std::collections::BTreeMap::from([(homepool_core::MemberId(1), true)]),
+            settling: false,
+        };
+        let spec = serde_json::from_value(serde_json::json!({"sandbox_id":"swap","image":"alpine:3.22","cpu_millicores":100,"memory_bytes":33554432,"profile":"runner"})).unwrap();
+        let budget = crate::protocol::Budget {
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+            timing: crate::settings::Timing {
+                operation: std::time::Duration::from_secs(1),
+                request: std::time::Duration::from_secs(1),
+            },
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let before = inventory
+            .pool
+            .free_budget(homepool_core::MemberId(1))
+            .unwrap();
+        assert_eq!(
+            super::place(spec, &config, &mut inventory, &budget).unwrap_err(),
+            "profile memory swap must be at least requested memory"
+        );
+        assert_eq!(inventory.pool.reservations().count(), 0);
+        assert_eq!(
+            inventory
+                .pool
+                .free_budget(homepool_core::MemberId(1))
+                .unwrap(),
+            before
+        );
+    }
+
     #[test]
     fn other_bind_errors_do_not_claim_an_existing_or_overlong_path() {
         assert_eq!(

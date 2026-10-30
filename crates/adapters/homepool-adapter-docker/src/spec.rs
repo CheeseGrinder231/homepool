@@ -64,14 +64,22 @@ pub(crate) fn create_args(member: MemberId, spec: &SandboxSpec) -> Result<Vec<St
         "--env-file".into(),
         ENV_STDIN_PATH.into(),
     ];
-    for mount in &spec.mounts {
+    if spec
+        .profile
+        .memory_swap_bytes
+        .is_some_and(|swap| swap < spec.memory_bytes)
+    {
+        return Err(Error::InvalidInput(
+            "profile memory swap below requested memory",
+        ));
+    }
+    spec.profile
+        .append_args(&container_name(member, &spec.sandbox_id), &mut args)?;
+    for mount in spec.mounts.iter().chain(&spec.profile.binds) {
         for path in [&mount.source, &mount.target] {
             // Reject CSV separators and quotes, rather than changing their meaning
             // in Docker's --mount parser. Paths refer to the engine's machine.
-            if !path.starts_with('/')
-                || path.contains([',', '"'])
-                || path.chars().any(char::is_control)
-            {
+            if !crate::profile::valid_mount_path(path) {
                 return Err(Error::InvalidInput("bind mount"));
             }
         }
