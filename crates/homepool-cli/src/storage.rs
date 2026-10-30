@@ -112,7 +112,9 @@ fn with_garage<T>(
     let result = operation(&garage);
     // Both success and error returns have completed child cleanup.
     terminate_immediately.store(true, Ordering::SeqCst);
-    if interrupted.load(Ordering::SeqCst) != 0 {
+    // Preserve a persistence failure after credentials were issued, even if a
+    // signal arrived during the write: the owner must know a consumer may exist.
+    if interrupted.load(Ordering::SeqCst) != 0 && result.is_ok() {
         return Err(homepool_adapter_garage::Error::CANCELLED.to_string());
     }
     result
