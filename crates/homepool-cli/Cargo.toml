@@ -1,0 +1,16 @@
+[package]
+name = "homepool-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "homepool"
+path = "src/main.rs"
+
+[dependencies]
+homepool-core = { version = "0.1.0", path = "../homepool-core" }
+
+[lints]
+workspace = true

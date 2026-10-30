@@ -1,0 +1,10 @@
+[package]
+name = "fixture-adapter-a"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fixture-core = { path = "../core" }
+
+[dev-dependencies]
+fixture-adapter-b = { path = "../adapter-b" }

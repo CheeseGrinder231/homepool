@@ -1,0 +1,7 @@
+[package]
+name = "fixture-adapter-b"
+version = "0.1.0"
+edition = "2024"
+
+[target.'cfg(windows)'.dependencies]
+renamed = { package = "fixture-core", path = "../core", optional = true }

@@ -1,0 +1,7 @@
+[package]
+name = "fixture-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fixture-adapter-a = { path = "../adapter-a" }
