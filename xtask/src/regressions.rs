@@ -815,6 +815,20 @@ pub const TEXT: &str = "(value){fields}";
 }
 
 #[test]
+fn identifier_prefixed_tuple_text_is_missed_in_strings_and_comments() {
+    let repo = Repository::new();
+    let fields = ".0".repeat(4);
+    for text in [
+        format!("pub const TEXT: &str = \"value{fields}\";\n"),
+        format!("// value{fields}\n"),
+    ] {
+        repo.write("src/lib.rs", &text);
+        let findings = literals::scan(repo.root(), &[PathBuf::from("src/lib.rs")], "").unwrap();
+        assert!(findings.is_empty(), "{text}: {findings:?}");
+    }
+}
+
+#[test]
 fn version_context_exempts_metadata_but_not_standalone_addresses() {
     let repo = Repository::new();
     let address = Ipv4Addr::new(10, 20, 30, 40);

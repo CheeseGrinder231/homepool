@@ -48,7 +48,10 @@ IPv4 dotted-quads are checked across full Rust source text, including code and
 bare macro input, so `stringify!` and `doc = stringify!` cannot hide contiguous
 addresses. The code pass exempts numeric field projections after an identifier,
 literal, closing delimiter, or `?`, including whitespace and comments before the
-field. Strings and comments containing the same dotted text still count.
+field. This projection exemption applies only to code; strings and comments still
+follow the token-boundary and version-context rules. In particular, an identifier
+directly followed by four numeric tuple fields is missed in strings and comments
+because of the token-boundary rule.
 
 In all text, IPv4 candidates inside version-shaped tokens are exempt: a three-part
 numeric core, optionally followed by `-` prerelease and/or `+` build metadata.
