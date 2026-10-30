@@ -65,8 +65,10 @@ The schema currently needs neither names nor network addresses.
 
 ## Diagnostics
 
-Failures exit with code `1`, write a diagnostic to stderr and leave stdout empty,
-including with `--json`. Successful status exits with code `0`.
+Failures exit with code `1` and write a diagnostic to stderr. Failures before output
+begins leave stdout empty, including with `--json`. Output failures, such as a reader
+closing a pipe, may leave partial output (including incomplete JSON) on stdout.
+Successful status exits with code `0`.
 Validation diagnostics have the form:
 
 ```text
@@ -84,8 +86,9 @@ the relevant option or environment variable before a file is selected.
 ## Status JSON version 1
 
 `homepool status --json` writes one JSON object followed by a newline. The top-level
-`version` versions this output contract. Members are ordered by ascending numeric
-ID, independent of input order. Keys, types, enum spellings and null handling are
+`version` versions this output contract independently of the member-file schema.
+Members are ordered by ascending numeric ID, independent of input order.
+Keys, types, enum spellings and null handling are
 stable for version 1; consumers should parse JSON rather than depend on whitespace
 or object key order. No paths, timestamps or transient runtime data are included.
 
