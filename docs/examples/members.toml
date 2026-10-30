@@ -1,0 +1,33 @@
+# Placeholder contributions only. Copy outside the repository before editing.
+# IDs are opaque pool-local numbers, not machine names or addresses.
+version = 1
+
+# A member contributing compute and storage.
+[[members]]
+id = 1
+tier = "core"
+state = "active"
+[members.capabilities]
+storage_bytes = 107374182400
+[members.capabilities.compute]
+cpu_millicores = 2000
+memory_bytes = 4294967296
+sandbox_slots = 2
+
+# A member contributing only storage.
+[[members]]
+id = 2
+tier = "burst"
+state = "unreachable"
+[members.capabilities]
+storage_bytes = 53687091200
+
+# A compute member that accepts no new work.
+[[members]]
+id = 3
+tier = "burst"
+state = "draining"
+[members.capabilities.compute]
+cpu_millicores = 1000
+memory_bytes = 2147483648
+sandbox_slots = 1
