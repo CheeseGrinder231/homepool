@@ -126,9 +126,9 @@ fn handle(
     accepted: Instant,
     timing: Timing,
 ) {
-    let header_end = accepted + HTTP_IO_TIMEOUT;
+    let input_end = accepted + HTTP_IO_TIMEOUT;
     let mut post_resource = false;
-    let result = read_request(&mut stream, header_end).and_then(|bytes| {
+    let result = read_request(&mut stream, accepted + HTTP_HEADER_TIMEOUT).and_then(|bytes| {
         post_resource = bytes.split(|b| *b == b' ').nth(1) == Some(b"/v1/jobs");
         route(
             &bytes,
@@ -136,14 +136,14 @@ fn handle(
             token,
             jobs,
             socket,
-            header_end,
+            input_end,
             accepted + timing.request,
         )
     });
     let (status, body) = result.unwrap_or_else(|status| (status, Vec::new()));
     // Hub calls have their existing total request budget. Slow reads and writes
     // cannot extend this absolute connection ceiling by making tiny progress.
-    let Some(end) = header_end
+    let Some(end) = input_end
         .checked_add(timing.request)
         .and_then(|t| t.checked_add(HTTP_IO_TIMEOUT))
     else {
@@ -187,16 +187,17 @@ fn handle(
     }
     // Deliver the response's FIN before closing with unread request bytes.
     // Otherwise early rejections (especially 413) can reset away the response.
-    // Drain only a bounded suffix under the same response I/O deadline.
+    // Only consume bytes already available: a peer that keeps its write side
+    // open must not retain the connection slot after receiving the response.
     let _ = stream.shutdown(Shutdown::Write);
+    if stream.set_nonblocking(true).is_err() {
+        return;
+    }
     let mut drained = 0;
     while drained < HTTP_DRAIN_BYTES {
-        let wait = end.saturating_duration_since(Instant::now());
-        if wait.is_zero() || stream.set_read_timeout(Some(wait)).is_err() {
-            break;
-        }
         let mut buffer = [0; 1024];
-        match stream.read(&mut buffer) {
+        let remaining = buffer.len().min(HTTP_DRAIN_BYTES - drained);
+        match stream.read(&mut buffer[..remaining]) {
             Ok(0) | Err(_) => break,
             Ok(n) => drained += n,
         }
@@ -339,6 +340,93 @@ fn route(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unauthorized_responses_release_slots_with_peers_still_open() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let token = Token::parse(b"example-token").unwrap();
+        let jobs = Jobs::load(None).unwrap();
+        let mut peers = Vec::new();
+        for _ in 0..=HTTP_CONNECTIONS {
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .unwrap();
+            peer.write_all(b"POST /v1/jobs HTTP/1.1\r\nContent-Length: 4096\r\n\r\n")
+                .unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let inspection = stream.try_clone().unwrap();
+            active.fetch_add(1, Ordering::AcqRel);
+            {
+                let _slot = ConnectionSlot(Arc::clone(&active));
+                handle(
+                    stream,
+                    &token,
+                    &jobs,
+                    Path::new("unused.sock"),
+                    Instant::now(),
+                    Timing {
+                        operation: API_TIMEOUT,
+                        request: API_TIMEOUT,
+                    },
+                );
+            }
+            // Inspect the OS flag instead of racing a five-second drain timer.
+            // No body or peer EOF has arrived, so a blocking drain would wait.
+            assert!(
+                rustix::fs::fcntl_getfl(&inspection)
+                    .unwrap()
+                    .contains(rustix::fs::OFlags::NONBLOCK)
+            );
+            assert_eq!(active.load(Ordering::Acquire), 0);
+            drop(inspection);
+            let mut response = String::new();
+            peer.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+            assert!(response.contains("WWW-Authenticate: Bearer\r\n"));
+            peers.push(peer);
+        }
+    }
+
+    #[test]
+    fn early_errors_are_delivered_with_more_unread_input_than_the_drain_cap() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let token = Token::parse(b"example-token").unwrap();
+        let jobs = Jobs::load(None).unwrap();
+        for (authorization, status) in [("", 401), ("Authorization: Bearer example-token\r\n", 413)]
+        {
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .unwrap();
+            peer.set_write_timeout(Some(std::time::Duration::from_secs(30)))
+                .unwrap();
+            peer.write_all(
+                format!("POST /v1/jobs HTTP/1.1\r\n{authorization}Content-Length: 24576\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+            peer.write_all(&vec![b'x'; HTTP_DRAIN_BYTES * 2]).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            handle(
+                stream,
+                &token,
+                &jobs,
+                Path::new("unused.sock"),
+                Instant::now(),
+                Timing {
+                    operation: API_TIMEOUT,
+                    request: API_TIMEOUT,
+                },
+            );
+            let mut response = String::new();
+            if let Err(error) = peer.read_to_string(&mut response) {
+                assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+            }
+            assert!(response.starts_with(&format!("HTTP/1.1 {status} ")));
+            assert!(response.ends_with("\r\n\r\n"));
+            assert!(response.contains("Content-Length: 0\r\n"));
+        }
+    }
 
     #[test]
     fn inventory_projection_fails_closed_and_marks_stale_observations() {

@@ -631,7 +631,9 @@ binds = [{source = "/srv/input", target = "/input", read_only = true}]"#,
 /// HTTP request line plus headers, and number of parsed fields.
 pub const HTTP_HEADER_BYTES: usize = 8192;
 pub const HTTP_HEADER_COUNT: usize = 32;
-/// Absolute header deadline and response-write allowance (no keep-alive).
+/// Absolute header deadline, independent of the peer address or token.
+pub const HTTP_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Absolute header-and-body deadline and response-write allowance (no keep-alive).
 pub const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Bound concurrent connection threads, including hub calls.
 pub const HTTP_CONNECTIONS: usize = 32;
@@ -644,5 +646,5 @@ pub const OPERATIONS_BYTES: usize = API_SIZE_LIMIT;
 /// SHA-256 request digest plus namespace and operation must fit a 128-byte identity.
 pub const OPERATION_NAME_BYTES: usize = 59;
 
-/// Bounded unread suffix consumed after sending a response, sharing its deadline.
+/// Maximum already-available unread suffix consumed without blocking after a response.
 pub const HTTP_DRAIN_BYTES: usize = HTTP_HEADER_BYTES + HTTP_BODY_BYTES;

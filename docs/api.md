@@ -134,11 +134,27 @@ capacity until released.
 
 The request line and headers together are limited to 8 KiB and 32 header fields;
 oversized requests receive `431`. Invalid HTTP receives `400`. An absolute
-five-second header-and-body deadline prevents slow trickles from extending the wait;
+one-second header deadline and a five-second header-and-body deadline, both measured
+from acceptance, prevent slow trickles from extending the wait;
 timeouts receive `408` when the peer can still receive a response. Response writes
 have at most five seconds. Up to 32 connections run concurrently; excess
 connections are closed without queuing. A stalled client does not serialize other
 clients. The hub still serializes its own requests.
+
+After writing a response (including `401`), the API shuts down its write side to
+deliver the response before closing with unread input. It drains at most 12 KiB
+of input already available, without waiting for more bytes or peer EOF, then
+releases the slot. A peer may observe a reset after the response if input remains.
+
+The shorter header deadline applies equally to clients sharing an address and
+clients with different addresses; there is no per-address quota. It bounds slot
+occupancy, not availability: unauthenticated peers can still fill all 32 slots
+with incomplete headers for up to one second (plus response-write time and
+scheduling), and keep doing so by opening replacement connections. New connections
+are then closed even if they would supply a valid token, because admission happens
+before headers and authentication are read. An unauthenticated peer that does not
+read its response can also occupy a slot for the five-second write allowance if
+the write blocks. This is not protection against sustained connection exhaustion.
 
 All hub calls for one HTTP request share the existing bounded client path and
 one `HOMEPOOL_REQUEST_TIMEOUT_MS` budget (120 seconds by default). The complete HTTP
@@ -150,7 +166,8 @@ All defaults and caps live in the CLI settings module.
 `cargo test --workspace` covers authentication without a hub call using a Unix
 socket trap, startup refusal, private token and operations files, schema
 projection, malformed and oversized bodies, forbidden launch fields, stalled
-clients, full pools, unreachable members, concurrent submissions, restart recovery
+clients, nonblocking slot release after `401`, early errors with unread bodies,
+full pools, unreachable members, concurrent submissions, restart recovery
 and a lost hub placement response followed by a retry. The normal CI Docker integration
 step also runs `api_engine_lists_and_authenticates`: the shipped hub places a real
 sandbox, the shipped API lists it, and rejected credentials never contact the hub.
