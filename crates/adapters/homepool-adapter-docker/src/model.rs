@@ -77,6 +77,8 @@ pub struct Sandbox {
     pub sandbox_id: String,
     /// Docker's state, such as `running`, `exited`, or `created`.
     pub state: String,
+    /// Engine exit status, present only for an exited container.
+    pub exit_code: Option<i64>,
     /// Conservative CPU bound from NanoCPUs and CFS quota/period, rounded up to
     /// the next 10 millicores to cover runtime quota normalization. `None` means
     /// no finite quota: never account it as zero usage.
@@ -91,4 +93,12 @@ pub struct Sandbox {
 pub struct EngineCapacity {
     pub cpu_millicores: u64,
     pub memory_bytes: u64,
+}
+
+/// Private job output. Deliberately has no Debug implementation.
+pub struct SandboxLogs {
+    pub stdout: String,
+    pub stderr: String,
+    /// True when either the line or byte limit discarded output.
+    pub cut: bool,
 }

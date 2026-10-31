@@ -12,7 +12,8 @@ use crate::{
     endpoint::Endpoint,
     error::Error,
     limits::Limits,
-    model::{EngineCapacity, Sandbox, SandboxSpec},
+    logs::Capture,
+    model::{EngineCapacity, Sandbox, SandboxLogs, SandboxSpec},
     settings::{
         CAPACITY_FORMAT, ID_FORMAT, INSPECT_FORMAT, MANAGED_LABEL, MEMBER_LABEL,
         MILLICORES_PER_CPU, OPERATION_TIMEOUT, SANDBOX_LABEL, STOP_SECONDS,
@@ -35,6 +36,7 @@ pub(crate) struct Observation {
     pub(crate) id: String,
     pub(crate) labels: Option<BTreeMap<String, String>>,
     pub(crate) state: String,
+    pub(crate) exit_code: i64,
     pub(crate) limits: Limits,
 }
 
@@ -198,6 +200,28 @@ impl Docker {
         Ok(())
     }
 
+    /// Returns the last `tail` lines of each stream, sharing `max_bytes` equally.
+    /// Reads retained history without following, under one deadline. Ownership is
+    /// checked before reading output. A failed read never returns partial logs.
+    pub fn logs(
+        &self,
+        container_id: &str,
+        tail: usize,
+        max_bytes: usize,
+    ) -> Result<SandboxLogs, Error> {
+        let deadline = self.deadline()?;
+        self.owned(deadline, container_id)?;
+        let mut capture = Capture::new(tail, max_bytes);
+        command::capture(
+            &self.endpoint,
+            &["container".into(), "logs".into(), container_id.into()],
+            deadline,
+            &self.cancelled,
+            |stderr, bytes| capture.push(stderr, bytes),
+        )?;
+        Ok(capture.finish())
+    }
+
     /// Reads engine totals. Free resources and sandbox slots are caller policy.
     pub fn capacity(&self) -> Result<EngineCapacity, Error> {
         let deadline = self.deadline()?;
@@ -290,6 +314,7 @@ pub(crate) fn owned_observation(
     Ok(Sandbox {
         container_id: observed.id,
         sandbox_id,
+        exit_code: (observed.state == "exited").then_some(observed.exit_code),
         state: observed.state,
         cpu_millicores: observed.limits.cpu_millicores()?,
         memory_bytes: (observed.limits.memory_bytes > 0).then_some(observed.limits.memory_bytes),

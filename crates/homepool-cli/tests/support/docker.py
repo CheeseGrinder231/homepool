@@ -32,6 +32,15 @@ elif op == 'inspect':
     if key is None or ((root / 'partial').exists() and key == sorted(items)[-1]):
         sys.exit(1)
     print(json.dumps(key if args[args.index('--format') + 1] == '{{json .Id}}' else items[key]))
+elif op == 'logs':
+    if (root / 'stall-logs').exists():
+        time.sleep(300)
+    (root / 'logs-read').touch()
+    item = items[args[-1]]
+    sys.stdout.buffer.write(bytes(item.get('stdout', [])))
+    sys.stderr.buffer.write(bytes(item.get('stderr', [])))
+    if (root / 'fail-logs').exists():
+        sys.exit(1)
 elif op == 'create':
     sys.stdin.buffer.read()
     name = args[args.index('--name') + 1]
@@ -40,7 +49,7 @@ elif op == 'create':
     ident = f"{data['next']:064x}"
     data['next'] += 1
     labels = dict(args[i + 1].split('=', 1) for i, a in enumerate(args) if a == '--label')
-    record = {'id': ident, 'name': name, 'labels': labels, 'state': 'created', 'limits': {'nano_cpus': round(float(args[args.index('--cpus') + 1]) * 1_000_000_000), 'cpu_quota': 0, 'cpu_period': 0, 'memory_bytes': int(args[args.index('--memory') + 1])}}
+    record = {'id': ident, 'name': name, 'labels': labels, 'state': 'created', 'exit_code': 0, 'limits': {'nano_cpus': round(float(args[args.index('--cpus') + 1]) * 1_000_000_000), 'cpu_quota': 0, 'cpu_period': 0, 'memory_bytes': int(args[args.index('--memory') + 1])}}
     if (root / 'delay-create').exists():
         state.write_text(json.dumps(data))
         (root / 'pending-create').write_text(json.dumps(record))

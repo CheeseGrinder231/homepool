@@ -18,6 +18,11 @@ pub enum Request {
         #[serde(flatten)]
         spec: Placement,
     },
+    Logs {
+        handle: String,
+        #[serde(default)]
+        tail: Option<usize>,
+    },
     Release {
         handle: String,
     },
@@ -245,6 +250,61 @@ mod tests {
             input[key] = value;
             assert!(serde_json::from_value::<super::Message>(input).is_err());
         }
+    }
+
+    #[test]
+    fn logs_schema_and_worst_case_response_fit_existing_framing() {
+        use super::{Message, Request, Response, bytes};
+        use crate::settings::{API_SIZE_LIMIT, LOG_BYTES};
+        use serde_json::json;
+        for tail in [json!(-1), json!("all")] {
+            assert!(
+                serde_json::from_value::<Request>(
+                    json!({"op":"logs", "handle":"1:example", "tail":tail})
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_str::<Request>(
+                r#"{"op":"logs","handle":"1:example","tail":18446744073709551616}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"op":"logs", "handle":"1:example", "follow":true})
+            )
+            .is_err()
+        );
+        let request = Message::new(
+            Request::Logs {
+                handle: format!("{}:{}", u64::MAX, "a".repeat(64)),
+                tail: Some(1000),
+            },
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(bytes(&request).unwrap().len() < API_SIZE_LIMIT);
+        let response = Response::from_result(Ok(json!({
+            "stdout": "\0".repeat(LOG_BYTES / 2),
+            "stderr": "\u{0001}".repeat(LOG_BYTES / 2), "cut": true
+        })));
+        let wire = bytes(&response).unwrap();
+        assert!(wire.len() <= API_SIZE_LIMIT);
+        assert_eq!(
+            serde_json::from_slice::<Response>(&wire).unwrap().version,
+            1
+        );
+        let invalid = Response::from_result(Ok(
+            json!({"stdout": "\u{fffd}".repeat(LOG_BYTES), "stderr":"", "cut":true}),
+        ));
+        assert!(bytes(&invalid).unwrap().len() <= API_SIZE_LIMIT);
+        let oversized = Request::Logs {
+            handle: "a".repeat(API_SIZE_LIMIT),
+            tail: None,
+        };
+        assert!(bytes(&oversized).is_err());
     }
 
     #[test]
