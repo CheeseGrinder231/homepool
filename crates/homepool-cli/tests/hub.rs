@@ -1693,6 +1693,12 @@ impl HttpApi {
     fn post(&self, body: &str) -> (u16, String) {
         self.raw(&format!("POST /v1/jobs HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
     }
+    fn delete(&self, id: &str) -> (u16, Value) {
+        let (status, body) = self.raw(&format!(
+            "DELETE /v1/jobs/{id} HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\n\r\n"
+        ));
+        (status, serde_json::from_str(&body).unwrap())
+    }
     fn job(&self, id: &str) -> (u16, Value) {
         let (status, body) = self.get(
             &format!("/v1/jobs/{id}"),
@@ -1928,6 +1934,7 @@ memory_bytes = 33554432
 }
 fn api_submits_approved_job(real: bool) {
     let mut f = Fixture::new(real);
+    f.write("members.toml", &f.member(1, "active", 1000, 1));
     f.start();
     approved_operations(&f);
     let api = HttpApi::configured(&f, "hub.sock", true);
@@ -2015,7 +2022,17 @@ fn api_submits_approved_job(real: bool) {
     let (status, body) = api.get(&logs_path, Some(&auth));
     assert_eq!(status, 200);
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), expected_logs);
-    f.ok(&["release", &handle], None);
+    let next = json!({"request_id":format!("{id}-next"),"operation":"other"}).to_string();
+    assert_eq!(api.post(&next).0, 503);
+    assert_eq!(
+        api.delete(&id),
+        (
+            200,
+            json!({"request_id":id,"operation":"finish","state":"released","exit_code":7})
+        )
+    );
+    assert_eq!(api.delete(&id).0, 404);
+    assert_eq!(api.delete(&id).1["state"], "absent");
     assert_eq!(api.job(&id).0, 404);
     let (status, body) = api.get(&logs_path, Some(&auth));
     assert_eq!(status, 404);
@@ -2023,6 +2040,15 @@ fn api_submits_approved_job(real: bool) {
         serde_json::from_str::<Value>(&body).unwrap()["state"],
         "absent"
     );
+    // A new request now fits in the one slot retained by the exited job.
+    assert_eq!(api.post(&next).0, 200);
+    let placed = f.inventory()["members"][0]["sandboxes"][0].clone();
+    let next_handle = placed["handle"].as_str().unwrap();
+    let (member, container) = next_handle.split_once(':').unwrap();
+    f.created
+        .borrow_mut()
+        .push((member.parse().unwrap(), container.into()));
+    f.release(&placed);
     // No receipt survives release: the request ID can name another operation.
     assert_eq!(
         api.post(&json!({"request_id":id,"operation":"other"}).to_string())
@@ -2072,6 +2098,66 @@ fn api_job_input_is_bounded_strict_and_authenticated_before_hub_calls() {
             "GET"
         };
         assert_eq!(api.raw(&format!("{method} {endpoint} HTTP/1.1\r\nAuthorization: Bearer wrong\r\nContent-Length: 100\r\n\r\n")).0, 401);
+    }
+    for headers in [
+        "".to_owned(),
+        "Authorization: Bearer wrong\r\n".into(),
+        "Authorization: Basic example\r\n".into(),
+        format!(
+            "Authorization: Bearer {TEST_API_TOKEN}\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\n"
+        ),
+    ] {
+        assert_eq!(
+            api.raw(&format!(
+                "DELETE /v1/jobs/example HTTP/1.1\r\n{headers}\r\n"
+            ))
+            .0,
+            401
+        );
+    }
+    for path in [
+        "/v1/health",
+        "/v1/sandboxes",
+        "/v1/operations",
+        "/v1/jobs",
+        "/v1/jobs/example/logs",
+    ] {
+        assert_eq!(
+            api.raw(&format!(
+                "DELETE {path} HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\n\r\n"
+            ))
+            .0,
+            405
+        );
+    }
+    for path in [
+        "/v1/jobs/example/",
+        "/v1/jobs/example/extra",
+        "/v1/jobs/example/logs/extra",
+    ] {
+        assert_eq!(
+            api.raw(&format!(
+                "DELETE {path} HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\n\r\n"
+            ))
+            .0,
+            404
+        );
+    }
+    for framing in [
+        "Content-Length: 1",
+        "Content-Length: 0\r\nContent-Length: 0",
+        "Transfer-Encoding: chunked",
+    ] {
+        assert_eq!(api.raw(&format!("DELETE /v1/jobs/example HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\n{framing}\r\n\r\n")).0, 400);
+    }
+    for id in ["", "bad%2Fvalue", &"x".repeat(129)] {
+        assert_eq!(
+            api.raw(&format!(
+                "DELETE /v1/jobs/{id} HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\n\r\n"
+            ))
+            .0,
+            400
+        );
     }
     for token in [
         None,
@@ -2196,6 +2282,9 @@ fn api_job_lookup_requires_a_complete_derived_identity() {
             "absent"
         );
         assert!(!f.root.join("logs-read").exists());
+        let before = f.engine();
+        assert_eq!(api.delete(id).0, 404);
+        assert_eq!(f.engine(), before);
         assert_eq!(
             api.post(&json!({"request_id":id,"operation":"missing"}).to_string())
                 .0,
@@ -2529,4 +2618,153 @@ fn api_serializes_changed_operation_submissions_and_excludes_another_writer() {
             .len(),
         1
     );
+}
+
+#[test]
+fn api_release_requires_a_fresh_exited_job_and_leaves_other_work_alone() {
+    let mut f = Fixture::new(false);
+    f.start();
+    approved_operations(&f);
+    let api = HttpApi::configured(&f, "hub.sock", true);
+    assert_eq!(
+        api.post(r#"{"request_id":"release","operation":"finish"}"#)
+            .0,
+        200
+    );
+    let placed = f.inventory()["members"][0]["sandboxes"][0].clone();
+    let (_, container) = placed["handle"].as_str().unwrap().split_once(':').unwrap();
+    for state in ["created", "running", "paused", "unknown"] {
+        let mut engine = f.engine();
+        engine["items"][container]["state"] = json!(state);
+        f.save_engine(&engine);
+        assert_eq!(
+            api.delete("release"),
+            (
+                409,
+                json!({"request_id":"release","operation":"finish","state":state,"exit_code":null})
+            )
+        );
+        assert_eq!(f.engine(), engine);
+    }
+    let mut engine = f.engine();
+    engine["items"][container]["state"] = json!("exited");
+    engine["items"][container]["exit_code"] = json!(7);
+    f.save_engine(&engine);
+    // An unrelated unavailable member also makes retained exited observations stale.
+    f.write("addition.toml", &f.member(2, "active", 1000, 3));
+    f.ok(&["add", "addition.toml"], None);
+    f.write("unavailable-2", "");
+    for id in ["release", "absent"] {
+        assert_eq!(api.delete(id).0, 503);
+        assert_eq!(api.delete(id).1["state"], "unknown");
+        assert_eq!(f.engine(), engine);
+    }
+    fs::remove_file(f.root.join("unavailable-2")).unwrap();
+    f.stop(Signal::TERM);
+    f.spawn();
+    f.wait_file("hub.sock");
+    assert_eq!(api.delete("release").1["state"], "unknown");
+    assert_eq!(f.engine(), engine);
+    f.wait_settled();
+    // An API without an operations catalog can release a historical job.
+    drop(api);
+    let api = HttpApi::start(&f, "hub.sock");
+    assert_eq!(api.delete("release").0, 200);
+    let ordinary = f.place("ordinary", 100, 33554432);
+    let mut engine = f.engine();
+    let (_, container) = ordinary["handle"]
+        .as_str()
+        .unwrap()
+        .split_once(':')
+        .unwrap();
+    engine["items"][container]["state"] = json!("exited");
+    f.save_engine(&engine);
+    for id in ["ordinary", container, "homepool-1-ordinary"] {
+        assert_eq!(api.delete(id).0, 404);
+        assert_eq!(f.engine(), engine);
+    }
+}
+
+#[test]
+fn api_release_never_retargets_after_a_race_or_lost_response() {
+    use sha2::{Digest, Sha256};
+    use std::io::{BufRead, BufReader};
+    let f = Fixture::new(false);
+    let directory = fs::File::open(&f.root).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(format!(
+        "/proc/self/fd/{}/hub.sock",
+        std::os::fd::AsRawFd::as_raw_fd(&directory)
+    ))
+    .unwrap();
+    fs::set_permissions(f.root.join("hub.sock"), fs::Permissions::from_mode(0o600)).unwrap();
+    let inventory = |state: Option<&str>, handle: &str| {
+        json!({
+            "settling":false,"members":[{"member":1,"state":"active","inventory_complete":true,
+            "free":{"cpu_millicores":1000,"memory_bytes":268435456,"sandbox_slots":1},
+            "sandboxes":state.map(|state| vec![json!({"handle":handle,
+                "sandbox_id":format!("api-{:x}-finish", Sha256::digest(b"race")),
+                "state":state,"exit_code":7,"cpu_millicores":100,"memory_bytes":33554432})]).unwrap_or_default()}]
+        })
+    };
+    let worker = std::thread::spawn(move || {
+        let old = format!("1:{}", "a".repeat(64));
+        let replacement = format!("1:{}", "b".repeat(64));
+        let mut deadlines = Vec::new();
+        for (op, result) in [
+            ("inventory", Some(inventory(Some("exited"), &old))),
+            // The release succeeded but its response was lost.
+            ("release", None),
+            ("inventory", Some(inventory(None, ""))),
+            ("inventory", Some(inventory(Some("exited"), &old))),
+            // Another owner released the old handle and replaced the job.
+            ("release", Some(Value::Null)),
+            ("inventory", Some(inventory(Some("running"), &replacement))),
+        ] {
+            let (mut client, _) = listener.accept().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(&client).read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["op"], op);
+            deadlines.push(request["deadline_monotonic_ms"].as_u64().unwrap());
+            if op == "release" {
+                assert_eq!(request["handle"], old);
+            }
+            if let Some(result) = result {
+                if op == "inventory" {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                let error = result.is_null().then_some("release outcome uncertain");
+                writeln!(
+                    client,
+                    "{}",
+                    json!({"version":1,"result":result,"error":error})
+                )
+                .unwrap();
+            }
+        }
+        // Inventory and release use the same absolute budget, allowing rounding.
+        for pair in [&deadlines[0..2], &deadlines[3..5]] {
+            assert!(pair[0].abs_diff(pair[1]) <= 1);
+        }
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    });
+    let api = HttpApi::start(&f, "hub.sock");
+    let (status, job) = api.delete("race");
+    assert_eq!(status, 503);
+    assert_eq!(job["state"], "unknown");
+    let (status, job) = api.delete("race");
+    assert_eq!(status, 404);
+    assert_eq!(job["state"], "absent");
+    assert_eq!(api.delete("race").0, 503);
+    let (status, job) = api.delete("race");
+    assert_eq!(status, 409);
+    assert_eq!(job["state"], "running");
+    worker.join().unwrap();
 }
