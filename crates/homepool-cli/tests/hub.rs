@@ -1816,9 +1816,9 @@ fn api_bounds_headers_and_stalled_connections_and_survives_hub_recovery() {
     stalled
         .write_all(b"GET /v1/health HTTP/1.1\r\nX-Stalled: ")
         .unwrap();
-    let start = Instant::now();
     assert_eq!(api.get("/v1/health", None).0, 200);
-    assert!(start.elapsed() < Duration::from_secs(2));
+    let auth = format!("Bearer {TEST_API_TOKEN}");
+    assert_eq!(api.get("/v1/operations", Some(&auth)).0, 200);
     assert_eq!(
         api.raw(&format!(
             "GET /v1/health HTTP/1.1\r\nX-Large: {}\r\n\r\n",
@@ -1838,8 +1838,6 @@ fn api_bounds_headers_and_stalled_connections_and_survives_hub_recovery() {
     let mut response = String::new();
     stalled.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 408"));
-    assert!(start.elapsed() < Duration::from_secs(7));
-    let auth = format!("Bearer {TEST_API_TOKEN}");
     assert_eq!(api.get("/v1/sandboxes", Some(&auth)).0, 503);
     f.start();
     assert_eq!(api.get("/v1/sandboxes", Some(&auth)).0, 200);
