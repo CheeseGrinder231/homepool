@@ -150,6 +150,10 @@ fn handle(
         return;
     };
     let end = end.min(Instant::now() + HTTP_IO_TIMEOUT);
+    respond(&mut stream, status, body, post_resource, end);
+}
+
+fn respond(stream: &mut TcpStream, status: u16, body: Vec<u8>, post_resource: bool, end: Instant) {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -248,9 +252,15 @@ fn route(
         _ => return Err(400),
     };
     let path = request.path.ok_or(400u16)?;
-    let job_id = path.strip_prefix("/v1/jobs/");
+    let job_route = path
+        .strip_prefix("/v1/jobs/")
+        .and_then(|rest| match rest.split_once('/') {
+            None => Some((rest, false)),
+            Some((id, "logs")) => Some((id, true)),
+            _ => None,
+        });
     if !["/v1/health", "/v1/sandboxes", "/v1/operations", "/v1/jobs"].contains(&path)
-        && job_id.is_none()
+        && job_route.is_none()
     {
         return Err(404);
     }
@@ -329,8 +339,12 @@ fn route(
     if path == "/v1/operations" {
         return jobs.names().map(|b| (200, b));
     }
-    if let Some(id) = job_id {
-        return jobs.get(socket, id, deadline);
+    if let Some((id, logs)) = job_route {
+        return if logs {
+            jobs.logs(socket, id, deadline)
+        } else {
+            jobs.get(socket, id, deadline)
+        };
     }
     let value = hub::call_until(socket, Request::Inventory {}, deadline).map_err(|_| 503u16)?;
     encode_inventory(value).map(|body| (200, body))
@@ -340,6 +354,56 @@ fn route(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stalled_reader_gets_a_short_200_body_and_can_retry() {
+        let body = serde_json::to_vec(&json!({"stdout": "x".repeat(API_SIZE_LIMIT / 2)})).unwrap();
+        for stalled in [true, false] {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(30)))
+                .unwrap();
+            let (mut stream, _) = listener.accept().unwrap();
+            rustix::net::sockopt::set_socket_send_buffer_size(&stream, 4096).unwrap();
+            if stalled {
+                rustix::net::sockopt::set_socket_recv_buffer_size(&peer, 4096).unwrap();
+            }
+            let budget = if stalled {
+                HTTP_IO_TIMEOUT
+            } else {
+                API_TIMEOUT
+            };
+            let output = body.clone();
+            let worker = std::thread::spawn(move || {
+                respond(&mut stream, 200, output, false, Instant::now() + budget);
+            });
+            // The stalled peer consumes nothing until the writer has finished.
+            // Small socket buffers force backpressure; no elapsed-time assertion
+            // or precisely scheduled read is needed to observe the short body.
+            let worker = if stalled {
+                worker.join().unwrap();
+                None
+            } else {
+                Some(worker)
+            };
+            let mut response = String::new();
+            peer.read_to_string(&mut response).unwrap();
+            if let Some(worker) = worker {
+                worker.join().unwrap();
+            }
+            let (headers, received) = response.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(headers.contains(&format!("Content-Length: {}\r\n", body.len())));
+            if stalled {
+                assert!(!received.is_empty());
+                assert!(received.len() < body.len());
+                assert!(body.starts_with(received.as_bytes()));
+                assert!(serde_json::from_str::<serde_json::Value>(received).is_err());
+            } else {
+                assert_eq!(received.as_bytes(), body);
+            }
+        }
+    }
 
     #[test]
     fn unauthorized_responses_release_slots_with_peers_still_open() {

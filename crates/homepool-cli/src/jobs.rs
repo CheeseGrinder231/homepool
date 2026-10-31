@@ -45,6 +45,21 @@ struct Job<'a> {
     state: &'a str,
     exit_code: Option<i64>,
 }
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Logs {
+    stdout: String,
+    stderr: String,
+    cut: bool,
+}
+#[derive(Serialize)]
+struct JobLogs<'a> {
+    request_id: &'a str,
+    operation: &'a str,
+    state: &'a str,
+    #[serde(flatten)]
+    logs: Logs,
+}
 
 pub fn valid_identity(value: &str) -> bool {
     !value.is_empty()
@@ -52,6 +67,9 @@ pub fn valid_identity(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+fn valid_operation_name(value: &str) -> bool {
+    valid_identity(value) && value.len() <= OPERATION_NAME_BYTES
 }
 fn prefix(request_id: &str) -> String {
     format!("api-{:x}-", Sha256::digest(request_id.as_bytes()))
@@ -69,8 +87,7 @@ impl Jobs {
             }
             let mut jobs = Self::default();
             for operation in document.operations {
-                if !valid_identity(&operation.name)
-                    || operation.name.len() > OPERATION_NAME_BYTES
+                if !valid_operation_name(&operation.name)
                     || operation.image.is_empty()
                     || operation.image.starts_with('-')
                     || operation.image.contains('\0')
@@ -125,6 +142,45 @@ impl Jobs {
             state,
             found.and_then(|(_, s)| (state == "exited").then_some(s.exit_code).flatten()),
         )
+    }
+    pub fn logs(
+        &self,
+        socket: &Path,
+        request_id: &str,
+        deadline: Instant,
+    ) -> Result<(u16, Vec<u8>), u16> {
+        if !valid_identity(request_id) {
+            return Err(400);
+        }
+        let inventory = inventory(socket, deadline)?;
+        let found = inventory.find(request_id)?;
+        if !inventory.complete() {
+            return encode_job(503, request_id, found.map(|(op, _)| op), "unknown", None);
+        }
+        let Some((operation, sandbox)) = found else {
+            return encode_job(404, request_id, None, "absent", None);
+        };
+        let value = hub::call_until(
+            socket,
+            Request::Logs {
+                handle: sandbox.handle.clone(),
+                tail: Some(LOG_MAX_TAIL),
+            },
+            deadline,
+        )
+        .map_err(|_| 503u16)?;
+        let logs: Logs = serde_json::from_value(value).map_err(|_| 503u16)?;
+        let body = serde_json::to_vec(&JobLogs {
+            request_id,
+            operation,
+            state: &sandbox.state,
+            logs,
+        })
+        .map_err(|_| 503u16)?;
+        if body.len() > API_SIZE_LIMIT {
+            return Err(503);
+        }
+        Ok((200, body))
     }
     pub fn submit(
         &self,
@@ -251,7 +307,10 @@ impl HubInventory {
             .members
             .iter()
             .flat_map(|m| &m.sandboxes)
-            .filter_map(|s| s.sandbox_id.strip_prefix(&prefix).map(|op| (op, s)));
+            .filter_map(|s| {
+                let operation = s.sandbox_id.strip_prefix(&prefix)?;
+                valid_operation_name(operation).then_some((operation, s))
+            });
         let found = matches.next();
         if matches.next().is_some() {
             return Err(503);
@@ -283,8 +342,7 @@ struct HubBudget {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HubSandbox {
-    #[serde(rename = "handle")]
-    _handle: String,
+    handle: String,
     sandbox_id: String,
     state: String,
     exit_code: Option<i64>,

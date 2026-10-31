@@ -259,7 +259,8 @@ while the hub is settling because they are read-only, like inventory.
 **Logs contain whatever the job printed, including any secret it printed. Treat
 them as private.** Hub diagnostics never contain job logs, including on failure.
 Socket permissions remain the authorization boundary for logs. There is no streaming,
-follow mode or result store. The separate [HTTP API](api.md) does not expose logs.
+follow mode or result store. The separate [HTTP API](api.md) exposes bounded logs
+for API-derived job identities to authenticated clients.
 
 ## Member lifecycle
 
