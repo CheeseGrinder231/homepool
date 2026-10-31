@@ -4,7 +4,7 @@ use homepool_core::{MemberState, Tier};
 use rustix::fs::{FlockOperation, OFlags, flock};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -219,4 +219,32 @@ impl Drop for NewFile {
             let _ = fs::remove_file(&self.path);
         }
     }
+}
+
+/// Read a bounded regular private file without following a replacement symlink.
+pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    let load = || {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        check(parent, true).ok()?;
+        let before = check(path, false).ok()?;
+        if !before.is_file() {
+            return None;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
+            .open(path)
+            .ok()?;
+        let after = file.metadata().ok()?;
+        if before.ino() != after.ino() || before.dev() != after.dev() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take((limit + 1) as u64).read_to_end(&mut bytes).ok()?;
+        (bytes.len() <= limit).then_some(bytes)
+    };
+    load().ok_or_else(|| "invalid private file".into())
 }

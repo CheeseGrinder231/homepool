@@ -2,6 +2,7 @@ mod api;
 mod arguments;
 mod hub;
 mod inventory;
+mod jobs;
 mod private;
 mod protocol;
 mod settings;
@@ -33,6 +34,7 @@ fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
             api::serve(
                 options.listen.expect("validated listen address"),
                 &options.token_file.expect("validated token file"),
+                options.operations_file.as_deref(),
                 &socket,
             )?;
             String::new()

@@ -1618,12 +1618,18 @@ struct HttpApi {
 const TEST_API_TOKEN: &str = "example-test-token-do-not-use";
 impl HttpApi {
     fn start(f: &Fixture, socket: &str) -> Self {
+        Self::configured(f, socket, false)
+    }
+    fn configured(f: &Fixture, socket: &str, operations: bool) -> Self {
         let reservation = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
         f.write("token", &format!("{TEST_API_TOKEN}\n"));
-        let child = f
-            .command()
+        let mut command = f.command();
+        if operations {
+            command.args(["--operations-file", "operations.toml"]);
+        }
+        let child = command
             .args([
                 "api",
                 "--listen",
@@ -1677,8 +1683,22 @@ impl HttpApi {
             assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
         }
         assert!(!output.contains(TEST_API_TOKEN), "token in HTTP output");
+        assert!(
+            !output.contains(TEST_OPERATION_SECRET),
+            "environment value in HTTP output"
+        );
         let status = output.split_whitespace().nth(1).unwrap().parse().unwrap();
         (status, output.split_once("\r\n\r\n").unwrap().1.into())
+    }
+    fn post(&self, body: &str) -> (u16, String) {
+        self.raw(&format!("POST /v1/jobs HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
+    }
+    fn job(&self, id: &str) -> (u16, Value) {
+        let (status, body) = self.get(
+            &format!("/v1/jobs/{id}"),
+            Some(&format!("Bearer {TEST_API_TOKEN}")),
+        );
+        (status, serde_json::from_str(&body).unwrap())
     }
     fn get(&self, path: &str, auth: Option<&str>) -> (u16, String) {
         let header = auth
@@ -1696,7 +1716,8 @@ impl Drop for HttpApi {
             let output = child.wait_with_output().unwrap();
             for bytes in [&output.stdout, &output.stderr] {
                 assert!(
-                    !String::from_utf8_lossy(bytes).contains(TEST_API_TOKEN),
+                    !String::from_utf8_lossy(bytes).contains(TEST_API_TOKEN)
+                        && !String::from_utf8_lossy(bytes).contains(TEST_OPERATION_SECRET),
                     "token in process output"
                 );
             }
@@ -1872,4 +1893,427 @@ fn api_refuses_non_loopback_and_invalid_private_tokens_without_echoing_them() {
     fs::create_dir(f.root.join("token")).unwrap();
     fs::set_permissions(f.root.join("token"), fs::Permissions::from_mode(0o600)).unwrap();
     assert!(refuse(&address).contains("token file"));
+}
+
+const TEST_OPERATION_SECRET: &str = "private-environment-example";
+fn approved_operations(f: &Fixture) {
+    f.write(
+        "operations.toml",
+        &format!(
+            r#"version = 1
+[[operations]]
+name = "finish"
+image = "alpine:3.22"
+command = ["sh", "-c", "sleep 1; exit 7"]
+cpu_millicores = 100
+memory_bytes = 33554432
+[operations.environment]
+PRIVATE_VALUE = "{TEST_OPERATION_SECRET}"
+[[operations]]
+name = "other"
+image = "alpine:3.22"
+command = ["true"]
+cpu_millicores = 100
+memory_bytes = 33554432
+"#
+        ),
+    );
+}
+fn api_submits_approved_job(real: bool) {
+    let mut f = Fixture::new(real);
+    f.start();
+    approved_operations(&f);
+    let api = HttpApi::configured(&f, "hub.sock", true);
+    let auth = format!("Bearer {TEST_API_TOKEN}");
+    let (status, body) = api.get("/v1/operations", Some(&auth));
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!(["finish", "other"])
+    );
+    // Neither subsequent edits nor secrets become public catalog contents.
+    f.write("operations.toml", "invalid replacement");
+    let id = format!("approved-{}", std::process::id());
+    let request = json!({"request_id":id, "operation":"finish"}).to_string();
+    let (status, body) = api.post(&request);
+    assert_eq!(status, 200, "{body}");
+    let first: Value = serde_json::from_str(&body).unwrap();
+    assert!(matches!(
+        first["state"].as_str(),
+        Some("running" | "exited")
+    ));
+    assert_eq!(api.post(&request).0, 200);
+    let inventory = f.inventory();
+    let sandboxes = inventory["members"][0]["sandboxes"].as_array().unwrap();
+    assert_eq!(sandboxes.len(), 1);
+    let handle = sandboxes[0]["handle"].as_str().unwrap().to_owned();
+    let (member, container) = handle.split_once(':').unwrap();
+    f.created
+        .borrow_mut()
+        .push((member.parse().unwrap(), container.into()));
+    assert_eq!(
+        api.post(&json!({"request_id":id, "operation":"other"}).to_string())
+            .0,
+        409
+    );
+    assert_eq!(
+        api.post(&json!({"request_id":id, "operation":"missing"}).to_string())
+            .0,
+        409
+    );
+    drop(api);
+    // New API and hub processes recover operation and identity solely from Docker.
+    f.stop(Signal::TERM);
+    f.start();
+    approved_operations(&f);
+    let api = HttpApi::configured(&f, "hub.sock", true);
+    assert_eq!(api.post(&request).0, 200);
+    assert_eq!(
+        f.inventory()["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    if real {
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (status, job) = api.job(&id);
+            assert_eq!(status, 200);
+            assert!(!job.to_string().contains(TEST_OPERATION_SECRET));
+            if job["state"] == "exited" {
+                assert_eq!(job["exit_code"], 7);
+                break;
+            }
+            assert!(Instant::now() < end, "job exit watchdog");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    f.ok(&["release", &handle], None);
+    assert_eq!(api.job(&id).0, 404);
+    // No receipt survives release: the request ID can name another operation.
+    assert_eq!(
+        api.post(&json!({"request_id":id,"operation":"other"}).to_string())
+            .0,
+        200
+    );
+    let placed = f.inventory()["members"][0]["sandboxes"][0].clone();
+    let handle = placed["handle"].as_str().unwrap();
+    let (member, container) = handle.split_once(':').unwrap();
+    f.created
+        .borrow_mut()
+        .push((member.parse().unwrap(), container.into()));
+    f.ok(&["release", handle], None);
+}
+#[test]
+fn api_process_submits_retries_and_recovers_jobs() {
+    api_submits_approved_job(false);
+}
+#[test]
+#[ignore = "requires a disposable Docker engine and alpine:3.22"]
+fn api_engine_submits_retries_and_observes_exit_code() {
+    api_submits_approved_job(true);
+}
+
+#[test]
+fn api_job_input_is_bounded_strict_and_authenticated_before_hub_calls() {
+    let f = Fixture::new(false);
+    approved_operations(&f);
+    let api = HttpApi::configured(&f, "hub.sock", true);
+    let directory = fs::File::open(&f.root).unwrap();
+    let trap = std::os::unix::net::UnixListener::bind(format!(
+        "/proc/self/fd/{}/hub.sock",
+        std::os::fd::AsRawFd::as_raw_fd(&directory)
+    ))
+    .unwrap();
+    fs::set_permissions(f.root.join("hub.sock"), fs::Permissions::from_mode(0o600)).unwrap();
+    trap.set_nonblocking(true).unwrap();
+    for endpoint in ["/v1/jobs", "/v1/jobs/example", "/v1/operations"] {
+        let method = if endpoint == "/v1/jobs" {
+            "POST"
+        } else {
+            "GET"
+        };
+        assert_eq!(api.raw(&format!("{method} {endpoint} HTTP/1.1\r\nAuthorization: Bearer wrong\r\nContent-Length: 100\r\n\r\n")).0, 401);
+    }
+    for body in [
+        "{",
+        "{}",
+        r#"{"request_id":"x","operation":"finish","operation":"other"}"#,
+        r#"{"request_id":"","operation":"finish"}"#,
+        r#"{"request_id":"bad/value","operation":"finish"}"#,
+    ] {
+        assert_eq!(api.post(body).0, 400);
+    }
+    let mut invalid = json!({"request_id":"x", "operation":"finish"});
+    for field in [
+        "image",
+        "command",
+        "environment",
+        "profile",
+        "flags",
+        "fresh",
+        "preferences",
+    ] {
+        invalid[field] = json!("client-controlled");
+        assert_eq!(api.post(&invalid.to_string()).0, 400);
+        invalid.as_object_mut().unwrap().remove(field);
+    }
+    invalid["request_id"] = json!("x".repeat(129));
+    assert_eq!(api.post(&invalid.to_string()).0, 400);
+    assert_eq!(api.post(&"x".repeat(4097)).0, 413);
+    for framing in [
+        "Content-Length: 1\r\nContent-Length: 1",
+        "Transfer-Encoding: chunked",
+        "Content-Length: -1",
+        "Content-Length: x",
+    ] {
+        assert_eq!(api.raw(&format!("POST /v1/jobs HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\n{framing}\r\n\r\nx")).0, 400);
+    }
+    assert_eq!(
+        trap.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn api_full_pool_and_unreachable_inventory_never_claim_a_start() {
+    let mut f = Fixture::new(false);
+    f.write("members.toml", &f.member(1, "active", 1000, 1));
+    f.start();
+    approved_operations(&f);
+    let api = HttpApi::configured(&f, "hub.sock", true);
+    assert_eq!(
+        api.post(r#"{"request_id":"missing","operation":"missing"}"#)
+            .0,
+        404
+    );
+    let placed = f.place("occupied", 100, 33554432);
+    let body = r#"{"request_id":"full","operation":"finish"}"#;
+    let (status, response) = api.post(body);
+    assert_eq!(status, 503);
+    assert_eq!(
+        serde_json::from_str::<Value>(&response).unwrap()["state"],
+        "unknown"
+    );
+    assert_eq!(
+        f.inventory()["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    f.release(&placed);
+    assert_eq!(api.post(body).0, 200);
+    f.write("unavailable", "");
+    let job = api.job("full");
+    assert_eq!(job.0, 200);
+    assert_eq!(job.1["state"], "unknown");
+    assert_eq!(job.1["exit_code"], Value::Null);
+    let (status, response) = api.post(r#"{"request_id":"outage","operation":"finish"}"#);
+    assert_eq!(status, 503);
+    assert_eq!(
+        serde_json::from_str::<Value>(&response).unwrap()["state"],
+        "unknown"
+    );
+    fs::remove_file(f.root.join("unavailable")).unwrap();
+    assert_eq!(
+        f.inventory()["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let observed = f.inventory()["members"][0]["sandboxes"][0].clone();
+    f.ok(&["release", observed["handle"].as_str().unwrap()], None);
+    // Start reached the engine, but its confirmation and inventory are lost.
+    f.write("unconfirmed-1", "");
+    let body = r#"{"request_id":"unconfirmed","operation":"finish"}"#;
+    for _ in 0..2 {
+        let (status, response) = api.post(body);
+        assert_eq!(status, 503);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response).unwrap()["state"],
+            "unknown"
+        );
+    }
+    fs::remove_file(f.root.join("unavailable-1")).unwrap();
+    assert_eq!(api.post(body).0, 200);
+    assert_eq!(
+        f.inventory()["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn api_lost_hub_placement_response_is_reconciled_without_duplicate_work() {
+    use std::io::{BufRead, BufReader};
+    use std::os::{
+        fd::AsRawFd,
+        unix::net::{UnixListener, UnixStream},
+    };
+    let mut f = Fixture::new(false);
+    f.start();
+    approved_operations(&f);
+    let directory = fs::File::open(&f.root).unwrap();
+    let base = format!("/proc/self/fd/{}", directory.as_raw_fd());
+    let proxy = UnixListener::bind(format!("{base}/proxy.sock")).unwrap();
+    fs::set_permissions(f.root.join("proxy.sock"), fs::Permissions::from_mode(0o600)).unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopping = std::sync::Arc::clone(&stop);
+    let worker = std::thread::spawn(move || {
+        let _directory = directory;
+        let mut lost = false;
+        while !stopping.load(Ordering::Acquire) {
+            let (mut client, _) = match proxy.accept() {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("proxy accept: {error}"),
+            };
+            client
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = String::new();
+            BufReader::new(&client).read_line(&mut request).unwrap();
+            let mut hub = UnixStream::connect(format!("{base}/hub.sock")).unwrap();
+            hub.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            hub.write_all(request.as_bytes()).unwrap();
+            let mut response = String::new();
+            BufReader::new(hub).read_line(&mut response).unwrap();
+            if !lost && serde_json::from_str::<Value>(&request).unwrap()["op"] == "place" {
+                lost = true;
+            } else {
+                let _ = client.write_all(response.as_bytes());
+            }
+        }
+        assert!(lost);
+    });
+    let api = HttpApi::configured(&f, "proxy.sock", true);
+    let body = r#"{"request_id":"lost","operation":"finish"}"#;
+    assert_eq!(api.post(body).0, 200);
+    assert_eq!(api.post(body).0, 200);
+    assert_eq!(
+        f.inventory()["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(api);
+    stop.store(true, Ordering::Release);
+    worker.join().unwrap();
+}
+
+#[test]
+fn api_rejects_invalid_private_operations_without_echoing_values() {
+    let f = Fixture::new(false);
+    f.write("token", TEST_API_TOKEN);
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)).to_string();
+    let refuse = || {
+        let output = f
+            .command()
+            .args([
+                "api",
+                "--listen",
+                &address,
+                "--token-file",
+                "token",
+                "--operations-file",
+                "operations.toml",
+                "--socket",
+                "hub.sock",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "homepool: invalid API operations file\n"
+        );
+    };
+    refuse();
+    approved_operations(&f);
+    let valid = fs::read_to_string(f.root.join("operations.toml")).unwrap();
+    for invalid in [
+        format!("{valid}\nprofile = 'runner'"),
+        valid.replace("version = 1", "version = 2"),
+        valid.replace("name = \"other\"", "name = \"finish\""),
+        valid.replace("cpu_millicores = 100", "cpu_millicores = 1"),
+        valid.replace("memory_bytes = 33554432", "memory_bytes = 0"),
+        valid.replace(
+            "name = \"finish\"",
+            &format!("name = \"{}\"", "a".repeat(60)),
+        ),
+        valid.replace(
+            TEST_OPERATION_SECRET,
+            &format!("{TEST_OPERATION_SECRET}\\ninvalid"),
+        ),
+        format!("{valid}\nunknown = '{TEST_OPERATION_SECRET}'"),
+        "x".repeat(1024 * 1024 + 1),
+    ] {
+        f.write("operations.toml", &invalid);
+        refuse();
+    }
+    f.write("operations.toml", &valid);
+    fs::set_permissions(
+        f.root.join("operations.toml"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    refuse();
+    fs::remove_file(f.root.join("operations.toml")).unwrap();
+    f.write("other-operations", &valid);
+    std::os::unix::fs::symlink("other-operations", f.root.join("operations.toml")).unwrap();
+    refuse();
+}
+
+#[test]
+fn api_serializes_changed_operation_submissions_and_excludes_another_writer() {
+    let mut f = Fixture::new(false);
+    f.start();
+    approved_operations(&f);
+    let api = HttpApi::configured(&f, "hub.sock", true);
+    let other = f
+        .command()
+        .args([
+            "api",
+            "--listen",
+            &api.address.to_string(),
+            "--token-file",
+            "token",
+            "--operations-file",
+            "operations.toml",
+            "--socket",
+            "hub.sock",
+        ])
+        .output()
+        .unwrap();
+    assert!(!other.status.success());
+    assert!(
+        String::from_utf8(other.stderr)
+            .unwrap()
+            .contains("submission lock")
+    );
+    std::thread::scope(|scope| {
+        let one = scope.spawn(|| api.post(r#"{"request_id":"concurrent","operation":"finish"}"#));
+        let two = scope.spawn(|| api.post(r#"{"request_id":"concurrent","operation":"other"}"#));
+        let mut statuses = [one.join().unwrap().0, two.join().unwrap().0];
+        statuses.sort();
+        assert_eq!(statuses, [200, 409]);
+    });
+    assert_eq!(
+        f.inventory()["members"][0]["sandboxes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }

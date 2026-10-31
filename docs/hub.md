@@ -313,7 +313,7 @@ Unknown fields and operations fail. Responses are
 `{"version":1,"result":null,"error":"..."}`. CLI commands unwrap `result`;
 errors exit `1` without success JSON. Socket permissions are the authorization
 boundary for this protocol; the hub has no network endpoint or additional authentication
-protocol. The separate [HTTP API process](api.md) is a read-only socket client.
+protocol. The separate [HTTP API process](api.md) is a socket client with an owner-approved operation catalog.
 A disconnected client must reconcile before retrying a mutation.
 
 [The example systemd user unit](examples/homepool-hub.service) uses XDG runtime

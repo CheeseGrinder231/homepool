@@ -10,6 +10,7 @@ name = "homepool"
 path = "src/main.rs"
 
 [dependencies]
+sha2 = "0.10"
 httparse = "1.10"
 subtle = { version = "2.6", default-features = false }
 homepool-adapter-docker = { version = "0.1.0", path = "../adapters/homepool-adapter-docker" }
