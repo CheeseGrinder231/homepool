@@ -182,6 +182,63 @@ impl Jobs {
         }
         Ok((200, body))
     }
+    pub fn release(
+        &self,
+        socket: &Path,
+        request_id: &str,
+        deadline: Instant,
+    ) -> Result<(u16, Vec<u8>), u16> {
+        if !valid_identity(request_id) {
+            return Err(400);
+        }
+        // Keep check/release together with submissions that could reuse the ID.
+        let _guard = self.submissions.lock().map_err(|_| 503u16)?;
+        let before = inventory(socket, deadline)?;
+        let found = before.find(request_id);
+        if !before.complete() {
+            return encode_job(
+                503,
+                request_id,
+                found.ok().flatten().map(|(op, _)| op),
+                "unknown",
+                None,
+            );
+        }
+        let Some((operation, sandbox)) = found? else {
+            return encode_job(404, request_id, None, "absent", None);
+        };
+        if sandbox.state != "exited" {
+            return encode_job(409, request_id, Some(operation), &sandbox.state, None);
+        }
+        // Use the observed full container handle exactly once. Another client
+        // can release it and reuse the request ID between these hub calls;
+        // never look up a replacement handle and release that instead.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Released {
+            released: String,
+        }
+        let released = hub::call_until(
+            socket,
+            Request::Release {
+                handle: sandbox.handle.clone(),
+            },
+            deadline,
+        )
+        .ok()
+        .and_then(|value| serde_json::from_value::<Released>(value).ok())
+        .is_some_and(|result| result.released == sandbox.handle);
+        if !released {
+            return encode_job(503, request_id, Some(operation), "unknown", None);
+        }
+        encode_job(
+            200,
+            request_id,
+            Some(operation),
+            "released",
+            sandbox.exit_code,
+        )
+    }
     pub fn submit(
         &self,
         socket: &Path,

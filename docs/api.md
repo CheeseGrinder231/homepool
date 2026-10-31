@@ -48,10 +48,10 @@ Hub connection, protocol and inventory response failures return `503` with an
 empty body. The API stays available and reconnects on the next authorized request.
 
 Unknown paths return `404`; unsupported methods on known paths return `405`.
-Neither contacts the hub. Authenticated GET endpoints reject bodies and accept
-only absent framing or a single `Content-Length: 0`. Every response closes its
+Neither contacts the hub. Authenticated GET and DELETE endpoints reject bodies
+and accept only absent framing or a single `Content-Length: 0`. Every response closes its
 connection; there is no keep-alive, streaming or pipelining. The API provides no
-stored results, cancellation or release endpoint.
+stored results or cancellation endpoint.
 
 ## Approved operations and jobs
 
@@ -93,6 +93,22 @@ All operation and job endpoints require authentication before any hub connection
   profiles, flags or any other launch settings. Unknown operations return `404`.
 - `GET /v1/jobs/example-job` reads state and exit code from hub inventory.
   A complete inventory without that identity returns `404` with state `absent`.
+- `DELETE /v1/jobs/example-job` releases only an exited job. Success returns
+  `200` with the observed operation and exit code, and state `released`:
+
+  ```json
+  {"request_id":"example-job","operation":"check","state":"released","exit_code":0}
+  ```
+
+  Any other observed state returns `409` with that state and leaves the job alone.
+  Complete inventory without the identity returns `404` with state `absent`,
+  including a retry after a lost successful release response. Incomplete inventory
+  or hub settling returns `503` with state `unknown` and releases nothing.
+  Release discards the job's output and frees its capacity. The request ID can
+  then be reused, including for another operation. Jobs whose operations have
+  left the catalog can still be released. An uncertain release returns `503`
+  with state `unknown`; it is never automatically replayed or redirected to a
+  replacement job. Status can reconcile the outcome.
 - `GET /v1/jobs/example-job/logs` reads output for the same API-derived identity
   using the hub's existing `logs` request at its maximum tail of 1,000 lines per
   stream. It accepts no query string. A successful response looks like:
@@ -134,8 +150,8 @@ digits or `-_.`. Invalid IDs return `400`. A sandbox identity is
 existing 128-byte identity limit and lets a new API process recover the operation
 from Docker without reading environment values. The complete suffix must follow
 the operation-name grammar above, independently of catalog membership. An empty
-or invalid suffix is ignored by status, logs and submission lookup: with complete
-inventory, reads return `404` with state `absent`, and an approved submission can
+or invalid suffix is ignored by status, logs, release and submission lookup: with
+complete inventory, reads return `404` with state `absent`, and an approved submission can
 place a distinct valid job rather than conflict with or reuse that sandbox.
 
 The same request ID and operation returns the observed job without placing it
@@ -159,8 +175,8 @@ reconcile uncertain outcomes. No error exposes raw hub diagnostics.
 
 **A job's identity lasts only until it is released.** This slice stores no
 receipts. A released job's request ID can be reused, including for a different
-operation. Release remains an owner-only hub/CLI action; exited jobs retain
-capacity until released.
+operation. Exited jobs retain capacity until released through the API or the
+owner's hub/CLI.
 
 ## Limits
 
@@ -216,7 +232,10 @@ sandbox, the shipped API lists it, and rejected credentials never contact the hu
 The same CI step runs `api_engine_submits_retries_and_observes_exit_code`: the
 shipped API submits approved work through a real hub to real Docker, retries
 without a second sandbox, reads real stdout and stderr, restarts both processes,
-and reads the same output and exit code 7. Tests also cover incomplete inventory,
+and reads the same output and exit code 7. It releases the exited job through
+the API and runs a new request ID in the freed slot on a one-slot member. Tests
+also cover release conflicts without stopping running work, release races and
+lost responses, ordinary sandbox isolation, and incomplete inventory,
 cut output, worst-case JSON escaping and refusal to read owner-placed sandboxes.
 To repeat both with a disposable Docker engine and `alpine:3.22` already pulled:
 

@@ -127,9 +127,20 @@ fn handle(
     timing: Timing,
 ) {
     let input_end = accepted + HTTP_IO_TIMEOUT;
-    let mut post_resource = false;
+    let mut allow = "GET";
     let result = read_request(&mut stream, accepted + HTTP_HEADER_TIMEOUT).and_then(|bytes| {
-        post_resource = bytes.split(|b| *b == b' ').nth(1) == Some(b"/v1/jobs");
+        let path = bytes.split(|b| *b == b' ').nth(1).unwrap_or_default();
+        allow = if path == b"/v1/jobs" {
+            "POST"
+        } else if std::str::from_utf8(path)
+            .ok()
+            .and_then(job_route)
+            .is_some_and(|(_, logs)| !logs)
+        {
+            "GET, DELETE"
+        } else {
+            "GET"
+        };
         route(
             &bytes,
             &mut stream,
@@ -150,10 +161,10 @@ fn handle(
         return;
     };
     let end = end.min(Instant::now() + HTTP_IO_TIMEOUT);
-    respond(&mut stream, status, body, post_resource, end);
+    respond(&mut stream, status, body, allow, end);
 }
 
-fn respond(stream: &mut TcpStream, status: u16, body: Vec<u8>, post_resource: bool, end: Instant) {
+fn respond(stream: &mut TcpStream, status: u16, body: Vec<u8>, allow: &str, end: Instant) {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -167,10 +178,9 @@ fn respond(stream: &mut TcpStream, status: u16, body: Vec<u8>, post_resource: bo
         _ => "Service Unavailable",
     };
     let extra = match status {
-        401 => "WWW-Authenticate: Bearer\r\n",
-        405 if post_resource => "Allow: POST\r\n",
-        405 => "Allow: GET\r\n",
-        _ => "",
+        401 => "WWW-Authenticate: Bearer\r\n".into(),
+        405 => format!("Allow: {allow}\r\n"),
+        _ => String::new(),
     };
     let header = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n{extra}\r\n",
@@ -235,6 +245,15 @@ fn read_request(stream: &mut TcpStream, end: Instant) -> Result<Vec<u8>, u16> {
     }
 }
 
+fn job_route(path: &str) -> Option<(&str, bool)> {
+    path.strip_prefix("/v1/jobs/")
+        .and_then(|rest| match rest.split_once('/') {
+            None => Some((rest, false)),
+            Some((id, "logs")) => Some((id, true)),
+            _ => None,
+        })
+}
+
 fn route(
     bytes: &[u8],
     stream: &mut TcpStream,
@@ -252,19 +271,20 @@ fn route(
         _ => return Err(400),
     };
     let path = request.path.ok_or(400u16)?;
-    let job_route = path
-        .strip_prefix("/v1/jobs/")
-        .and_then(|rest| match rest.split_once('/') {
-            None => Some((rest, false)),
-            Some((id, "logs")) => Some((id, true)),
-            _ => None,
-        });
+    let job_route = job_route(path);
     if !["/v1/health", "/v1/sandboxes", "/v1/operations", "/v1/jobs"].contains(&path)
         && job_route.is_none()
     {
         return Err(404);
     }
-    if request.method != Some(if path == "/v1/jobs" { "POST" } else { "GET" }) {
+    let allowed = if path == "/v1/jobs" {
+        request.method == Some("POST")
+    } else if matches!(job_route, Some((_, false))) {
+        matches!(request.method, Some("GET" | "DELETE"))
+    } else {
+        request.method == Some("GET")
+    };
+    if !allowed {
         return Err(405);
     }
     if path == "/v1/health" {
@@ -340,7 +360,9 @@ fn route(
         return jobs.names().map(|b| (200, b));
     }
     if let Some((id, logs)) = job_route {
-        return if logs {
+        return if request.method == Some("DELETE") {
+            jobs.release(socket, id, deadline)
+        } else if logs {
             jobs.logs(socket, id, deadline)
         } else {
             jobs.get(socket, id, deadline)
@@ -375,7 +397,7 @@ mod tests {
             };
             let output = body.clone();
             let worker = std::thread::spawn(move || {
-                respond(&mut stream, 200, output, false, Instant::now() + budget);
+                respond(&mut stream, 200, output, "GET", Instant::now() + budget);
             });
             // The stalled peer consumes nothing until the writer has finished.
             // Small socket buffers force backpressure; no elapsed-time assertion
