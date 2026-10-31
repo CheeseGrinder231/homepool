@@ -10,6 +10,8 @@ name = "homepool"
 path = "src/main.rs"
 
 [dependencies]
+httparse = "1.10"
+subtle = { version = "2.6", default-features = false }
 homepool-adapter-docker = { version = "0.1.0", path = "../adapters/homepool-adapter-docker" }
 rustix = { version = "1.1", features = ["fs", "process", "net", "time"] }
 signal-hook = { version = "0.4", default-features = false }

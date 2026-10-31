@@ -1,3 +1,4 @@
+mod api;
 mod arguments;
 mod hub;
 mod inventory;
@@ -23,6 +24,19 @@ fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
     let output = match options.command.as_str() {
         "help" => format!("{}\n", arguments::USAGE),
         "version" => format!("homepool {}\n", env!("CARGO_PKG_VERSION")),
+        "api" => {
+            let socket = settings::resolve_socket(
+                options.socket,
+                env::var_os("HOMEPOOL_SOCKET"),
+                env::var_os("XDG_RUNTIME_DIR"),
+            )?;
+            api::serve(
+                options.listen.expect("validated listen address"),
+                &options.token_file.expect("validated token file"),
+                &socket,
+            )?;
+            String::new()
+        }
         "status" | "hub" => {
             let path = settings::resolve_config(
                 options.config,

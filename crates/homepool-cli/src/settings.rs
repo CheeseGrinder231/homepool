@@ -627,3 +627,13 @@ binds = [{source = "/srv/input", target = "/input", read_only = true}]"#,
         }
     }
 }
+
+/// HTTP request line plus headers, and number of parsed fields.
+pub const HTTP_HEADER_BYTES: usize = 8192;
+pub const HTTP_HEADER_COUNT: usize = 32;
+/// Absolute header deadline and response-write allowance (no keep-alive).
+pub const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Bound concurrent connection threads, including hub calls.
+pub const HTTP_CONNECTIONS: usize = 32;
+/// Maximum bearer token bytes, excluding an optional final newline.
+pub const HTTP_TOKEN_BYTES: usize = 256;

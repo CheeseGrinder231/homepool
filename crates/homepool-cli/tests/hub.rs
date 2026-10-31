@@ -1610,3 +1610,266 @@ fn logs_refuse_unknown_unmanaged_and_unreachable_without_changing_inventory() {
         b"homepool: logs tail exceeds maximum\n"
     );
 }
+
+struct HttpApi {
+    child: Option<Child>,
+    address: std::net::SocketAddr,
+}
+const TEST_API_TOKEN: &str = "example-test-token-do-not-use";
+impl HttpApi {
+    fn start(f: &Fixture, socket: &str) -> Self {
+        let reservation = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = reservation.local_addr().unwrap();
+        drop(reservation);
+        f.write("token", &format!("{TEST_API_TOKEN}\n"));
+        let child = f
+            .command()
+            .args([
+                "api",
+                "--listen",
+                &address.to_string(),
+                "--token-file",
+                "token",
+                "--socket",
+                socket,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut api = Self {
+            child: Some(child),
+            address,
+        };
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                api.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+                "API exited at startup"
+            );
+            if std::net::TcpStream::connect(address).is_ok() {
+                break;
+            }
+            assert!(Instant::now() < end, "API startup watchdog");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        api
+    }
+    fn stream(&self) -> std::net::TcpStream {
+        let stream = std::net::TcpStream::connect(self.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+    }
+    fn raw(&self, request: &str) -> (u16, String) {
+        use std::io::Read;
+        let mut stream = self.stream();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut output = String::new();
+        // A server can close with unread over-limit bytes, causing a reset after
+        // the response. Retain the response already read in that case.
+        if let Err(error) = stream.read_to_string(&mut output) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(!output.contains(TEST_API_TOKEN), "token in HTTP output");
+        let status = output.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, output.split_once("\r\n\r\n").unwrap().1.into())
+    }
+    fn get(&self, path: &str, auth: Option<&str>) -> (u16, String) {
+        let header = auth
+            .map(|a| format!("Authorization: {a}\r\n"))
+            .unwrap_or_default();
+        self.raw(&format!(
+            "GET {path} HTTP/1.1\r\nHost: loopback\r\n{header}\r\n"
+        ))
+    }
+}
+impl Drop for HttpApi {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            for bytes in [&output.stdout, &output.stderr] {
+                assert!(
+                    !String::from_utf8_lossy(bytes).contains(TEST_API_TOKEN),
+                    "token in process output"
+                );
+            }
+        }
+    }
+}
+
+fn api_lists_sandbox(real: bool) {
+    let mut f = Fixture::new(real);
+    f.start();
+    let placed = f.place("api-example", 100, 33554432);
+    let api = HttpApi::start(&f, "hub.sock");
+    let auth = format!("Bearer {TEST_API_TOKEN}");
+    // Rotation takes effect only at the next API startup.
+    f.write("token", "replacement-example-token");
+    let (status, body) = api.get("/v1/sandboxes", Some(&auth));
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        body,
+        json!({"inventory_complete":true,"sandboxes":[{"member":1,"sandbox_id":"api-example","state":"running","exit_code":null}]})
+    );
+    assert_eq!(api.get("/v1/health", None), (200, "{\"version\":1}".into()));
+    f.release(&placed);
+    f.stop(Signal::TERM);
+    assert_eq!(api.get("/v1/sandboxes", Some(&auth)).0, 503);
+    assert_eq!(api.get("/v1/health", None).0, 200);
+    // A real socket trap proves rejected requests never open a hub connection.
+    // Bind through a short directory-fd path, independent of scratch path length.
+    let directory = fs::File::open(&f.root).unwrap();
+    let trap = std::os::unix::net::UnixListener::bind(format!(
+        "/proc/self/fd/{}/hub.sock",
+        std::os::fd::AsRawFd::as_raw_fd(&directory)
+    ))
+    .unwrap();
+    fs::set_permissions(f.root.join("hub.sock"), fs::Permissions::from_mode(0o600)).unwrap();
+    trap.set_nonblocking(true).unwrap();
+    for token in [
+        None,
+        Some("Bearer wrong"),
+        Some("Basic example"),
+        Some("Bearer"),
+        Some("Bearer bad token"),
+        Some("Bearer ="),
+        Some("Bearer "),
+    ] {
+        assert_eq!(api.get("/v1/sandboxes", token).0, 401);
+    }
+    assert_eq!(
+        api.raw(&format!(
+            "GET /v1/sandboxes HTTP/1.1\r\nAuthorization: {auth}\r\nAuthorization: {auth}\r\n\r\n"
+        ))
+        .0,
+        401
+    );
+    assert_eq!(api.get("/unknown", Some(&auth)).0, 404);
+    for method in ["POST", "HEAD", "OPTIONS", "DELETE"] {
+        assert_eq!(
+            api.raw(&format!(
+                "{method} /v1/sandboxes HTTP/1.1\r\nAuthorization: {auth}\r\n\r\n"
+            ))
+            .0,
+            405
+        );
+    }
+    assert_eq!(
+        api.raw(&format!(
+            "GET /v1/sandboxes HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: 1\r\n\r\nx"
+        ))
+        .0,
+        400
+    );
+    assert_eq!(api.get("/v1/health", None).0, 200);
+    assert_eq!(
+        trap.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn api_process_lists_and_authenticates() {
+    api_lists_sandbox(false);
+}
+#[test]
+#[ignore = "requires a disposable Docker engine and alpine:3.22"]
+fn api_engine_lists_and_authenticates() {
+    api_lists_sandbox(true);
+}
+
+#[test]
+fn api_bounds_headers_and_stalled_connections_and_survives_hub_recovery() {
+    use std::io::Read;
+    let mut f = Fixture::new(false);
+    let api = HttpApi::start(&f, "hub.sock");
+    let mut stalled = api.stream();
+    stalled
+        .write_all(b"GET /v1/health HTTP/1.1\r\nX-Stalled: ")
+        .unwrap();
+    let start = Instant::now();
+    assert_eq!(api.get("/v1/health", None).0, 200);
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert_eq!(
+        api.raw(&format!(
+            "GET /v1/health HTTP/1.1\r\nX-Large: {}\r\n\r\n",
+            "x".repeat(9000)
+        ))
+        .0,
+        431
+    );
+    assert_eq!(
+        api.raw(&format!(
+            "GET /v1/health HTTP/1.1\r\n{}\r\n",
+            "X: x\r\n".repeat(33)
+        ))
+        .0,
+        431
+    );
+    let mut response = String::new();
+    stalled.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 408"));
+    assert!(start.elapsed() < Duration::from_secs(7));
+    let auth = format!("Bearer {TEST_API_TOKEN}");
+    assert_eq!(api.get("/v1/sandboxes", Some(&auth)).0, 503);
+    f.start();
+    assert_eq!(api.get("/v1/sandboxes", Some(&auth)).0, 200);
+}
+
+#[test]
+fn api_refuses_non_loopback_and_invalid_private_tokens_without_echoing_them() {
+    let f = Fixture::new(false);
+    let refuse = |address: &str| {
+        let out = f
+            .command()
+            .args([
+                "api",
+                "--listen",
+                address,
+                "--token-file",
+                "token",
+                "--socket",
+                "hub.sock",
+            ])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        let error = String::from_utf8(out.stderr).unwrap();
+        assert!(!error.contains(TEST_API_TOKEN));
+        error
+    };
+    assert!(refuse("192.0.2.1:0").contains("loopback"));
+    assert!(refuse("[2001:db8::1]:0").contains("loopback"));
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)).to_string();
+    assert!(refuse(&address).contains("token file"));
+    for text in [
+        String::new(),
+        "\n".into(),
+        "invalid token".into(),
+        "x".repeat(257),
+        format!("{TEST_API_TOKEN}\nextra"),
+    ] {
+        f.write("token", &text);
+        assert!(refuse(&address).contains("token file"));
+    }
+    f.write("token", TEST_API_TOKEN);
+    fs::set_permissions(f.root.join("token"), fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(refuse(&address).contains("token file"));
+    fs::remove_file(f.root.join("token")).unwrap();
+    f.write("other-token", TEST_API_TOKEN);
+    std::os::unix::fs::symlink("other-token", f.root.join("token")).unwrap();
+    assert!(refuse(&address).contains("token file"));
+    fs::remove_file(f.root.join("token")).unwrap();
+    fs::create_dir(f.root.join("token")).unwrap();
+    fs::set_permissions(f.root.join("token"), fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(refuse(&address).contains("token file"));
+}

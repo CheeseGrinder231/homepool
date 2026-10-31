@@ -258,8 +258,8 @@ while the hub is settling because they are read-only, like inventory.
 
 **Logs contain whatever the job printed, including any secret it printed. Treat
 them as private.** Hub diagnostics never contain job logs, including on failure.
-Socket permissions remain the authorization boundary. There is no streaming,
-follow mode, result store or network API.
+Socket permissions remain the authorization boundary for logs. There is no streaming,
+follow mode or result store. The separate [HTTP API](api.md) does not expose logs.
 
 ## Member lifecycle
 
@@ -312,7 +312,8 @@ Unknown fields and operations fail. Responses are
 `{"version":1,"result":{...},"error":null}` or
 `{"version":1,"result":null,"error":"..."}`. CLI commands unwrap `result`;
 errors exit `1` without success JSON. Socket permissions are the authorization
-boundary; there is no network endpoint or additional authentication protocol.
+boundary for this protocol; the hub has no network endpoint or additional authentication
+protocol. The separate [HTTP API process](api.md) is a read-only socket client.
 A disconnected client must reconcile before retrying a mutation.
 
 [The example systemd user unit](examples/homepool-hub.service) uses XDG runtime
