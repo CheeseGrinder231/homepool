@@ -1446,3 +1446,167 @@ volumes = [{{name = "cache", target = "/cache"}}, {{name = "a-cache", target = "
         }
     }
 }
+
+fn job_results(real: bool) {
+    let mut f = Fixture::new(real);
+    f.start();
+    let placed = f.ok(
+        &["place", "--json"],
+        Some(json!({
+            "sandbox_id": "job-results", "image": "alpine:3.22",
+            "cpu_millicores": 100, "memory_bytes": 33554432,
+            "command": ["sh", "-c", "printf 'job output\\n'; printf 'job error\\n' >&2; exit 3"]
+        })),
+    );
+    let handle = placed["handle"].as_str().unwrap();
+    let (_, id) = handle.split_once(':').unwrap();
+    if real {
+        f.created.borrow_mut().push((1, id.into()));
+    } else {
+        let mut engine = f.engine();
+        engine["items"][id]["state"] = json!("exited");
+        engine["items"][id]["exit_code"] = json!(3);
+        engine["items"][id]["stdout"] = json!(b"job output\n");
+        engine["items"][id]["stderr"] = json!(b"job error\n");
+        f.save_engine(&engine);
+    }
+    let until = Instant::now() + Duration::from_secs(10);
+    let before = loop {
+        let inventory = f.inventory();
+        if inventory["members"][0]["sandboxes"][0]["state"] == "exited" {
+            break inventory;
+        }
+        assert!(Instant::now() < until, "job exit watchdog");
+    };
+    assert_eq!(before["members"][0]["sandboxes"][0]["exit_code"], 3);
+    assert_eq!(before["members"][0]["free"]["cpu_millicores"], 900);
+    assert_eq!(before["members"][0]["free"]["sandbox_slots"], 2);
+    let expected = json!({"stdout": "job output\n", "stderr": "job error\n", "cut": false});
+    assert_eq!(f.ok(&["logs", handle], None), expected);
+    f.stop(Signal::TERM);
+    f.spawn();
+    // Read-only logs are usable even during the new process's settle window.
+    f.wait_file("hub.sock");
+    assert_eq!(f.ok(&["logs", handle], None), expected);
+    f.wait_settled();
+    assert_eq!(f.inventory(), before);
+    assert_eq!(f.ok(&["logs", handle], None), expected);
+    f.release(&placed);
+}
+
+#[test]
+fn job_results_and_bounded_logs() {
+    // Run the new process-heavy scenarios sequentially so they add only one
+    // concurrent fixture to the existing short-request deadline regressions.
+    job_results(false);
+    logs_bound_lines_and_bytes_and_replace_non_utf8();
+    logs_refuse_unknown_unmanaged_and_unreachable_without_changing_inventory();
+}
+
+#[test]
+#[ignore = "requires a disposable Docker engine and alpine:3.22"]
+fn engine_job_exit_and_logs_survive_process_restart() {
+    job_results(true);
+}
+
+fn logs_bound_lines_and_bytes_and_replace_non_utf8() {
+    let mut f = Fixture::new(false);
+    f.start();
+    let placed = f.place("bounded-logs", 100, 33554432);
+    let handle = placed["handle"].as_str().unwrap();
+    let (_, id) = handle.split_once(':').unwrap();
+    let before = f.inventory();
+    assert!(
+        before["members"][0]["sandboxes"][0]
+            .get("exit_code")
+            .is_none()
+    );
+    let mut engine = f.engine();
+    engine["items"][id]["stdout"] = json!(b"old\nlast\n");
+    engine["items"][id]["stderr"] = json!([255, 10]);
+    f.save_engine(&engine);
+    assert_eq!(
+        f.ok(&["logs", handle, "--tail", "1"], None),
+        json!({"stdout":"last\n", "stderr":"\u{fffd}\n", "cut":true})
+    );
+    assert_eq!(
+        f.ok(&["logs", handle, "--tail", "0"], None),
+        json!({"stdout":"", "stderr":"", "cut":true})
+    );
+    engine["items"][id]["stdout"] = json!(
+        (0..110)
+            .flat_map(|_| b"line\n")
+            .copied()
+            .collect::<Vec<_>>()
+    );
+    f.save_engine(&engine);
+    let default = f.ok(&["logs", handle], None);
+    assert_eq!(default["stdout"], "line\n".repeat(100));
+    assert_eq!(default["cut"], true);
+    // Worst JSON escaping on both full pipes must still fit the wire envelope.
+    engine["items"][id]["stdout"] = json!(vec![0u8; 200_000]);
+    engine["items"][id]["stderr"] = json!(vec![1u8; 200_000]);
+    f.save_engine(&engine);
+    let output = f.run(&["logs", handle, "--tail", "1000"], None);
+    assert!(output.status.success());
+    assert!(output.stdout.len() + 128 < 1024 * 1024);
+    let logs: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(logs["cut"], true);
+    assert!(!logs["stdout"].as_str().unwrap().is_empty());
+    assert!(!logs["stderr"].as_str().unwrap().is_empty());
+    assert_eq!(f.inventory(), before);
+}
+
+fn logs_refuse_unknown_unmanaged_and_unreachable_without_changing_inventory() {
+    let mut f = Fixture::new(false);
+    f.start();
+    let placed = f.place("private-logs", 100, 33554432);
+    let handle = placed["handle"].as_str().unwrap();
+    let (_, id) = handle.split_once(':').unwrap();
+    let before = f.inventory();
+    let mut engine = f.engine();
+    engine["items"][id]["stdout"] = json!(b"private output");
+    engine["items"][id]["stderr"] = json!(b"private error");
+    f.save_engine(&engine);
+    for unknown in [
+        format!("1:{}", "f".repeat(64)),
+        format!("99:{id}"),
+        "invalid".into(),
+    ] {
+        let output = f.run(&["logs", &unknown], None);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!f.root.join("logs-read").exists());
+    }
+    for label in ["homepool.managed", "homepool.member", "homepool.sandbox"] {
+        let mut unowned = engine.clone();
+        unowned["items"][id]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(label);
+        f.save_engine(&unowned);
+        let output = f.run(&["logs", handle], None);
+        assert_eq!(output.stderr, b"homepool: could not read sandbox logs\n");
+        assert!(output.stdout.is_empty());
+        assert!(!f.root.join("logs-read").exists());
+    }
+    f.save_engine(&engine);
+    for flag in ["unavailable-1", "fail-logs", "stall-logs"] {
+        f.write(flag, "");
+        let output = f.run(&["logs", handle], None);
+        assert_eq!(output.stderr, b"homepool: could not read sandbox logs\n");
+        assert!(output.stdout.is_empty());
+        fs::remove_file(f.root.join(flag)).unwrap();
+        assert_eq!(f.inventory(), before);
+    }
+    // No unrelated probes: a healthy exact handle still works during an outage.
+    f.write("addition.toml", &f.member(2, "active", 1000, 3));
+    f.ok(&["add", "addition.toml"], None);
+    f.write("unavailable-2", "");
+    assert_eq!(f.ok(&["logs", handle], None)["stdout"], "private output");
+    let out_of_range = f.run(&["logs", handle, "--tail", "1001"], None);
+    assert_eq!(
+        out_of_range.stderr,
+        b"homepool: logs tail exceeds maximum\n"
+    );
+}

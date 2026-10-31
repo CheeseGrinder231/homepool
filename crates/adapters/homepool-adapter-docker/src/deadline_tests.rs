@@ -324,11 +324,15 @@ fn stalled_engine_expires_after_connection_readiness() {
 fn cancellation_reaps_transport_and_closes_inherited_pipes() {
     watchdog(|| {
         use std::sync::atomic::{AtomicBool, Ordering};
-        for input in [Vec::new(), vec![b'x'; 1024 * 1024]] {
+        for (input, capture_stderr) in [
+            (Vec::new(), false),
+            (Vec::new(), true),
+            (vec![b'x'; 1024 * 1024], false),
+        ] {
             let scratch = Scratch::new();
             let cancelled = AtomicBool::new(false);
             let mut witnesses = None;
-            let error = crate::command::execute_poll(
+            let error = crate::command::execute_captured(
                 &mut scratch.stalled(false),
                 "create",
                 &input,
@@ -342,16 +346,20 @@ fn cancellation_reaps_transport_and_closes_inherited_pipes() {
                     Duration::from_secs(30)
                 },
                 &cancelled,
+                capture_stderr,
+                |_, _| {},
             )
             .unwrap_err();
             assert!(matches!(error, Error::Cancelled));
             witnesses.unwrap().assert_closed();
-            let error = crate::command::execute_poll(
+            let error = crate::command::execute_captured(
                 &mut Command::new("no-such-command"),
                 "create",
                 &[],
                 || Duration::from_secs(30),
                 &cancelled,
+                capture_stderr,
+                |_, _| {},
             )
             .unwrap_err();
             assert!(matches!(error, Error::Cancelled));

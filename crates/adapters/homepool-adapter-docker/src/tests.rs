@@ -203,6 +203,7 @@ fn ownership_requires_all_three_labels_and_exact_member_and_id() {
         id: id.clone(),
         labels: Some(labels),
         state: "running".into(),
+        exit_code: 0,
         limits: crate::limits::Limits {
             nano_cpus: 1_250_000_000,
             cpu_quota: 0,
@@ -211,7 +212,7 @@ fn ownership_requires_all_three_labels_and_exact_member_and_id() {
         },
     };
     let unlabelled: Observation = serde_json::from_value(serde_json::json!({
-        "id": id, "labels": null, "state": "created",
+        "id": id, "labels": null, "state": "created", "exit_code": 0,
         "limits": {"nano_cpus": 0, "cpu_quota": 0, "cpu_period": 0, "memory_bytes": 0}
     }))
     .unwrap();
@@ -285,7 +286,7 @@ fn inventory_limits_round_up_and_unbounded_is_not_zero() {
     let id = "a".repeat(64);
     let observation = |nano_cpus, memory_bytes| {
         serde_json::from_value(serde_json::json!({
-        "id": id, "state": "running",
+        "id": id, "state": "running", "exit_code": 0,
         "labels": {"homepool.managed": "true", "homepool.member": "7", "homepool.sandbox": "sandbox-a"},
         "limits": {"nano_cpus": nano_cpus, "cpu_quota": 0, "cpu_period": 0, "memory_bytes": memory_bytes}
     })).unwrap()
@@ -299,7 +300,7 @@ fn inventory_limits_round_up_and_unbounded_is_not_zero() {
     assert_eq!(unbounded.memory_bytes, None);
     assert!(
         serde_json::from_value::<Observation>(
-            serde_json::json!({"id": id, "state": "running", "labels": {}})
+            serde_json::json!({"id": id, "state": "running", "exit_code": 0, "labels": {}})
         )
         .is_err()
     );
@@ -575,4 +576,25 @@ fn volume_boundaries_are_unique_with_multiple_suffixes_in_one_profile() {
     assert!(names.contains("homepool-1-job.a-cache"));
     request.profile.volumes[0].name = "cache.data".into();
     assert!(spec::create_args(MemberId(1), &request).is_err());
+}
+
+#[test]
+fn exit_code_is_read_only_for_exited_observations() {
+    let id = "a".repeat(64);
+    for state in [
+        "created",
+        "running",
+        "paused",
+        "restarting",
+        "dead",
+        "exited",
+    ] {
+        let observation: Observation = serde_json::from_value(serde_json::json!({
+            "id": id, "state": state, "exit_code": 3,
+            "labels": {"homepool.managed": "true", "homepool.member": "7", "homepool.sandbox": "job"},
+            "limits": {"nano_cpus": 100000000, "cpu_quota": 0, "cpu_period": 0, "memory_bytes": 33554432}
+        })).unwrap();
+        let sandbox = owned_observation(MemberId(7), &id, observation).unwrap();
+        assert_eq!(sandbox.exit_code, (state == "exited").then_some(3));
+    }
 }

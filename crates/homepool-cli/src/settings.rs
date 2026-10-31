@@ -503,6 +503,12 @@ pub const DEFAULT_SOCKET_PATH: &str = "homepool/hub.sock";
 pub const HUB_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 pub const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 pub const API_SIZE_LIMIT: usize = 1024 * 1024;
+/// Last lines retained independently for stdout and stderr.
+pub const LOG_DEFAULT_TAIL: usize = 100;
+pub const LOG_MAX_TAIL: usize = 1000;
+/// Combined raw bytes; each pipe gets half. Six bytes per input byte covers
+/// worst-case JSON escaping and lossy UTF-8, leaving space for the envelope.
+pub const LOG_BYTES: usize = (API_SIZE_LIMIT - 1024) / 6;
 pub const CPU_QUANTUM: u64 = 10;
 
 /// Reserve response time inside the same client-supplied request deadline.

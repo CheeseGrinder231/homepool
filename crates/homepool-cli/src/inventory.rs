@@ -132,7 +132,11 @@ impl Inventory {
     pub fn render(&self) -> Value {
         json!({"settling": self.settling, "members": self.pool.members().map(|m| {
             let free = self.pool.free_budget(m.id).expect("known member");
-            json!({"member": m.id.0, "state": match m.state { MemberState::Active => "active", MemberState::Draining => "draining", MemberState::Unreachable => "unreachable" }, "inventory_complete": self.complete[&m.id], "free": {"cpu_millicores": free.cpu_millicores, "memory_bytes": free.memory_bytes, "sandbox_slots": free.sandbox_slots}, "sandboxes": self.observed[&m.id].iter().map(|s| json!({"handle": handle(m.id, &s.container_id), "sandbox_id": s.sandbox_id, "state": s.state, "cpu_millicores": s.cpu_millicores, "memory_bytes": s.memory_bytes})).collect::<Vec<_>>()})
+            json!({"member": m.id.0, "state": match m.state { MemberState::Active => "active", MemberState::Draining => "draining", MemberState::Unreachable => "unreachable" }, "inventory_complete": self.complete[&m.id], "free": {"cpu_millicores": free.cpu_millicores, "memory_bytes": free.memory_bytes, "sandbox_slots": free.sandbox_slots}, "sandboxes": self.observed[&m.id].iter().map(|s| {
+                let mut value = json!({"handle": handle(m.id, &s.container_id), "sandbox_id": s.sandbox_id, "state": s.state, "cpu_millicores": s.cpu_millicores, "memory_bytes": s.memory_bytes});
+                if let Some(code) = s.exit_code { value["exit_code"] = json!(code); }
+                value
+            }).collect::<Vec<_>>()})
         }).collect::<Vec<_>>()})
     }
 }

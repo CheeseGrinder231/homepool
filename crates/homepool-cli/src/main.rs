@@ -80,6 +80,10 @@ fn run(interrupted: &Arc<AtomicUsize>) -> Result<(), String> {
                             .map_err(|_| "invalid placement JSON")?,
                     }
                 }
+                "logs" => Request::Logs {
+                    handle: operand.to_str().ok_or("invalid handle")?.into(),
+                    tail: options.tail,
+                },
                 "release" => Request::Release {
                     handle: operand.to_str().ok_or("invalid handle")?.into(),
                 },

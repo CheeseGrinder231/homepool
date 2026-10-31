@@ -208,6 +208,22 @@ fn execute(
                 .map_err(|_| "release outcome uncertain; inspect inventory before retrying")?;
             Ok(json!({"released": handle}))
         }
+        Request::Logs { handle, tail } => {
+            let tail = tail.unwrap_or(settings::LOG_DEFAULT_TAIL);
+            if tail > settings::LOG_MAX_TAIL {
+                return Err("logs tail exceeds maximum".into());
+            }
+            let (member, container) = handle.split_once(':').ok_or("invalid sandbox handle")?;
+            let member = MemberId(member.parse().map_err(|_| "invalid sandbox handle")?);
+            let logs = inventory::adapter(config, member, budget)
+                .and_then(|adapter| {
+                    adapter
+                        .logs(container, tail, settings::LOG_BYTES)
+                        .map_err(|_| "could not read sandbox logs".into())
+                })
+                .map_err(|_| "could not read sandbox logs")?;
+            Ok(json!({"stdout": logs.stdout, "stderr": logs.stderr, "cut": logs.cut}))
+        }
         Request::Drain { member } => {
             config
                 .pool
@@ -353,6 +369,7 @@ fn place(
                         container_id: container_id.into(),
                         sandbox_id: sandbox_id.into(),
                         state: "unknown".into(),
+                        exit_code: None,
                         cpu_millicores: Some(allocation.budget.cpu_millicores),
                         memory_bytes: Some(allocation.budget.memory_bytes),
                     });

@@ -170,8 +170,11 @@ observed handles readable with the member closed; release can reconcile them.
 Inventory JSON exposes each engine observation as
 `members[].sandboxes[].state`, independently of the member's admission `state`.
 Values are Docker state strings, including `created` (never started), `running`
-and `exited`. A retained failed-start handle may have `unknown` until inspection
-succeeds. When `inventory_complete` is false, retained observations may be stale;
+and `exited`. An exited sandbox also has integer `exit_code`, read from Docker
+inspect on every inventory rebuild; the field is absent for other states. This
+is additive to API version 1 and survives a hub restart without result storage.
+An exited sandbox keeps its allocation until `release`. A retained failed-start
+handle may have `unknown` until inspection succeeds. When `inventory_complete` is false, retained observations may be stale;
 none of those entries make capacity free. Use this field to distinguish a late
 created record from the running sandbox for the same identity.
 
@@ -226,6 +229,38 @@ Defaults live in the settings module. Keep the operation limit consistent across
 restarts; if reducing it, allow the previous limit to elapse before restarting.
 Tests use shorter configured limits while exercising the same process paths.
 
+## Job logs
+
+```sh
+homepool --socket "$HOMEPOOL_SOCKET" logs "$SANDBOX_HANDLE"
+homepool --socket "$HOMEPOOL_SOCKET" logs "$SANDBOX_HANDLE" --tail 20
+```
+
+`logs` returns JSON with separate `stdout` and `stderr` strings and a boolean
+`cut`. It retains the last N lines **of each stream**, including an unfinished
+last line. The default is 100 lines and the maximum is 1,000; zero returns empty
+streams. A combined raw byte cap of 174,592 bytes is split equally between the
+streams. When either limit discards output, `cut` is true. Byte truncation keeps
+the suffix and may split a character; non-UTF-8 bytes become replacement
+characters. The cap accounts for replacement and JSON escaping, keeping the
+version-1 response envelope below `API_SIZE_LIMIT` (1 MiB). These defaults and
+limits live in settings.
+
+This reads retained engine logs without following or storing results. To report
+whether history was cut, it scans the retained logs into bounded suffix buffers;
+very large histories can exceed the operation deadline and return the fixed
+`could not read sandbox logs` error. Ownership labels are inspected before any
+logs are read. Unknown handles, containers without this member's homepool labels,
+unavailable engines and failed reads return errors without changing inventory
+or admission state. Logs check only their exact member, using the same adapter,
+request deadline and cancellation as other engine operations. They are available
+while the hub is settling because they are read-only, like inventory.
+
+**Logs contain whatever the job printed, including any secret it printed. Treat
+them as private.** Hub diagnostics never contain job logs, including on failure.
+Socket permissions remain the authorization boundary. There is no streaming,
+follow mode, result store or network API.
+
 ## Member lifecycle
 
 ```sh
@@ -269,7 +304,8 @@ frame is rejected. The same deadline applies to the entire connection.
 
 The operation fields are `{"op":"inventory"}`, or
 `{"op":"place",...placement fields...}` with optional `fresh`. Other operations
-are `{"op":"release","handle":"..."}`, `{"op":"drain","member":1}`,
+are `{"op":"logs","handle":"...","tail":20}` (optional `tail`),
+`{"op":"release","handle":"..."}`, `{"op":"drain","member":1}`,
 `{"op":"remove","member":1}`, and `{"op":"add","document":"..."}`;
 include the deadline metadata in each frame.
 Unknown fields and operations fail. Responses are

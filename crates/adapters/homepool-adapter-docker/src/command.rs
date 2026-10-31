@@ -98,9 +98,52 @@ pub(crate) fn execute_poll(
     command: &mut Command,
     operation: &'static str,
     input: &[u8],
-    mut remaining: impl FnMut() -> Duration,
+    remaining: impl FnMut() -> Duration,
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>, Error> {
+    let mut output = Vec::new();
+    execute_captured(
+        command,
+        operation,
+        input,
+        remaining,
+        cancelled,
+        false,
+        |_, bytes| {
+            output.extend_from_slice(bytes);
+        },
+    )?;
+    Ok(output)
+}
+
+/// Log output needs both pipes; errors still expose only fixed operation names.
+pub(crate) fn capture(
+    endpoint: &Endpoint,
+    args: &[String],
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    sink: impl FnMut(bool, &[u8]),
+) -> Result<(), Error> {
+    execute_captured(
+        &mut command(endpoint, args),
+        "logs",
+        &[],
+        || deadline.saturating_duration_since(Instant::now()),
+        cancelled,
+        true,
+        sink,
+    )
+}
+
+pub(crate) fn execute_captured(
+    command: &mut Command,
+    operation: &'static str,
+    input: &[u8],
+    mut remaining: impl FnMut() -> Duration,
+    cancelled: &AtomicBool,
+    capture_stderr: bool,
+    mut sink: impl FnMut(bool, &[u8]),
+) -> Result<(), Error> {
     if cancelled.load(Ordering::Acquire) {
         return Err(Error::Cancelled);
     }
@@ -112,18 +155,35 @@ pub(crate) fn execute_poll(
             .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Docker diagnostics can echo environment input. Never retain them.
-            .stderr(Stdio::null())
+            // Ordinary commands discard diagnostics. Logs capture both pipes;
+            // callers discard all captured output when the command fails.
+            .stderr(if capture_stderr {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .spawn()
             .map_err(|_| Error::Io(operation))?,
     );
     let mut stdin = transport.0.stdin.take();
-    let mut stdout = transport.0.stdout.take().expect("piped stdout");
+    let mut pipes = [
+        transport
+            .0
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn ReadPipe>),
+        transport
+            .0
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn ReadPipe>),
+    ];
     nonblocking(stdin.as_ref().expect("piped stdin")).map_err(|_| Error::Io(operation))?;
-    nonblocking(&stdout).map_err(|_| Error::Io(operation))?;
+    for pipe in pipes.iter().flatten() {
+        nonblocking(pipe).map_err(|_| Error::Io(operation))?;
+    }
     let mut offset = 0;
-    let mut output = Vec::new();
-    let mut eof = false;
+
     let mut input_failed = false;
     loop {
         if cancelled.load(Ordering::Acquire) {
@@ -156,12 +216,15 @@ pub(crate) fn execute_poll(
                 }
             }
         }
-        if !eof {
+        for (index, slot) in pipes.iter_mut().enumerate() {
+            let Some(pipe) = slot.as_mut() else { continue };
             let mut buffer = [0; 8192];
-            match stdout.read(&mut buffer) {
-                Ok(0) => eof = true,
+            match pipe.read(&mut buffer) {
+                Ok(0) => {
+                    slot.take();
+                }
                 Ok(count) => {
-                    output.extend_from_slice(&buffer[..count]);
+                    sink(index == 1, &buffer[..count]);
                     progressed = true;
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
@@ -177,7 +240,7 @@ pub(crate) fn execute_poll(
             WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
         )
         .map_err(|_| Error::Io(operation))?
-            && eof
+            && pipes.iter().all(Option::is_none)
             && stdin.is_none()
         {
             if cancelled.load(Ordering::Acquire) {
@@ -192,7 +255,7 @@ pub(crate) fn execute_poll(
             if input_failed {
                 return Err(Error::Io(operation));
             }
-            return Ok(output);
+            return Ok(());
         }
         if !progressed {
             std::thread::sleep(TRANSPORT_POLL_INTERVAL.min(time_left));
@@ -200,7 +263,10 @@ pub(crate) fn execute_poll(
     }
 }
 
-fn nonblocking(fd: &impl std::os::fd::AsFd) -> io::Result<()> {
+trait ReadPipe: Read + std::os::fd::AsFd {}
+impl<T: Read + std::os::fd::AsFd> ReadPipe for T {}
+
+fn nonblocking(fd: &(impl std::os::fd::AsFd + ?Sized)) -> io::Result<()> {
     let flags = fcntl_getfl(fd)?;
     fcntl_setfl(fd, flags | OFlags::NONBLOCK)?;
     Ok(())
