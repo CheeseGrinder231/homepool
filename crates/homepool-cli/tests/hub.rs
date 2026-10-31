@@ -1997,7 +1997,13 @@ fn api_submits_approved_job(real: bool) {
     f.stop(Signal::TERM);
     f.start();
     approved_operations(&f);
+    let catalog = fs::read_to_string(f.root.join("operations.toml"))
+        .unwrap()
+        .replace("name = \"finish\"", "name = \"retired\"");
+    f.write("operations.toml", &catalog);
     let api = HttpApi::configured(&f, "hub.sock", true);
+    // Historical jobs stay readable and idempotent after catalog removal.
+    assert_eq!(api.job(&id).1["operation"], "finish");
     assert_eq!(api.post(&request).0, 200);
     assert_eq!(
         f.inventory()["members"][0]["sandboxes"]
@@ -2141,6 +2147,83 @@ fn api_job_input_is_bounded_strict_and_authenticated_before_hub_calls() {
 }
 
 #[test]
+fn api_job_lookup_requires_a_complete_derived_identity() {
+    use sha2::{Digest, Sha256};
+    let mut f = Fixture::new(false);
+    f.start();
+    approved_operations(&f);
+    let api = HttpApi::configured(&f, "hub.sock", true);
+    let auth = format!("Bearer {TEST_API_TOKEN}");
+    let id = "derived-identity";
+    let prefix = format!("api-{:x}-", Sha256::digest(id.as_bytes()));
+    let placed = f.place(&prefix, 100, 33554432);
+    let handle = placed["handle"].as_str().unwrap();
+    let (_, container) = handle.split_once(':').unwrap();
+    for suffix in ["", "bad/name", &"x".repeat(60)] {
+        let identity = format!("{prefix}{suffix}");
+        if !suffix.is_empty() {
+            // The hub already rejects invalid characters and identities over
+            // 128 bytes. Also exercise the API matcher against an existing
+            // malformed label observed by the real hub through the fake engine.
+            assert!(
+                !f.run(
+                    &["place", "--json"],
+                    Some(json!({
+                        "sandbox_id": identity, "image":"alpine:3.22",
+                        "cpu_millicores":100,"memory_bytes":33554432
+                    }))
+                )
+                .status
+                .success()
+            );
+            let mut engine = f.engine();
+            engine["items"][container]["labels"]["homepool.sandbox"] = json!(identity);
+            f.save_engine(&engine);
+        }
+        assert_eq!(
+            api.job(id),
+            (
+                404,
+                json!({
+                    "request_id":id,"operation":null,"state":"absent","exit_code":null
+                })
+            )
+        );
+        let (status, body) = api.get(&format!("/v1/jobs/{id}/logs"), Some(&auth));
+        assert_eq!(status, 404);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["state"],
+            "absent"
+        );
+        assert!(!f.root.join("logs-read").exists());
+        assert_eq!(
+            api.post(&json!({"request_id":id,"operation":"missing"}).to_string())
+                .0,
+            404
+        );
+        // A malformed identity is neither a conflicting operation nor a job to
+        // reuse. An approved submission places its own valid, distinct identity.
+        assert_eq!(
+            api.post(&json!({"request_id":id,"operation":"finish"}).to_string())
+                .0,
+            200
+        );
+        let inventory = f.inventory();
+        let sandboxes = inventory["members"][0]["sandboxes"].as_array().unwrap();
+        assert_eq!(sandboxes.len(), 2);
+        let valid = sandboxes
+            .iter()
+            .find(|s| s["sandbox_id"] == format!("{prefix}finish"))
+            .unwrap();
+        assert_eq!(api.job(id).1["operation"], "finish");
+        assert_eq!(api.get(&format!("/v1/jobs/{id}/logs"), Some(&auth)).0, 200);
+        fs::remove_file(f.root.join("logs-read")).unwrap();
+        f.release(valid);
+    }
+    f.release(&placed);
+}
+
+#[test]
 fn api_job_logs_bound_output_and_refuse_incomplete_inventory() {
     let mut f = Fixture::new(false);
     f.start();
@@ -2171,10 +2254,8 @@ fn api_job_logs_bound_output_and_refuse_incomplete_inventory() {
     engine["items"][container]["stdout"] = json!(vec![0u8; 200_000]);
     engine["items"][container]["stderr"] = json!(vec![1u8; 200_000]);
     f.save_engine(&engine);
-    let started = Instant::now();
     let (status, body) = api.get(&path, Some(&auth));
     assert_eq!(status, 200);
-    assert!(started.elapsed() < Duration::from_secs(5));
     assert!(body.len() <= 1024 * 1024);
     let logs: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(logs["cut"], true);

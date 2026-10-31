@@ -107,7 +107,10 @@ and no output; it never claims absence or reads logs from a stale handle.
 Hub connection, schema and log-read failures return `503` with an empty body.
 Only API-derived identities can be read; an ordinary sandbox placed directly
 through the hub cannot be addressed by supplying its sandbox ID or handle.
-The owner-only socket must continue to reserve the API identity namespace.
+A hub socket client has full owner authority. A sandbox deliberately placed
+through that socket under a valid derived identity is treated as an API job,
+including when the operation is no longer in the current catalog. The identity
+is an opt-in namespace, not proof that the API created the sandbox.
 
 Output is retained by Docker and can be read while a job runs and after API and
 hub restart, until release. `cut` is true if the line or byte limits discarded
@@ -128,9 +131,12 @@ A successful submission or status response looks like:
 Request IDs follow the existing sandbox identity grammar: 1–128 ASCII letters,
 digits or `-_.`. Invalid IDs return `400`. A sandbox identity is
 `api-<SHA-256 of request_id in lowercase hex>-<operation name>`; this fits the
-existing 128-byte identity limit and lets a new API process recover the approved
-operation from Docker without reading environment values. Reserve this namespace
-for the API when using the owner-only hub socket directly.
+existing 128-byte identity limit and lets a new API process recover the operation
+from Docker without reading environment values. The complete suffix must follow
+the operation-name grammar above, independently of catalog membership. An empty
+or invalid suffix is ignored by status, logs and submission lookup: with complete
+inventory, reads return `404` with state `absent`, and an approved submission can
+place a distinct valid job rather than conflict with or reuse that sandbox.
 
 The same request ID and operation returns the observed job without placing it
 again, including after API or hub restart. A different operation for an existing
@@ -171,8 +177,11 @@ A logs response body is capped at 1,048,576 bytes (1 MiB), including JSON escapi
 and job metadata. With HTTP headers, the complete response is at most 1,048,696
 bytes. Reading this within the five-second write allowance requires about
 1.68 Mbit/s of payload throughput, within a normal local or forwarded link's
-capacity. Slow readers can still time out. Oversized hub output fails closed
-with `503`; the API never enlarges the hub's existing log cap.
+capacity. Exhausting the write budget can close a `200 OK` response partway
+through its body, leaving incomplete JSON. Clients must compare the received
+body length with `Content-Length`, reject a short read and retry the request.
+Oversized hub output fails closed with `503`; the API never enlarges the hub's
+existing log cap.
 
 After writing a response (including `401`), the API shuts down its write side to
 deliver the response before closing with unread input. It drains at most 12 KiB

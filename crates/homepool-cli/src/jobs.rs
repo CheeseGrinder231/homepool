@@ -68,6 +68,9 @@ pub fn valid_identity(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
+fn valid_operation_name(value: &str) -> bool {
+    valid_identity(value) && value.len() <= OPERATION_NAME_BYTES
+}
 fn prefix(request_id: &str) -> String {
     format!("api-{:x}-", Sha256::digest(request_id.as_bytes()))
 }
@@ -84,8 +87,7 @@ impl Jobs {
             }
             let mut jobs = Self::default();
             for operation in document.operations {
-                if !valid_identity(&operation.name)
-                    || operation.name.len() > OPERATION_NAME_BYTES
+                if !valid_operation_name(&operation.name)
                     || operation.image.is_empty()
                     || operation.image.starts_with('-')
                     || operation.image.contains('\0')
@@ -305,7 +307,10 @@ impl HubInventory {
             .members
             .iter()
             .flat_map(|m| &m.sandboxes)
-            .filter_map(|s| s.sandbox_id.strip_prefix(&prefix).map(|op| (op, s)));
+            .filter_map(|s| {
+                let operation = s.sandbox_id.strip_prefix(&prefix)?;
+                valid_operation_name(operation).then_some((operation, s))
+            });
         let found = matches.next();
         if matches.next().is_some() {
             return Err(503);
