@@ -418,8 +418,12 @@ fn check_socket(path: &Path) -> Result<(), String> {
 
 pub fn call(socket: &Path, request: Request) -> Result<Value, String> {
     let timing = settings::Timing::load()?;
-    let deadline = Instant::now() + timing.request;
-    let message = Message::new(request, timing.request)?;
+    call_until(socket, request, Instant::now() + timing.request)
+}
+
+/// Client calls in one HTTP operation share an absolute request budget.
+pub fn call_until(socket: &Path, request: Request, deadline: Instant) -> Result<Value, String> {
+    let message = Message::new(request, deadline.saturating_duration_since(Instant::now()))?;
     SocketAddr::from_pathname(socket).map_err(|error| socket_address_error(socket, error))?;
     check_socket(socket)?;
     let cancelled = AtomicBool::new(false);

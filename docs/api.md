@@ -1,4 +1,4 @@
-# Read-only local HTTP API
+# Local HTTP API
 
 `homepool api` runs as a separate process and connects to the hub as an ordinary
 client over its existing owner-only Unix socket. The hub still opens no network
@@ -47,36 +47,118 @@ Unknown fields in the hub inventory schema fail closed with `503` until reviewed
 Hub connection, protocol and inventory response failures return `503` with an
 empty body. The API stays available and reconnects on the next authorized request.
 
-Unknown paths return `404`; methods other than GET on known paths return `405`.
-Neither contacts the hub. The API provides no placement, release or log operations.
-GET requests with body framing other than `Content-Length: 0` are rejected on the
-sandbox endpoint. Every response closes its connection; there is no keep-alive,
-request-body processing, streaming or pipelining.
+Unknown paths return `404`; unsupported methods on known paths return `405`.
+Neither contacts the hub. Authenticated GET endpoints reject bodies and accept
+only absent framing or a single `Content-Length: 0`. Every response closes its
+connection; there is no keep-alive, streaming or pipelining. The API provides no
+logs, results, cancellation or release endpoint.
+
+## Approved operations and jobs
+
+Supply `--operations-file FILE` to enable approved work. Without it, the catalog
+is empty. This private TOML file has the same regular-file, ownership, `0600`
+and immediate-parent `0700` requirements as the token file. It is bounded to
+1 MiB and read once at startup; restart to apply changes. Invalid files fail
+with a fixed error that never includes their contents. Keep it outside the
+repository. For example:
+
+```toml
+version = 1
+[[operations]]
+name = "check"
+image = "alpine:3.22"
+command = ["sh", "-c", "exit 7"]
+cpu_millicores = 100
+memory_bytes = 33554432
+[operations.environment]
+EXAMPLE_OPTION = "approved-value"
+```
+
+Operation names are unique and contain 1–59 ASCII letters, digits or `-_.`.
+Image, command, positive CPU and memory limits are required; CPU is a multiple
+of 10 millicores. Environment is optional and uses the existing Docker stdin
+path. No process environment is inherited. Unknown fields, including `profile`,
+are rejected: operations cannot select privileged profiles in this slice.
+Environment values never appear in API responses, process output or errors.
+
+All three job endpoints require authentication before any hub connection:
+
+- `GET /v1/operations` returns a sorted JSON array of operation names only,
+  such as `["check"]`. It does not contact the hub.
+- `POST /v1/jobs` accepts exactly `{"request_id":"example-job","operation":"check"}`.
+  The body must have one `Content-Length`, no transfer encoding, and be at most
+  4 KiB. Malformed JSON, duplicate or unknown fields return `400`; oversized
+  bodies return `413`. Clients cannot supply images, commands, environment,
+  profiles, flags or any other launch settings. Unknown operations return `404`.
+- `GET /v1/jobs/example-job` reads state and exit code from hub inventory.
+  A complete inventory without that identity returns `404` with state `absent`.
+
+A successful submission or status response looks like:
+
+```json
+{"request_id":"example-job","operation":"check","state":"exited","exit_code":7}
+```
+
+Request IDs follow the existing sandbox identity grammar: 1–128 ASCII letters,
+digits or `-_.`. Invalid IDs return `400`. A sandbox identity is
+`api-<SHA-256 of request_id in lowercase hex>-<operation name>`; this fits the
+existing 128-byte identity limit and lets a new API process recover the approved
+operation from Docker without reading environment values. Reserve this namespace
+for the API when using the owner-only hub socket directly.
+
+The same request ID and operation returns the observed job without placing it
+again, including after API or hub restart. A different operation for an existing
+ID returns `409`, even when that operation is no longer in the current catalog.
+Submissions are serialized. An API with an operations file holds an exclusive
+owner-only sidecar lock beside the hub socket, so another submitting API using
+that socket path refuses startup. Use one consistent socket path per hub. The
+lock contains no job data and requires no manual removal after process exit.
+
+Placement is strict, without `fresh`: incomplete inventory closes admission.
+When any member's inventory is incomplete or the hub is settling, status is
+`unknown` with a null exit code, even if a retained observation says running or
+exited. An unplaceable job (including a full pool), an incomplete inventory or an
+unresolved placement returns `503`; when placement was attempted its response
+contains state `unknown`. A lost placement response is reconciled by inventory,
+never replayed automatically. `200` reports an observed state such as `created`,
+`running` or `exited`; `created` does not mean the job started. Connection or
+schema failures can return `503` with an empty body. Retry or read status to
+reconcile uncertain outcomes. No error exposes raw hub diagnostics.
+
+**A job's identity lasts only until it is released.** This slice stores no
+receipts. A released job's request ID can be reused, including for a different
+operation. Release remains an owner-only hub/CLI action; exited jobs retain
+capacity until released.
 
 ## Limits
 
 The request line and headers together are limited to 8 KiB and 32 header fields;
 oversized requests receive `431`. Invalid HTTP receives `400`. An absolute
-five-second header deadline prevents slow trickles from extending the wait;
+five-second header-and-body deadline prevents slow trickles from extending the wait;
 timeouts receive `408` when the peer can still receive a response. Response writes
 have at most five seconds. Up to 32 connections run concurrently; excess
 connections are closed without queuing. A stalled client does not serialize other
 clients. The hub still serializes its own requests.
 
-Each hub call uses the existing bounded client path and its
-`HOMEPOOL_REQUEST_TIMEOUT_MS` budget (120 seconds by default). The complete HTTP
+All hub calls for one HTTP request share the existing bounded client path and
+one `HOMEPOOL_REQUEST_TIMEOUT_MS` budget (120 seconds by default). The complete HTTP
 connection is bounded by that budget plus the two five-second I/O allowances.
 All defaults and caps live in the CLI settings module.
 
 ## Tests
 
 `cargo test --workspace` covers authentication without a hub call using a Unix
-socket trap, startup refusal, private token files, schema projection, oversized
-headers, stalled clients, hub outage and recovery. The normal CI Docker integration
+socket trap, startup refusal, private token and operations files, schema
+projection, malformed and oversized bodies, forbidden launch fields, stalled
+clients, full pools, unreachable members, concurrent submissions, restart recovery
+and a lost hub placement response followed by a retry. The normal CI Docker integration
 step also runs `api_engine_lists_and_authenticates`: the shipped hub places a real
 sandbox, the shipped API lists it, and rejected credentials never contact the hub.
-To repeat it with a disposable Docker engine and `alpine:3.22` already pulled:
+The same CI step runs `api_engine_submits_retries_and_observes_exit_code`: the
+shipped API submits approved work through a real hub to real Docker, retries
+without a second sandbox, restarts both processes and observes exit code 7.
+To repeat both with a disposable Docker engine and `alpine:3.22` already pulled:
 
 ```sh
-cargo test -p homepool-cli --test hub api_engine_lists_and_authenticates -- --ignored --nocapture
+cargo test -p homepool-cli --test hub api_engine_ -- --ignored --nocapture
 ```

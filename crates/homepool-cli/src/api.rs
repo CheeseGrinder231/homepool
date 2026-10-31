@@ -1,11 +1,14 @@
-//! Read-only HTTP facade. Authentication and routing precede every hub call.
-use crate::{hub, private, protocol::Request, settings::*};
-use serde::{Deserialize, Serialize};
+//! Loopback HTTP facade. Authentication and routing precede every hub call.
+use crate::{
+    hub,
+    jobs::{Jobs, encode_inventory},
+    private,
+    protocol::Request,
+    settings::*,
+};
 use std::{
-    fs::OpenOptions,
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::Path,
     sync::{
         Arc,
@@ -41,30 +44,7 @@ impl Token {
     }
     fn load(path: &Path) -> Result<Self, String> {
         let load = || {
-            let parent = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            private::check(parent, true).ok()?;
-            let before = private::check(path, false).ok()?;
-            if !before.is_file() {
-                return None;
-            }
-            let file = OpenOptions::new()
-                .read(true)
-                .custom_flags(
-                    (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
-                )
-                .open(path)
-                .ok()?;
-            let after = file.metadata().ok()?;
-            if before.ino() != after.ino() || before.dev() != after.dev() {
-                return None;
-            }
-            let mut bytes = Vec::new();
-            file.take((HTTP_TOKEN_BYTES + 3) as u64)
-                .read_to_end(&mut bytes)
-                .ok()?;
+            let bytes = private::read_bounded(path, HTTP_TOKEN_BYTES + 2).ok()?;
             let bytes = bytes
                 .strip_suffix(b"\r\n")
                 .or_else(|| bytes.strip_suffix(b"\n"))
@@ -81,11 +61,28 @@ impl Token {
     }
 }
 
-pub fn serve(listen: SocketAddr, token_file: &Path, socket: &Path) -> Result<(), String> {
+pub fn serve(
+    listen: SocketAddr,
+    token_file: &Path,
+    operations_file: Option<&Path>,
+    socket: &Path,
+) -> Result<(), String> {
     if !listen.ip().is_loopback() {
         return Err("API listen address must be loopback".into());
     }
     let token = Arc::new(Token::load(token_file)?);
+    let jobs = Arc::new(Jobs::load(operations_file)?);
+    // One submitting API per hub socket, across process lifetimes. This lock
+    // contains no job data; Docker remains the only durable job record.
+    let _writer = if operations_file.is_some() {
+        private::parent(socket)?;
+        Some(
+            private::lock(socket)
+                .map_err(|_| "another API owns this hub socket's submission lock")?,
+        )
+    } else {
+        None
+    };
     let timing = Timing::load()?;
     let listener = TcpListener::bind(listen).map_err(|_| "could not bind API listener")?;
     let active = Arc::new(AtomicUsize::new(0));
@@ -102,12 +99,13 @@ pub fn serve(listen: SocketAddr, token_file: &Path, socket: &Path) -> Result<(),
         active.fetch_add(1, Ordering::AcqRel);
         let slot = ConnectionSlot(Arc::clone(&active));
         let token = Arc::clone(&token);
+        let jobs = Arc::clone(&jobs);
         let socket = socket.to_owned();
         let accepted = Instant::now();
         std::thread::Builder::new()
             .spawn(move || {
                 let _slot = slot;
-                handle(stream, &token, &socket, accepted, timing);
+                handle(stream, &token, &jobs, &socket, accepted, timing);
             })
             .map_err(|_| "could not start API connection worker")?;
     }
@@ -120,10 +118,28 @@ impl Drop for ConnectionSlot {
     }
 }
 
-fn handle(mut stream: TcpStream, token: &Token, socket: &Path, accepted: Instant, timing: Timing) {
+fn handle(
+    mut stream: TcpStream,
+    token: &Token,
+    jobs: &Jobs,
+    socket: &Path,
+    accepted: Instant,
+    timing: Timing,
+) {
     let header_end = accepted + HTTP_IO_TIMEOUT;
-    let result =
-        read_request(&mut stream, header_end).and_then(|bytes| route(&bytes, token, socket));
+    let mut post_resource = false;
+    let result = read_request(&mut stream, header_end).and_then(|bytes| {
+        post_resource = bytes.split(|b| *b == b' ').nth(1) == Some(b"/v1/jobs");
+        route(
+            &bytes,
+            &mut stream,
+            token,
+            jobs,
+            socket,
+            header_end,
+            accepted + timing.request,
+        )
+    });
     let (status, body) = result.unwrap_or_else(|status| (status, Vec::new()));
     // Hub calls have their existing total request budget. Slow reads and writes
     // cannot extend this absolute connection ceiling by making tiny progress.
@@ -141,11 +157,14 @@ fn handle(mut stream: TcpStream, token: &Token, socket: &Path, accepted: Instant
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
+        409 => "Conflict",
+        413 => "Content Too Large",
         431 => "Request Header Fields Too Large",
         _ => "Service Unavailable",
     };
     let extra = match status {
         401 => "WWW-Authenticate: Bearer\r\n",
+        405 if post_resource => "Allow: POST\r\n",
         405 => "Allow: GET\r\n",
         _ => "",
     };
@@ -166,6 +185,22 @@ fn handle(mut stream: TcpStream, token: &Token, socket: &Path, accepted: Instant
             Ok(n) => remaining = &remaining[n..],
         }
     }
+    // Deliver the response's FIN before closing with unread request bytes.
+    // Otherwise early rejections (especially 413) can reset away the response.
+    // Drain only a bounded suffix under the same response I/O deadline.
+    let _ = stream.shutdown(Shutdown::Write);
+    let mut drained = 0;
+    while drained < HTTP_DRAIN_BYTES {
+        let wait = end.saturating_duration_since(Instant::now());
+        if wait.is_zero() || stream.set_read_timeout(Some(wait)).is_err() {
+            break;
+        }
+        let mut buffer = [0; 1024];
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained += n,
+        }
+    }
 }
 
 fn read_request(stream: &mut TcpStream, end: Instant) -> Result<Vec<u8>, u16> {
@@ -182,28 +217,43 @@ fn read_request(stream: &mut TcpStream, end: Instant) -> Result<Vec<u8>, u16> {
             return Err(400);
         }
         bytes.extend_from_slice(&buffer[..n]);
+        if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+            return if end + 4 <= HTTP_HEADER_BYTES {
+                Ok(bytes)
+            } else {
+                Err(431)
+            };
+        }
         if bytes.len() > HTTP_HEADER_BYTES {
             return Err(431);
-        }
-        if bytes.windows(4).any(|w| w == b"\r\n\r\n") {
-            return Ok(bytes);
         }
     }
 }
 
-fn route(bytes: &[u8], token: &Token, socket: &Path) -> Result<(u16, Vec<u8>), u16> {
+fn route(
+    bytes: &[u8],
+    stream: &mut TcpStream,
+    token: &Token,
+    jobs: &Jobs,
+    socket: &Path,
+    input_end: Instant,
+    deadline: Instant,
+) -> Result<(u16, Vec<u8>), u16> {
     let mut headers = [httparse::EMPTY_HEADER; HTTP_HEADER_COUNT];
     let mut request = httparse::Request::new(&mut headers);
-    match request.parse(bytes) {
-        Ok(httparse::Status::Complete(_)) => {}
+    let header_bytes = match request.parse(bytes) {
+        Ok(httparse::Status::Complete(n)) => n,
         Err(httparse::Error::TooManyHeaders) => return Err(431),
         _ => return Err(400),
-    }
+    };
     let path = request.path.ok_or(400u16)?;
-    if !["/v1/health", "/v1/sandboxes"].contains(&path) {
+    let job_id = path.strip_prefix("/v1/jobs/");
+    if !["/v1/health", "/v1/sandboxes", "/v1/operations", "/v1/jobs"].contains(&path)
+        && job_id.is_none()
+    {
         return Err(404);
     }
-    if request.method != Some("GET") {
+    if request.method != Some(if path == "/v1/jobs" { "POST" } else { "GET" }) {
         return Err(405);
     }
     if path == "/v1/health" {
@@ -223,95 +273,66 @@ fn route(bytes: &[u8], token: &Token, socket: &Path) -> Result<(u16, Vec<u8>), u
     if !scheme.eq_ignore_ascii_case(b"Bearer") || !token.matches(supplied) {
         return Err(401);
     }
-    // This slice accepts no request bodies or transfer framing.
-    if request.headers.iter().any(|h| {
-        h.name.eq_ignore_ascii_case("transfer-encoding")
-            || (h.name.eq_ignore_ascii_case("content-length") && h.value != b"0")
-    }) {
+    let mut lengths = request
+        .headers
+        .iter()
+        .filter(|h| h.name.eq_ignore_ascii_case("content-length"));
+    let length = lengths
+        .next()
+        .map(|h| {
+            if h.value.is_empty() || !h.value.iter().all(u8::is_ascii_digit) {
+                return Err(400u16);
+            }
+            std::str::from_utf8(h.value)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .ok_or(413u16)
+        })
+        .transpose()?;
+    if lengths.next().is_some()
+        || request
+            .headers
+            .iter()
+            .any(|h| h.name.eq_ignore_ascii_case("transfer-encoding"))
+    {
         return Err(400);
     }
-    let value = hub::call(socket, Request::Inventory {}).map_err(|_| 503u16)?;
+    if path == "/v1/jobs" {
+        let length = length.ok_or(400u16)?;
+        if length > HTTP_BODY_BYTES {
+            return Err(413);
+        }
+        let mut body = bytes[header_bytes..].to_vec();
+        if body.len() > length {
+            return Err(400);
+        }
+        while body.len() < length {
+            let wait = input_end.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+                return Err(408);
+            }
+            stream.set_read_timeout(Some(wait)).map_err(|_| 400u16)?;
+            let mut buffer = [0; 1024];
+            let remaining = buffer.len().min(length - body.len());
+            let n = stream.read(&mut buffer[..remaining]).map_err(|_| 408u16)?;
+            if n == 0 {
+                return Err(400);
+            }
+            body.extend_from_slice(&buffer[..n]);
+        }
+        return jobs.submit(socket, &body, deadline);
+    }
+    if length.is_some_and(|n| n != 0) || bytes.len() != header_bytes {
+        return Err(400);
+    }
+    if path == "/v1/operations" {
+        return jobs.names().map(|b| (200, b));
+    }
+    if let Some(id) = job_id {
+        return jobs.get(socket, id, deadline);
+    }
+    let value = hub::call_until(socket, Request::Inventory {}, deadline).map_err(|_| 503u16)?;
     encode_inventory(value).map(|body| (200, body))
-}
-
-fn encode_inventory(value: serde_json::Value) -> Result<Vec<u8>, u16> {
-    let inventory: HubInventory = serde_json::from_value(value).map_err(|_| 503u16)?;
-    let inventory_complete =
-        !inventory.settling && inventory.members.iter().all(|m| m.inventory_complete);
-    let sandboxes = inventory
-        .members
-        .into_iter()
-        .flat_map(|m| {
-            m.sandboxes.into_iter().map(move |s| Sandbox {
-                member: m.member,
-                sandbox_id: s.sandbox_id,
-                state: s.state,
-                exit_code: s.exit_code,
-            })
-        })
-        .collect();
-    serde_json::to_vec(&Sandboxes {
-        sandboxes,
-        inventory_complete,
-    })
-    .map_err(|_| 503)
-}
-
-// Decode the complete known schema, then construct a separate public response.
-// Additive hub fields fail closed until explicitly reviewed here.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HubInventory {
-    settling: bool,
-    members: Vec<HubMember>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HubMember {
-    member: u64,
-    #[serde(rename = "state")]
-    _state: String,
-    inventory_complete: bool,
-    #[serde(rename = "free")]
-    _free: HubBudget,
-    sandboxes: Vec<HubSandbox>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HubBudget {
-    #[serde(rename = "cpu_millicores")]
-    _cpu: u64,
-    #[serde(rename = "memory_bytes")]
-    _memory: u64,
-    #[serde(rename = "sandbox_slots")]
-    _slots: u32,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HubSandbox {
-    #[serde(rename = "handle")]
-    _handle: String,
-    sandbox_id: String,
-    state: String,
-    exit_code: Option<i64>,
-    #[serde(rename = "cpu_millicores")]
-    _cpu: Option<u64>,
-    #[serde(rename = "memory_bytes")]
-    _memory: Option<u64>,
-}
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct Sandboxes {
-    sandboxes: Vec<Sandbox>,
-    inventory_complete: bool,
-}
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct Sandbox {
-    member: u64,
-    sandbox_id: String,
-    state: String,
-    exit_code: Option<i64>,
 }
 
 #[cfg(test)]

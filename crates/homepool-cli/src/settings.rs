@@ -637,3 +637,12 @@ pub const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 pub const HTTP_CONNECTIONS: usize = 32;
 /// Maximum bearer token bytes, excluding an optional final newline.
 pub const HTTP_TOKEN_BYTES: usize = 256;
+
+/// Maximum JSON job body and private operations document bytes.
+pub const HTTP_BODY_BYTES: usize = 4096;
+pub const OPERATIONS_BYTES: usize = API_SIZE_LIMIT;
+/// SHA-256 request digest plus namespace and operation must fit a 128-byte identity.
+pub const OPERATION_NAME_BYTES: usize = 59;
+
+/// Bounded unread suffix consumed after sending a response, sharing its deadline.
+pub const HTTP_DRAIN_BYTES: usize = HTTP_HEADER_BYTES + HTTP_BODY_BYTES;
