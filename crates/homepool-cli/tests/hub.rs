@@ -1741,6 +1741,15 @@ fn api_lists_sandbox(real: bool) {
         json!({"inventory_complete":true,"sandboxes":[{"member":1,"sandbox_id":"api-example","state":"running","exit_code":null}]})
     );
     assert_eq!(api.get("/v1/health", None), (200, "{\"version\":1}".into()));
+    // An owner-placed sandbox has no API request identity, even when its raw
+    // sandbox ID is supplied as the request ID.
+    let (status, body) = api.get("/v1/jobs/api-example/logs", Some(&auth));
+    assert_eq!(status, 404);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["state"],
+        "absent"
+    );
+    assert!(!f.root.join("logs-read").exists());
     f.release(&placed);
     f.stop(Signal::TERM);
     assert_eq!(api.get("/v1/sandboxes", Some(&auth)).0, 503);
@@ -1902,7 +1911,7 @@ fn approved_operations(f: &Fixture) {
 [[operations]]
 name = "finish"
 image = "alpine:3.22"
-command = ["sh", "-c", "sleep 1; exit 7"]
+command = ["sh", "-c", "printf 'job output\\n'; printf 'job error\\n' >&2; sleep 1; exit 7"]
 cpu_millicores = 100
 memory_bytes = 33554432
 [operations.environment]
@@ -1959,6 +1968,30 @@ fn api_submits_approved_job(real: bool) {
             .0,
         409
     );
+    if !real {
+        let mut engine = f.engine();
+        engine["items"][container]["state"] = json!("exited");
+        engine["items"][container]["exit_code"] = json!(7);
+        engine["items"][container]["stdout"] = json!(b"job output\n");
+        engine["items"][container]["stderr"] = json!(b"job error\n");
+        f.save_engine(&engine);
+    }
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, job) = api.job(&id);
+        assert_eq!(status, 200);
+        if job["state"] == "exited" {
+            assert_eq!(job["exit_code"], 7);
+            break;
+        }
+        assert!(Instant::now() < end, "job exit watchdog");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let expected_logs = json!({"request_id":id,"operation":"finish","state":"exited","stdout":"job output\n","stderr":"job error\n","cut":false});
+    let logs_path = format!("/v1/jobs/{id}/logs");
+    let (status, body) = api.get(&logs_path, Some(&auth));
+    assert_eq!(status, 200);
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), expected_logs);
     drop(api);
     // New API and hub processes recover operation and identity solely from Docker.
     f.stop(Signal::TERM);
@@ -1973,22 +2006,17 @@ fn api_submits_approved_job(real: bool) {
             .len(),
         1
     );
-    if real {
-        let end = Instant::now() + Duration::from_secs(10);
-        loop {
-            let (status, job) = api.job(&id);
-            assert_eq!(status, 200);
-            assert!(!job.to_string().contains(TEST_OPERATION_SECRET));
-            if job["state"] == "exited" {
-                assert_eq!(job["exit_code"], 7);
-                break;
-            }
-            assert!(Instant::now() < end, "job exit watchdog");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
+    let (status, body) = api.get(&logs_path, Some(&auth));
+    assert_eq!(status, 200);
+    assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), expected_logs);
     f.ok(&["release", &handle], None);
     assert_eq!(api.job(&id).0, 404);
+    let (status, body) = api.get(&logs_path, Some(&auth));
+    assert_eq!(status, 404);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["state"],
+        "absent"
+    );
     // No receipt survives release: the request ID can name another operation.
     assert_eq!(
         api.post(&json!({"request_id":id,"operation":"other"}).to_string())
@@ -2026,13 +2054,51 @@ fn api_job_input_is_bounded_strict_and_authenticated_before_hub_calls() {
     .unwrap();
     fs::set_permissions(f.root.join("hub.sock"), fs::Permissions::from_mode(0o600)).unwrap();
     trap.set_nonblocking(true).unwrap();
-    for endpoint in ["/v1/jobs", "/v1/jobs/example", "/v1/operations"] {
+    for endpoint in [
+        "/v1/jobs",
+        "/v1/jobs/example",
+        "/v1/jobs/example/logs",
+        "/v1/operations",
+    ] {
         let method = if endpoint == "/v1/jobs" {
             "POST"
         } else {
             "GET"
         };
         assert_eq!(api.raw(&format!("{method} {endpoint} HTTP/1.1\r\nAuthorization: Bearer wrong\r\nContent-Length: 100\r\n\r\n")).0, 401);
+    }
+    for token in [
+        None,
+        Some("Basic example"),
+        Some("Bearer"),
+        Some("Bearer bad token"),
+    ] {
+        assert_eq!(api.get("/v1/jobs/example/logs", token).0, 401);
+    }
+    assert_eq!(api.raw(&format!("GET /v1/jobs/example/logs HTTP/1.1\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\nAuthorization: Bearer {TEST_API_TOKEN}\r\n\r\n")).0, 401);
+    let auth = format!("Bearer {TEST_API_TOKEN}");
+    for path in [
+        "/v1/jobs/example/logs/",
+        "/v1/jobs/example/logs/extra",
+        "/v1/jobs/example/logs?tail=1",
+        "/v1/jobs/example/other",
+        "/v1/jobs/example/other/logs",
+        "/v1/jobs/example//logs",
+    ] {
+        assert_eq!(api.get(path, Some(&auth)).0, 404);
+    }
+    for method in ["POST", "HEAD", "OPTIONS", "DELETE"] {
+        assert_eq!(
+            api.raw(&format!(
+                "{method} /v1/jobs/example/logs HTTP/1.1\r\nAuthorization: {auth}\r\n\r\n"
+            ))
+            .0,
+            405
+        );
+    }
+    assert_eq!(api.raw(&format!("GET /v1/jobs/example/logs HTTP/1.1\r\nAuthorization: {auth}\r\nContent-Length: 1\r\n\r\nx")).0, 400);
+    for id in ["", "bad%2Fvalue", &"x".repeat(129)] {
+        assert_eq!(api.get(&format!("/v1/jobs/{id}/logs"), Some(&auth)).0, 400);
     }
     for body in [
         "{",
@@ -2072,6 +2138,74 @@ fn api_job_input_is_bounded_strict_and_authenticated_before_hub_calls() {
         trap.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+#[test]
+fn api_job_logs_bound_output_and_refuse_incomplete_inventory() {
+    let mut f = Fixture::new(false);
+    f.start();
+    approved_operations(&f);
+    let api = HttpApi::configured(&f, "hub.sock", true);
+    let auth = format!("Bearer {TEST_API_TOKEN}");
+    let id = "x".repeat(128);
+    assert_eq!(
+        api.post(&json!({"request_id":id,"operation":"finish"}).to_string())
+            .0,
+        200
+    );
+    let observed = f.inventory()["members"][0]["sandboxes"][0].clone();
+    let handle = observed["handle"].as_str().unwrap();
+    let (_, container) = handle.split_once(':').unwrap();
+    let path = format!("/v1/jobs/{id}/logs");
+    let mut engine = f.engine();
+    engine["items"][container]["stdout"] = json!(b"line\n".repeat(1001));
+    engine["items"][container]["stderr"] = json!([255, 10]);
+    f.save_engine(&engine);
+    let (status, body) = api.get(&path, Some(&auth));
+    assert_eq!(status, 200);
+    let logs: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(logs["stdout"], "line\n".repeat(1000));
+    assert_eq!(logs["stderr"], "\u{fffd}\n");
+    assert_eq!(logs["cut"], true);
+    // Worst escaping on two full pipes is still readable within the HTTP cap.
+    engine["items"][container]["stdout"] = json!(vec![0u8; 200_000]);
+    engine["items"][container]["stderr"] = json!(vec![1u8; 200_000]);
+    f.save_engine(&engine);
+    let started = Instant::now();
+    let (status, body) = api.get(&path, Some(&auth));
+    assert_eq!(status, 200);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(body.len() <= 1024 * 1024);
+    let logs: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(logs["cut"], true);
+    assert_eq!(logs["stdout"], "\0".repeat(87_296));
+    assert_eq!(logs["stderr"], "\u{0001}".repeat(87_296));
+    fs::remove_file(f.root.join("logs-read")).unwrap();
+    f.write("unavailable", "");
+    for path in [path.as_str(), "/v1/jobs/missing/logs"] {
+        let (status, body) = api.get(path, Some(&auth));
+        assert_eq!(status, 503);
+        let job: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(job["state"], "unknown");
+        assert!(job.get("stdout").is_none());
+    }
+    assert!(!f.root.join("logs-read").exists());
+    fs::remove_file(f.root.join("unavailable")).unwrap();
+    f.write("fail-logs", "");
+    assert_eq!(api.get(&path, Some(&auth)), (503, String::new()));
+    fs::remove_file(f.root.join("fail-logs")).unwrap();
+    f.stop(Signal::TERM);
+    f.spawn();
+    f.wait_file("hub.sock");
+    let (status, body) = api.get(&path, Some(&auth));
+    assert_eq!(status, 503);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["state"],
+        "unknown"
+    );
+    f.wait_settled();
+    assert_eq!(api.get(&path, Some(&auth)).0, 200);
+    f.ok(&["release", handle], None);
 }
 
 #[test]
