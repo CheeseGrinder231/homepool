@@ -248,9 +248,15 @@ fn route(
         _ => return Err(400),
     };
     let path = request.path.ok_or(400u16)?;
-    let job_id = path.strip_prefix("/v1/jobs/");
+    let job_route = path
+        .strip_prefix("/v1/jobs/")
+        .and_then(|rest| match rest.split_once('/') {
+            None => Some((rest, false)),
+            Some((id, "logs")) => Some((id, true)),
+            _ => None,
+        });
     if !["/v1/health", "/v1/sandboxes", "/v1/operations", "/v1/jobs"].contains(&path)
-        && job_id.is_none()
+        && job_route.is_none()
     {
         return Err(404);
     }
@@ -329,8 +335,12 @@ fn route(
     if path == "/v1/operations" {
         return jobs.names().map(|b| (200, b));
     }
-    if let Some(id) = job_id {
-        return jobs.get(socket, id, deadline);
+    if let Some((id, logs)) = job_route {
+        return if logs {
+            jobs.logs(socket, id, deadline)
+        } else {
+            jobs.get(socket, id, deadline)
+        };
     }
     let value = hub::call_until(socket, Request::Inventory {}, deadline).map_err(|_| 503u16)?;
     encode_inventory(value).map(|body| (200, body))

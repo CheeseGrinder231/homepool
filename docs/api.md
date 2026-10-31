@@ -51,7 +51,7 @@ Unknown paths return `404`; unsupported methods on known paths return `405`.
 Neither contacts the hub. Authenticated GET endpoints reject bodies and accept
 only absent framing or a single `Content-Length: 0`. Every response closes its
 connection; there is no keep-alive, streaming or pipelining. The API provides no
-logs, results, cancellation or release endpoint.
+stored results, cancellation or release endpoint.
 
 ## Approved operations and jobs
 
@@ -79,9 +79,10 @@ Image, command, positive CPU and memory limits are required; CPU is a multiple
 of 10 millicores. Environment is optional and uses the existing Docker stdin
 path. No process environment is inherited. Unknown fields, including `profile`,
 are rejected: operations cannot select privileged profiles in this slice.
-Environment values never appear in API responses, process output or errors.
+Environment values are omitted from catalog and job metadata responses and
+diagnostics. A job can still print those values into its logs.
 
-All three job endpoints require authentication before any hub connection:
+All operation and job endpoints require authentication before any hub connection:
 
 - `GET /v1/operations` returns a sorted JSON array of operation names only,
   such as `["check"]`. It does not contact the hub.
@@ -92,6 +93,31 @@ All three job endpoints require authentication before any hub connection:
   profiles, flags or any other launch settings. Unknown operations return `404`.
 - `GET /v1/jobs/example-job` reads state and exit code from hub inventory.
   A complete inventory without that identity returns `404` with state `absent`.
+- `GET /v1/jobs/example-job/logs` reads output for the same API-derived identity
+  using the hub's existing `logs` request at its maximum tail of 1,000 lines per
+  stream. It accepts no query string. A successful response looks like:
+
+```json
+{"request_id":"example-job","operation":"check","state":"exited","stdout":"...","stderr":"","cut":false}
+```
+
+The logs endpoint returns `404` with state `absent` only with complete inventory.
+Incomplete inventory, including hub settling, returns `503` with state `unknown`
+and no output; it never claims absence or reads logs from a stale handle.
+Hub connection, schema and log-read failures return `503` with an empty body.
+Only API-derived identities can be read; an ordinary sandbox placed directly
+through the hub cannot be addressed by supplying its sandbox ID or handle.
+The owner-only socket must continue to reserve the API identity namespace.
+
+Output is retained by Docker and can be read while a job runs and after API and
+hub restart, until release. `cut` is true if the line or byte limits discarded
+output. The combined raw byte cap is 174,592 bytes, split equally between stdout
+and stderr; truncation keeps suffixes and invalid UTF-8 becomes replacement
+characters. There is no following, storage or release through this endpoint.
+
+**The response contains whatever the job printed. An approved operation that
+prints a secret exposes it to anyone with the API token. Operations must not
+print secrets.** Output is never included in API diagnostics.
 
 A successful submission or status response looks like:
 
@@ -141,6 +167,13 @@ have at most five seconds. Up to 32 connections run concurrently; excess
 connections are closed without queuing. A stalled client does not serialize other
 clients. The hub still serializes its own requests.
 
+A logs response body is capped at 1,048,576 bytes (1 MiB), including JSON escaping
+and job metadata. With HTTP headers, the complete response is at most 1,048,696
+bytes. Reading this within the five-second write allowance requires about
+1.68 Mbit/s of payload throughput, within a normal local or forwarded link's
+capacity. Slow readers can still time out. Oversized hub output fails closed
+with `503`; the API never enlarges the hub's existing log cap.
+
 After writing a response (including `401`), the API shuts down its write side to
 deliver the response before closing with unread input. It drains at most 12 KiB
 of input already available, without waiting for more bytes or peer EOF, then
@@ -173,7 +206,9 @@ step also runs `api_engine_lists_and_authenticates`: the shipped hub places a re
 sandbox, the shipped API lists it, and rejected credentials never contact the hub.
 The same CI step runs `api_engine_submits_retries_and_observes_exit_code`: the
 shipped API submits approved work through a real hub to real Docker, retries
-without a second sandbox, restarts both processes and observes exit code 7.
+without a second sandbox, reads real stdout and stderr, restarts both processes,
+and reads the same output and exit code 7. Tests also cover incomplete inventory,
+cut output, worst-case JSON escaping and refusal to read owner-placed sandboxes.
 To repeat both with a disposable Docker engine and `alpine:3.22` already pulled:
 
 ```sh
