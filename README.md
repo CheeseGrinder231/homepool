@@ -10,6 +10,8 @@ see [the member file guide](docs/members.md) for setup and the versioned JSON fo
 
 The [local hub](docs/hub.md) places sandboxes over an owner-only Unix socket and
 rebuilds accounting from member inventory after a restart.
+A separate [read-only HTTP API](docs/api.md) provides authenticated sandbox inventory
+on loopback.
 
 The [Garage storage guide](docs/garage.md) covers `stage-storage`, `apply-storage`
 and `create-consumer`. They use an existing Garage installation directly, with

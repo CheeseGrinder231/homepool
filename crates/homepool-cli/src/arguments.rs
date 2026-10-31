@@ -1,7 +1,9 @@
 use std::{ffi::OsString, path::PathBuf};
-pub const USAGE: &str = "Usage: homepool [--config FILE] [--socket FILE] COMMAND\nCommands: status [--json] [--garage-config FILE], hub, inventory [--json], place --json, release HANDLE, logs HANDLE [--tail N], add FILE, remove MEMBER, drain MEMBER, stage-storage MEMBER NODE ZONE --garage-config FILE, apply-storage VERSION --garage-config FILE, create-consumer ID --garage-config FILE --credentials-file FILE\nplace reads a JSON placement specification from stdin. See docs/hub.md.";
+pub const USAGE: &str = "Usage: homepool [--config FILE] [--socket FILE] COMMAND\nCommands: status [--json] [--garage-config FILE], hub, api --listen ADDR --token-file FILE, inventory [--json], place --json, release HANDLE, logs HANDLE [--tail N], add FILE, remove MEMBER, drain MEMBER, stage-storage MEMBER NODE ZONE --garage-config FILE, apply-storage VERSION --garage-config FILE, create-consumer ID --garage-config FILE --credentials-file FILE\nplace reads a JSON placement specification from stdin. See docs/hub.md.";
 
 pub struct Options {
+    pub listen: Option<std::net::SocketAddr>,
+    pub token_file: Option<PathBuf>,
     pub config: Option<PathBuf>,
     pub socket: Option<PathBuf>,
     pub garage_config: Option<PathBuf>,
@@ -16,6 +18,8 @@ pub struct Options {
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String> {
     let mut args = args.into_iter();
     let mut options = Options {
+        listen: None,
+        token_file: None,
         config: None,
         socket: None,
         garage_config: None,
@@ -40,6 +44,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
             "--socket",
             "--garage-config",
             "--credentials-file",
+            "--token-file",
         ]
         .iter()
         .any(|option| arg == *option)
@@ -50,6 +55,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
                 &mut options.socket
             } else if arg == "--garage-config" {
                 &mut options.garage_config
+            } else if arg == "--token-file" {
+                &mut options.token_file
             } else {
                 &mut options.credentials_file
             };
@@ -66,6 +73,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
                 return Err(format!("{} requires a file path", arg.to_string_lossy()));
             }
             *selected = Some(PathBuf::from(value));
+        } else if arg == "--listen" && options.listen.is_none() {
+            options.listen = Some(
+                args.next()
+                    .and_then(|v| v.to_str().and_then(|s| s.parse().ok()))
+                    .ok_or("--listen requires a numeric socket address")?,
+            );
         } else if arg == "--tail" && options.tail.is_none() {
             let tail = args
                 .next()
@@ -81,6 +94,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
             && [
                 "status",
                 "hub",
+                "api",
                 "inventory",
                 "place",
                 "release",
@@ -106,6 +120,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options, String
         } else {
             return Err("unexpected argument".into());
         }
+    }
+    if options.command == "api" {
+        if options.listen.is_none() || options.token_file.is_none() {
+            return Err("api requires --listen ADDR and --token-file FILE".into());
+        }
+    } else if options.listen.is_some() || options.token_file.is_some() {
+        return Err("--listen and --token-file are only supported by api".into());
     }
     if options.command.is_empty() {
         return Err(USAGE.into());
