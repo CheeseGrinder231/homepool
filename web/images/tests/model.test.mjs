@@ -1,0 +1,132 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import {
+  decodeXml,
+  displayName,
+  formatBytes,
+  looksLikeImage,
+  objectKey,
+  parseListing,
+  parseSetup,
+  safeName,
+  setupFragment,
+  sortNewestFirst,
+} from "../model.mjs";
+
+const config = {
+  accessKeyId: "GK0123456789abcdef0123456789",
+  secretAccessKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  bucket: "homepool-consumer-1",
+  region: "garage",
+};
+
+test("setup links round-trip through the fragment", () => {
+  const fragment = setupFragment(config);
+  assert.deepEqual(parseSetup(`#${fragment}`), config);
+  assert.deepEqual(parseSetup(`example://pool.example.net:8443/#${fragment}`), config);
+  assert.deepEqual(parseSetup(`  ${fragment}\n`), config);
+});
+
+test("setup links with missing or malformed fields are refused with a plain message", () => {
+  assert.throws(() => parseSetup(""), /incomplete: k is missing/);
+  assert.throws(() => parseSetup("k=a&s=b&b=c"), /incomplete: r is missing/);
+  assert.throws(() => parseSetup("not a link"), /not a Homepool setup link/);
+  assert.throws(() => parseSetup("k=%E0%A4%A&s=b&b=c&r=d"), /not a Homepool setup link/);
+  assert.throws(() => parseSetup(setupFragment({ ...config, bucket: "../other" })), /invalid bucket/);
+  assert.throws(() => parseSetup(setupFragment({ ...config, region: "ga rage" })), /invalid region/);
+  assert.throws(() => parseSetup(setupFragment({ ...config, secretAccessKey: "short" })), /invalid secretAccessKey/);
+});
+
+test("file names become safe key segments", () => {
+  assert.equal(safeName("IMG_0042.JPG"), "IMG_0042.jpg");
+  assert.equal(safeName("holiday photo (1).jpeg"), "holiday-photo-1.jpeg");
+  assert.equal(safeName("../../etc/passwd"), "passwd");
+  assert.equal(safeName("..hidden"), "image.hidden");
+  assert.equal(safeName("<img src=x onerror=alert(1)>.png"), "img-src-x-onerror-alert-1.png");
+  assert.equal(safeName("照片.heic"), "image.heic");
+  assert.equal(safeName(""), "image");
+  assert.equal(safeName("a".repeat(100) + ".png"), `${"a".repeat(60)}.png`);
+  assert.match(safeName("x.y.z"), /^x\.y\.z$/);
+});
+
+test("object keys carry the day, time, a random tag and the safe name", () => {
+  const key = objectKey("IMG_0042.HEIC", new Date("2026-11-02T14:30:15.250Z"), "k7q2m9x4");
+  assert.equal(key, "2026-11-02/143015-k7q2m9x4-IMG_0042.heic");
+  assert.equal(displayName(key), "143015-k7q2m9x4-IMG_0042.heic");
+  assert.match(key, /^([A-Za-z0-9_-][A-Za-z0-9._-]*)(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/);
+});
+
+test("image tiles are attempted only for image extensions", () => {
+  assert.equal(looksLikeImage("2026-11-02/x.jpg"), true);
+  assert.equal(looksLikeImage("2026-11-02/x.HEIC"), true);
+  assert.equal(looksLikeImage("2026-11-02/notes.txt"), false);
+  assert.equal(looksLikeImage("2026-11-02/page.html"), false);
+  assert.equal(looksLikeImage("noext"), false);
+});
+
+test("sizes are readable", () => {
+  assert.equal(formatBytes(512), "512 B");
+  assert.equal(formatBytes(1536), "1.5 KiB");
+  assert.equal(formatBytes(10 * 1024 * 1024), "10 MiB");
+  assert.equal(formatBytes(3 * 1024 ** 3), "3.0 GiB");
+});
+
+test("listings are parsed and hostile keys stay plain strings", () => {
+  const xml = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "listing.xml"), "utf8");
+  const listing = parseListing(xml);
+  assert.equal(listing.truncated, true);
+  assert.equal(listing.continuationToken, "2026-11-02/143015-k7q2m9x4-IMG_0042.jpg");
+  assert.deepEqual(
+    listing.objects.map((object) => object.key),
+    [
+      "2026-11-01/090000-aaaaaaaa-first.jpg",
+      "2026-11-02/143015-k7q2m9x4-IMG_0042.jpg",
+      '<img src=x onerror=alert(1)>/"quoted" & <b>bold</b>.svg',
+      "../escape/ሴ.png",
+    ],
+  );
+  assert.equal(listing.objects[1].size, 10485760);
+  assert.equal(listing.objects[1].lastModified, "2026-11-02T14:30:16.000Z");
+  assert.equal(decodeXml("&unknown; &#65;&#x42;"), "&unknown; AB");
+  assert.throws(() => parseListing("<Error><Code>AccessDenied</Code></Error>"), /not a bucket listing/);
+  const dated = sortNewestFirst(listing.objects.filter((object) => object.key.startsWith("2026")));
+  assert.deepEqual(
+    dated.map((object) => object.key),
+    ["2026-11-02/143015-k7q2m9x4-IMG_0042.jpg", "2026-11-01/090000-aaaaaaaa-first.jpg"],
+  );
+});
+
+test("the page never renders strings as markup", () => {
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "app.mjs"), "utf8");
+  for (const api of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"]) {
+    assert.equal(source.includes(api), false, `app.mjs must not use ${api}`);
+  }
+});
+
+test("the documented setup-link command produces a link the page accepts", () => {
+  const doc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "docs", "images.md"), "utf8");
+  const script = doc.match(/<<'EOF' \| qrencode[^\n]*\n([\s\S]*?)\nEOF\n/)[1];
+  const scratch = mkdtempSync(join(tmpdir(), "homepool-images-doc-"));
+  try {
+    const file = join(scratch, "consumer.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ version: 1, bucket: config.bucket, aws_access_key_id: config.accessKeyId, aws_secret_access_key: config.secretAccessKey }),
+    );
+    // The documented command takes the real origin; any scheme works here.
+    const result = spawnSync("python3", ["-I", "-", file, "example://pool.example.net:8443", config.region], { input: script, encoding: "utf8" });
+    if (result.error?.code === "ENOENT") return;
+    assert.equal(result.status, 0, result.stderr);
+    const link = result.stdout.trim();
+    assert.ok(link.startsWith("example://pool.example.net:8443/#k="), link);
+    assert.deepEqual(parseSetup(link), config);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});

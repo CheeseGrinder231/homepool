@@ -1,0 +1,48 @@
+# Caddy site for the Homepool image page. See docs/images.md.
+#
+# Set these in Caddy's environment or replace them here:
+#   HOMEPOOL_IMAGES_ADDRESS  the address phones open, for example pool.example.net:8443
+#   HOMEPOOL_IMAGES_ROOT     the directory holding web/images from this repository
+#   HOMEPOOL_IMAGES_BUCKET   the consumer bucket, for example homepool-consumer-1
+#   HOMEPOOL_GARAGE_S3       Garage's S3 API address, for example localhost:3900
+#
+# Only this one bucket is reachable through Caddy, with GET, HEAD and PUT only:
+# no DELETE, no POST, no other bucket and no bucket listing. Object keys must be
+# path segments of [A-Za-z0-9._-] that do not start with a dot, which is the
+# only shape the page creates. Encoded or dotted paths never reach Garage.
+# Stored objects are returned as attachments inside a sandbox, so a stored HTML
+# or SVG file cannot run as a page on this origin, where the key is kept.
+
+https://{$HOMEPOOL_IMAGES_ADDRESS} {
+	tls internal
+
+	@bucket {
+		method GET HEAD PUT
+		expression `{http.request.uri}.matches("^/{$HOMEPOOL_IMAGES_BUCKET}(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*([?][A-Za-z0-9._~%&=-]*)?$")`
+	}
+
+	handle @bucket {
+		header {
+			Content-Security-Policy "sandbox; default-src 'none'; frame-ancestors 'none'"
+			Content-Disposition attachment
+			X-Content-Type-Options nosniff
+			Cross-Origin-Resource-Policy same-origin
+			Referrer-Policy no-referrer
+			Cache-Control "private, no-store"
+			-Server
+			defer
+		}
+		reverse_proxy {$HOMEPOOL_GARAGE_S3}
+	}
+
+	handle {
+		root * {$HOMEPOOL_IMAGES_ROOT}
+		header {
+			Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+			X-Content-Type-Options nosniff
+			Referrer-Policy no-referrer
+			-Server
+		}
+		file_server
+	}
+}
