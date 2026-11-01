@@ -31,12 +31,24 @@ bound to loopback so that Caddy is the only way in from the network.
 
 What the site enforces, and what `web/images/tests/site.test.mjs` checks:
 
-- Only that one bucket is proxied, with `GET`, `HEAD` and `PUT`. There is no
-  bucket listing at `/`, no other bucket, no `DELETE`, no `POST`, so a leaked key
-  cannot delete through Caddy. Keys must be path segments of `[A-Za-z0-9._-]`
-  that do not start with a dot, the only shape the page creates. Dot segments,
-  double slashes and percent-encoded paths are refused before Garage sees them.
-  Bucket names with a dot would need escaping in the regular expression.
+- Only the three request shapes the page sends reach Garage, on that one
+  bucket: the exact `ListObjectsV2` query with the page's fixed page size and
+  Garage's continuation token, a presigned `GET` of one object with exactly the
+  page's query parameters, and a `PUT` of one object under a key of the shape
+  the page creates (`YYYY-MM-DD/HHMMSS-<26 base32 characters>-<safe name>`),
+  with no query and no `x-amz-copy-source`. Everything else is refused before
+  Garage sees it: the bucket listing at `/`, other buckets, dot segments,
+  double slashes and percent-encoded paths, `HEAD`, `DELETE`, `POST`, multipart,
+  tagging, ACLs, copies, and bucket configuration such as lifecycle rules. The
+  test proves the last two with a lifecycle body and a copy that Garage accepts
+  from the same key when asked directly.
+- Through Caddy, a leaked key can therefore list, read, add and overwrite
+  objects. It cannot delete them, expire them through a lifecycle rule, copy
+  them or change the bucket. Overwriting is possible because Garage 2.1.0 has
+  no create-only `PUT`; see the next section. Anything the key may do in Garage
+  remains possible for whoever reaches Garage's S3 port directly, so keep it on
+  loopback. Bucket names with a dot would need escaping in the regular
+  expressions.
 - Objects come back with `Content-Disposition: attachment`, a
   `Content-Security-Policy: sandbox` and `nosniff`. A stored HTML or SVG file
   opened directly downloads instead of rendering, and even where a browser
@@ -52,6 +64,18 @@ What the site enforces, and what `web/images/tests/site.test.mjs` checks:
 Caddy writes no access log unless configured. If you enable one, presigned
 query strings land in it; they expire within minutes and do not contain the
 secret, but treat the log as private.
+
+## Keys are unique by randomness
+
+Each upload gets the key `YYYY-MM-DD/HHMMSS-<tag>-<safe name>`, where the tag
+is 16 bytes from `crypto.getRandomValues` in base32. Garage 2.1.0 offers no
+create-only write: its `PutObject` handler reads no `If-None-Match` or other
+precondition header, so there is nothing a client can ask for that makes a
+`PUT` fail when the key already exists, and a check before the `PUT` would not
+be atomic either. The page therefore checks nothing and relies on the 128
+random bits; two phones producing the same tag in the same second is not a
+realistic event. Should a later Garage add a conditional `PUT`, the page should
+send it and the site should require it.
 
 ## Give the key to a phone
 
@@ -89,8 +113,11 @@ On the phone:
 
 1. iPhone: point the Camera at the code and open the link in Safari. Firefox:
    scan from the address bar, or paste the link into the page's setup field.
-2. The page reads the fragment once, keeps the key in the browser's storage and
-   removes it from the address bar. Reloads stay connected.
+2. The page removes the fragment from the address bar, lists the bucket with
+   the key and only then keeps it in the browser's storage. Reloads stay
+   connected. A link opened on a phone that already has a key is not applied
+   silently: the page asks whether to replace the current key, and keeps it
+   if the new one cannot list the bucket.
 3. Add the page to the home screen if you like; it opens in the browser and
    shares the same storage.
 
@@ -113,9 +140,12 @@ file type and a working download in the preview.
 ## Presigned URLs
 
 Grid tiles and previews use presigned GET URLs valid for ten minutes;
-downloads use five. Whoever holds such a URL can fetch that one object until it
-expires; it does not reveal the secret. The URLs are only ever placed in
-`<img>` sources and the download link, never in the address bar.
+the download link is signed for five minutes at the moment it is tapped, so a
+preview left open does not go stale. Whoever holds such a URL can fetch that
+one object until it expires; it does not reveal the secret. The URLs are only
+ever placed in `<img>` sources and the download link, never in the address bar.
+Garage judges expiry by its own clock against the signing time, and allows the
+usual skew, so a phone with a wrong clock sees shorter or longer windows.
 
 ## Tests
 

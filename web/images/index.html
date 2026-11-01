@@ -23,6 +23,16 @@
     <button id="alert-close" type="button" class="quiet">Dismiss</button>
   </div>
 
+  <section id="replace" class="panel" hidden>
+    <h2>Replace the key on this phone?</h2>
+    <p>This link carries a different key. Keep the current one unless you expect the change.</p>
+    <p id="replace-detail" class="detail"></p>
+    <div class="choices">
+      <button id="replace-accept" type="button" class="primary">Use the new key</button>
+      <button id="replace-keep" type="button">Keep the current key</button>
+    </div>
+  </section>
+
   <section id="setup" class="panel" hidden>
     <h2>Connect this phone</h2>
     <p>Scan the setup code shown by your pool, or paste the setup link below.
@@ -52,10 +62,10 @@
   </section>
 </main>
 
-<div id="viewer" class="viewer" role="dialog" aria-modal="true" aria-labelledby="viewer-name" hidden>
+<dialog id="viewer" class="viewer" aria-labelledby="viewer-name">
   <div class="viewer-bar">
-    <button id="viewer-close" type="button" class="quiet">Close</button>
-    <a id="viewer-download" class="button primary" download>Download</a>
+    <button id="viewer-close" type="button" class="quiet" autofocus>Close</button>
+    <a id="viewer-download" class="button primary" href="#" download>Download</a>
   </div>
   <div class="viewer-stage">
     <img id="viewer-image" alt="" decoding="async">
@@ -66,7 +76,7 @@
   </div>
   <p id="viewer-name" class="viewer-name"></p>
   <p id="viewer-meta" class="viewer-meta"></p>
-</div>
+</dialog>
 
 <template id="tile-template">
   <li class="tile">

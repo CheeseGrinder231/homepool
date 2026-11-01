@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  RANDOM_TAG_BYTES,
   decodeXml,
   displayName,
   formatBytes,
@@ -14,6 +15,7 @@ import {
   objectKey,
   parseListing,
   parseSetup,
+  randomTag,
   safeName,
   setupFragment,
   sortNewestFirst,
@@ -55,11 +57,30 @@ test("file names become safe key segments", () => {
   assert.match(safeName("x.y.z"), /^x\.y\.z$/);
 });
 
-test("object keys carry the day, time, a random tag and the safe name", () => {
-  const key = objectKey("IMG_0042.HEIC", new Date("2026-11-02T14:30:15.250Z"), "k7q2m9x4");
-  assert.equal(key, "2026-11-02/143015-k7q2m9x4-IMG_0042.heic");
-  assert.equal(displayName(key), "143015-k7q2m9x4-IMG_0042.heic");
-  assert.match(key, /^([A-Za-z0-9_-][A-Za-z0-9._-]*)(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/);
+test("random tags carry all 128 bits as 26 base32 characters", () => {
+  assert.equal(RANDOM_TAG_BYTES * 8, 128);
+  // RFC 4648 vector, lowercased and unpadded.
+  assert.equal(randomTag(new TextEncoder().encode("foobar")), "mzxw6ytboi");
+  const zero = randomTag(new Uint8Array(RANDOM_TAG_BYTES));
+  assert.equal(zero, "a".repeat(26));
+  const ones = randomTag(new Uint8Array(RANDOM_TAG_BYTES).fill(255));
+  assert.equal(ones, `${"7".repeat(25)}4`);
+  const seen = new Set();
+  for (let i = 0; i < 256; i += 1) {
+    const bytes = new Uint8Array(RANDOM_TAG_BYTES);
+    bytes[15] = i;
+    seen.add(randomTag(bytes));
+  }
+  assert.equal(seen.size, 256, "the last byte changes the tag");
+});
+
+test("object keys carry the day, time, the random tag and the safe name", () => {
+  const tag = randomTag(new Uint8Array(RANDOM_TAG_BYTES).fill(1));
+  const key = objectKey("IMG_0042.HEIC", new Date("2026-11-02T14:30:15.250Z"), tag);
+  assert.equal(key, `2026-11-02/143015-${tag}-IMG_0042.heic`);
+  assert.equal(displayName(key), `143015-${tag}-IMG_0042.heic`);
+  // The exact shape the Caddy site allows for PUT.
+  assert.match(key, /^[0-9]{4}-[0-9]{2}-[0-9]{2}\/[0-9]{6}-[a-z2-7]{26}-[A-Za-z0-9_][A-Za-z0-9._-]*$/);
 });
 
 test("image tiles are attempted only for image extensions", () => {

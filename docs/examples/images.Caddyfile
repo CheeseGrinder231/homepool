@@ -6,33 +6,55 @@
 #   HOMEPOOL_IMAGES_BUCKET   the consumer bucket, for example homepool-consumer-1
 #   HOMEPOOL_GARAGE_S3       Garage's S3 API address, for example localhost:3900
 #
-# Only this one bucket is reachable through Caddy, with GET, HEAD and PUT only:
-# no DELETE, no POST, no other bucket and no bucket listing. Object keys must be
-# path segments of [A-Za-z0-9._-] that do not start with a dot, which is the
-# only shape the page creates. Encoded or dotted paths never reach Garage.
-# Stored objects are returned as attachments inside a sandbox, so a stored HTML
-# or SVG file cannot run as a page on this origin, where the key is kept.
+# Only the three request shapes the page sends reach Garage, on this one
+# bucket: the ListObjectsV2 query the page issues, a presigned GET of one
+# object, and a PUT of one object under a key the page itself creates
+# (date/time, a 26-character random tag and a safe name), without a query
+# and without x-amz-copy-source. Everything else, including bucket
+# configuration such as lifecycle rules, DELETE, POST, HEAD, multipart,
+# tagging and copies, is refused before Garage sees it. Stored objects are
+# returned as attachments inside a sandbox, so a stored HTML or SVG file
+# cannot run as a page on this origin, where the key is kept.
+
+(homepool_images_bucket) {
+	header {
+		Content-Security-Policy "sandbox; default-src 'none'; frame-ancestors 'none'"
+		Content-Disposition attachment
+		X-Content-Type-Options nosniff
+		Cross-Origin-Resource-Policy same-origin
+		Referrer-Policy no-referrer
+		Cache-Control "private, no-store"
+		-Server
+		defer
+	}
+	reverse_proxy {$HOMEPOOL_GARAGE_S3}
+}
 
 https://{$HOMEPOOL_IMAGES_ADDRESS} {
 	tls internal
 
-	@bucket {
-		method GET HEAD PUT
-		expression `{http.request.uri}.matches("^/{$HOMEPOOL_IMAGES_BUCKET}(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*([?][A-Za-z0-9._~%&=-]*)?$")`
+	@list {
+		method GET
+		expression `{http.request.uri}.matches("^/{$HOMEPOOL_IMAGES_BUCKET}[?]list-type=2&max-keys=1000(&continuation-token=%5[BD]([A-Za-z0-9]|%2B|%2F|%3D)*)?$")`
+	}
+	@object_get {
+		method GET
+		expression `{http.request.uri}.matches("^/{$HOMEPOOL_IMAGES_BUCKET}(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+[?]X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=[A-Za-z0-9]+%2F[0-9]{8}%2F[a-z0-9-]+%2Fs3%2Faws4_request&X-Amz-Date=[0-9]{8}T[0-9]{6}Z&X-Amz-Expires=[0-9]{1,4}&X-Amz-SignedHeaders=host&X-Amz-Signature=[0-9a-f]{64}$")`
+	}
+	@object_put {
+		method PUT
+		header !X-Amz-Copy-Source
+		expression `{http.request.uri}.matches("^/{$HOMEPOOL_IMAGES_BUCKET}/[0-9]{4}-[0-9]{2}-[0-9]{2}/[0-9]{6}-[a-z2-7]{26}-[A-Za-z0-9_][A-Za-z0-9._-]*$")`
 	}
 
-	handle @bucket {
-		header {
-			Content-Security-Policy "sandbox; default-src 'none'; frame-ancestors 'none'"
-			Content-Disposition attachment
-			X-Content-Type-Options nosniff
-			Cross-Origin-Resource-Policy same-origin
-			Referrer-Policy no-referrer
-			Cache-Control "private, no-store"
-			-Server
-			defer
-		}
-		reverse_proxy {$HOMEPOOL_GARAGE_S3}
+	handle @list {
+		import homepool_images_bucket
+	}
+	handle @object_get {
+		import homepool_images_bucket
+	}
+	handle @object_put {
+		import homepool_images_bucket
 	}
 
 	handle {

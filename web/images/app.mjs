@@ -2,6 +2,7 @@
 // Caddy site that proxies the bucket. Strings from the network (keys, error
 // text) are only ever assigned to textContent.
 import {
+  RANDOM_TAG_BYTES,
   displayName,
   extensionOf,
   formatBytes,
@@ -25,6 +26,10 @@ const ui = {
   alert: byId("alert"),
   alertText: byId("alert-text"),
   alertClose: byId("alert-close"),
+  replace: byId("replace"),
+  replaceDetail: byId("replace-detail"),
+  replaceAccept: byId("replace-accept"),
+  replaceKeep: byId("replace-keep"),
   setup: byId("setup"),
   setupForm: byId("setup-form"),
   setupText: byId("setup-text"),
@@ -49,7 +54,7 @@ const ui = {
   uploadTemplate: byId("upload-template"),
 };
 
-const state = { config: null, objects: [], queue: [], uploading: false };
+const state = { config: null, objects: [], queue: [], uploading: false, offered: null, viewing: null, opener: null };
 
 function showAlert(message) {
   ui.alertText.textContent = message;
@@ -70,28 +75,31 @@ function loadConfig() {
   }
 }
 
+function sameConfig(a, b) {
+  return Boolean(a && b) && setupFragment(a) === setupFragment(b);
+}
+
 // The fragment leaves the address bar before anything else happens, whether
-// or not it parses.
+// or not it parses. Nothing is stored here: a link only replaces a working
+// key after the user accepts it and the new key has listed the bucket.
 function takeSetupFromFragment() {
   const fragment = location.hash;
   if (fragment.length < 2) return null;
   history.replaceState(null, "", location.pathname + location.search);
   try {
-    const config = parseSetup(fragment);
-    localStorage.setItem(STORAGE_KEY, setupFragment(config));
-    return config;
+    return parseSetup(fragment);
   } catch (error) {
     showAlert(error.message);
     return null;
   }
 }
 
-function credentials() {
-  return { ...state.config, service: "s3" };
+function credentials(config = state.config) {
+  return { ...config, service: "s3" };
 }
 
-function bucketPath(key) {
-  return key === undefined ? `/${state.config.bucket}` : `/${state.config.bucket}/${key}`;
+function bucketPath(key, config = state.config) {
+  return key === undefined ? `/${config.bucket}` : `/${config.bucket}/${key}`;
 }
 
 function requestUrl(path, query = []) {
@@ -99,8 +107,8 @@ function requestUrl(path, query = []) {
   return `${location.origin}${canonicalPath(path)}${search ? `?${search}` : ""}`;
 }
 
-async function s3(method, path, { query = [], headers = {}, contentSha256 = EMPTY_SHA256 } = {}) {
-  const signed = await signHeaders({ method, host: location.host, path, query, headers, contentSha256 }, credentials());
+async function s3(method, path, { query = [], headers = {}, contentSha256 = EMPTY_SHA256, config = state.config } = {}) {
+  const signed = await signHeaders({ method, host: location.host, path, query, headers, contentSha256 }, credentials(config));
   return fetch(requestUrl(path, query), {
     method,
     headers: signed.headers,
@@ -114,13 +122,14 @@ function httpError(what, response) {
   return new Error(`${what} failed: HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}.`);
 }
 
-async function listAll() {
+// The query shapes here are the ones the Caddy site allows; keep them in step.
+async function listAll(config = state.config) {
   const objects = [];
   let token;
   do {
     const query = [["list-type", "2"], ["max-keys", LIST_PAGE]];
     if (token) query.push(["continuation-token", token]);
-    const response = await s3("GET", bucketPath(), { query });
+    const response = await s3("GET", bucketPath(undefined, config), { query, config });
     if (!response.ok) throw httpError("Listing", response);
     const listing = parseListing(await response.text());
     objects.push(...listing.objects);
@@ -179,7 +188,7 @@ function makeTile(object) {
   const tile = fragment.querySelector(".tile");
   tile.querySelector(".tile-name").textContent = displayName(object.key);
   tile.querySelector(".tile-button").setAttribute("aria-label", displayName(object.key));
-  tile.querySelector(".tile-button").addEventListener("click", () => openViewer(object));
+  tile.querySelector(".tile-button").addEventListener("click", (event) => openViewer(object, event.currentTarget));
   tiles.set(tile, object);
   visible.observe(tile);
   return tile;
@@ -223,13 +232,6 @@ async function refresh() {
   }
 }
 
-async function exists(key) {
-  const response = await s3("HEAD", bucketPath(key));
-  if (response.status === 404) return false;
-  if (response.ok) return true;
-  throw httpError("Checking the name", response);
-}
-
 function putObject(key, file, buffer, hash, onProgress) {
   return new Promise((resolve, reject) => {
     signHeaders(
@@ -237,7 +239,7 @@ function putObject(key, file, buffer, hash, onProgress) {
         method: "PUT",
         host: location.host,
         path: bucketPath(key),
-        headers: { "content-type": file.type || "application/octet-stream", "if-none-match": "*" },
+        headers: { "content-type": file.type || "application/octet-stream" },
         contentSha256: hash,
       },
       credentials(),
@@ -259,17 +261,13 @@ function putObject(key, file, buffer, hash, onProgress) {
   });
 }
 
+// Garage has no create-only PUT, so the key's 128 random bits are what keeps
+// one upload from replacing another; nothing here checks first.
 async function uploadOne(file, row) {
   row.status.textContent = "Preparing…";
   const buffer = await file.arrayBuffer();
   const hash = await sha256Hex(buffer);
-  let key;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    key = objectKey(file.name, new Date(), randomTag(crypto.getRandomValues(new Uint8Array(8))));
-    if (!(await exists(key))) break;
-    key = undefined;
-  }
-  if (!key) throw new Error("Could not find a free name for the upload.");
+  const key = objectKey(file.name, new Date(), randomTag(crypto.getRandomValues(new Uint8Array(RANDOM_TAG_BYTES))));
   row.status.textContent = "Uploading…";
   await putObject(key, file, buffer, hash, (fraction) => {
     row.progress.value = fraction;
@@ -347,17 +345,20 @@ function enqueueFiles(files) {
   runQueue();
 }
 
-async function openViewer(object) {
+async function openViewer(object, opener) {
+  state.viewing = object;
+  state.opener = opener;
   const name = displayName(object.key);
   ui.viewerName.textContent = name;
   ui.viewerMeta.textContent = `${formatBytes(object.size)}${object.lastModified ? ` · ${new Date(object.lastModified).toLocaleString()}` : ""}`;
   ui.viewerDownload.setAttribute("download", name);
-  ui.viewerDownload.href = await presign(object.key, DOWNLOAD_SECONDS);
+  ui.viewerDownload.dataset.signed = "";
   ui.viewerFallback.hidden = true;
   ui.viewerImage.hidden = true;
   ui.viewerImage.removeAttribute("src");
   ui.viewerKind.textContent = extensionOf(object.key) || "file";
-  ui.viewer.hidden = false;
+  if (!ui.viewer.open) ui.viewer.showModal();
+  ui.viewerClose.focus();
   document.body.classList.add("viewer-open");
   if (!looksLikeImage(object.key)) {
     ui.viewerFallbackText.textContent = "This is not an image file. Download it to open it elsewhere.";
@@ -375,34 +376,94 @@ async function openViewer(object) {
   ui.viewerImage.src = await presign(object.key, PREVIEW_SECONDS);
 }
 
+// The download URL is signed when the link is activated, so a viewer left
+// open past the five-minute window still downloads.
+ui.viewerDownload.addEventListener("click", async (event) => {
+  if (ui.viewerDownload.dataset.signed === "1") {
+    ui.viewerDownload.dataset.signed = "";
+    return;
+  }
+  event.preventDefault();
+  if (!state.viewing) return;
+  ui.viewerDownload.href = await presign(state.viewing.key, DOWNLOAD_SECONDS);
+  ui.viewerDownload.dataset.signed = "1";
+  ui.viewerDownload.click();
+});
+
 function closeViewer() {
-  ui.viewer.hidden = true;
-  ui.viewerImage.removeAttribute("src");
-  ui.viewerDownload.removeAttribute("href");
-  document.body.classList.remove("viewer-open");
+  if (ui.viewer.open) ui.viewer.close();
 }
 
-function showLibrary() {
-  ui.setup.hidden = true;
-  ui.library.hidden = false;
-  ui.refresh.hidden = false;
-  refresh();
+ui.viewer.addEventListener("close", () => {
+  ui.viewerImage.removeAttribute("src");
+  ui.viewerDownload.setAttribute("href", "#");
+  ui.viewerDownload.dataset.signed = "";
+  document.body.classList.remove("viewer-open");
+  state.viewing = null;
+  if (state.opener?.isConnected) state.opener.focus();
+  state.opener = null;
+});
+
+function showPanel(panel) {
+  for (const section of [ui.replace, ui.setup, ui.library]) section.hidden = section !== panel;
+  ui.refresh.hidden = panel !== ui.library;
+}
+
+function showLibrary(objects) {
+  showPanel(ui.library);
+  if (objects) {
+    state.objects = objects;
+    renderGrid();
+  } else {
+    refresh();
+  }
 }
 
 function showSetup() {
-  ui.library.hidden = true;
-  ui.refresh.hidden = true;
-  ui.setup.hidden = false;
+  showPanel(ui.setup);
   ui.setupText.value = "";
 }
 
-ui.setupForm.addEventListener("submit", (event) => {
+// Lists the bucket with the offered key before anything is stored. A key
+// that cannot list leaves the current configuration, if any, untouched.
+async function connect(config) {
+  const objects = await listAll(config);
+  state.config = config;
+  localStorage.setItem(STORAGE_KEY, setupFragment(config));
+  showLibrary(objects);
+}
+
+function offerReplacement(offered) {
+  state.offered = offered;
+  ui.replaceDetail.textContent = `New key ${offered.accessKeyId} for bucket ${offered.bucket}`;
+  showPanel(ui.replace);
+}
+
+ui.replaceAccept.addEventListener("click", async () => {
+  const offered = state.offered;
+  state.offered = null;
+  clearAlert();
+  ui.replaceAccept.disabled = true;
+  try {
+    await connect(offered);
+  } catch (error) {
+    showAlert(`The new key was not used: ${error.message} The current key is kept.`);
+    showLibrary();
+  } finally {
+    ui.replaceAccept.disabled = false;
+  }
+});
+
+ui.replaceKeep.addEventListener("click", () => {
+  state.offered = null;
+  showLibrary();
+});
+
+ui.setupForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearAlert();
   try {
-    state.config = parseSetup(ui.setupText.value);
-    localStorage.setItem(STORAGE_KEY, setupFragment(state.config));
-    showLibrary();
+    await connect(parseSetup(ui.setupText.value));
   } catch (error) {
     showAlert(error.message);
   }
@@ -431,14 +492,29 @@ ui.forget.addEventListener("click", () => {
 
 ui.alertClose.addEventListener("click", clearAlert);
 ui.viewerClose.addEventListener("click", closeViewer);
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !ui.viewer.hidden) closeViewer();
-});
 
-if (!window.isSecureContext || !crypto.subtle) {
-  showAlert("This page needs a secure (HTTPS) connection to sign requests.");
-} else {
-  state.config = takeSetupFromFragment() ?? loadConfig();
-  if (state.config) showLibrary();
-  else showSetup();
+async function start() {
+  if (!window.isSecureContext || !crypto.subtle) {
+    showAlert("This page needs a secure (HTTPS) connection to sign requests.");
+    return;
+  }
+  const stored = loadConfig();
+  const offered = takeSetupFromFragment();
+  state.config = stored;
+  if (offered && stored && !sameConfig(offered, stored)) {
+    offerReplacement(offered);
+  } else if (offered && !stored) {
+    try {
+      await connect(offered);
+    } catch (error) {
+      showAlert(error.message);
+      showSetup();
+    }
+  } else if (stored) {
+    showLibrary();
+  } else {
+    showSetup();
+  }
 }
+
+start();

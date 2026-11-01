@@ -75,17 +75,31 @@ export function stamp(date) {
   return { day: iso.slice(0, 10), time: iso.slice(11, 19).replace(/:/g, "") };
 }
 
-// "2026-11-02/143015-k7q2m9x4-IMG_0042.jpg": sorts newest first by key and is
-// unique per upload because of the random part.
+// "2026-11-02/143015-<26 base32 characters>-IMG_0042.jpg" sorts newest first
+// by key. Garage 2.1.0 has no create-only PUT (its PutObject reads no
+// precondition header), so uniqueness rests on the 128 random bits in the tag.
+export const RANDOM_TAG_BYTES = 16;
+
 export function objectKey(fileName, date, random) {
   const { day, time } = stamp(date);
   return `${day}/${time}-${random}-${safeName(fileName)}`;
 }
 
+// RFC 4648 base32 in lowercase, without padding: 16 bytes give 26 characters.
 export function randomTag(bytes) {
   const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
   let out = "";
-  for (const byte of bytes) out += alphabet[byte % alphabet.length];
+  let buffer = 0;
+  let bits = 0;
+  for (const byte of bytes) {
+    buffer = (buffer << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += alphabet[(buffer >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += alphabet[(buffer << (5 - bits)) & 31];
   return out;
 }
 
