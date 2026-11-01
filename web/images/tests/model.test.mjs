@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   RANDOM_TAG_BYTES,
+  createConnection,
   decodeXml,
   displayName,
   formatBytes,
@@ -150,4 +151,60 @@ test("the documented setup-link command produces a link the page accepts", () =>
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+function pendingListing() {
+  let release;
+  const promise = new Promise((done) => {
+    release = done;
+  });
+  return { promise, release };
+}
+
+test("a listing that finishes after Keep stores nothing", async () => {
+  const stored = [];
+  const pending = pendingListing();
+  const connection = createConnection({ list: () => pending.promise, store: (config) => stored.push(config) });
+  const attempt = connection.connect({ accessKeyId: "new" });
+  connection.cancel();
+  pending.release([{ key: "x", size: 1 }]);
+  assert.equal(await attempt, null);
+  assert.deepEqual(stored, []);
+});
+
+test("a listing that finishes after Forget stores nothing", async () => {
+  let storage = "old";
+  const pending = pendingListing();
+  const connection = createConnection({ list: () => pending.promise, store: (config) => (storage = config.accessKeyId) });
+  const attempt = connection.connect({ accessKeyId: "new" });
+  connection.cancel();
+  storage = null;
+  connection.cancel();
+  pending.release([]);
+  assert.equal(await attempt, null);
+  assert.equal(storage, null);
+});
+
+test("a newer attempt supersedes an older one whose listing arrives late", async () => {
+  const stored = [];
+  const first = pendingListing();
+  const second = pendingListing();
+  const listings = [first.promise, second.promise];
+  const connection = createConnection({ list: () => listings.shift(), store: (config) => stored.push(config.accessKeyId) });
+  const older = connection.connect({ accessKeyId: "older" });
+  const newer = connection.connect({ accessKeyId: "newer" });
+  second.release([{ key: "n", size: 1 }]);
+  assert.deepEqual(await newer, [{ key: "n", size: 1 }]);
+  first.release([{ key: "o", size: 1 }]);
+  assert.equal(await older, null);
+  assert.deepEqual(stored, ["newer"]);
+});
+
+test("a current attempt stores its key once the listing succeeds", async () => {
+  const stored = [];
+  const connection = createConnection({ list: async () => [], store: (config) => stored.push(config.accessKeyId) });
+  assert.deepEqual(await connection.connect({ accessKeyId: "only" }), []);
+  assert.deepEqual(stored, ["only"]);
+  await assert.rejects(createConnection({ list: async () => { throw new Error("HTTP 403"); }, store: () => stored.push("never") }).connect({}), /403/);
+  assert.deepEqual(stored, ["only"]);
 });

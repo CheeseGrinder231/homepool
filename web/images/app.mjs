@@ -3,6 +3,7 @@
 // text) are only ever assigned to textContent.
 import {
   RANDOM_TAG_BYTES,
+  createConnection,
   displayName,
   extensionOf,
   formatBytes,
@@ -425,12 +426,19 @@ function showSetup() {
 }
 
 // Lists the bucket with the offered key before anything is stored. A key
-// that cannot list leaves the current configuration, if any, untouched.
+// that cannot list leaves the current configuration, if any, untouched, and
+// so does a listing that finishes after Keep, Forget or a newer attempt.
+const connection = createConnection({
+  list: listAll,
+  store(config) {
+    state.config = config;
+    localStorage.setItem(STORAGE_KEY, setupFragment(config));
+  },
+});
+
 async function connect(config) {
-  const objects = await listAll(config);
-  state.config = config;
-  localStorage.setItem(STORAGE_KEY, setupFragment(config));
-  showLibrary(objects);
+  const objects = await connection.connect(config);
+  if (objects) showLibrary(objects);
 }
 
 function offerReplacement(offered) {
@@ -448,13 +456,14 @@ ui.replaceAccept.addEventListener("click", async () => {
     await connect(offered);
   } catch (error) {
     showAlert(`The new key was not used: ${error.message} The current key is kept.`);
-    showLibrary();
+    if (state.config) showLibrary();
   } finally {
     ui.replaceAccept.disabled = false;
   }
 });
 
 ui.replaceKeep.addEventListener("click", () => {
+  connection.cancel();
   state.offered = null;
   showLibrary();
 });
@@ -481,6 +490,7 @@ ui.refresh.addEventListener("click", () => {
 
 ui.forget.addEventListener("click", () => {
   if (!confirm("Forget the pool key on this phone? You will need the setup code again.")) return;
+  connection.cancel();
   localStorage.removeItem(STORAGE_KEY);
   clearAlert();
   state.config = null;

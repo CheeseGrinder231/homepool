@@ -174,3 +174,23 @@ export function parseListing(xml) {
 export function sortNewestFirst(objects) {
   return [...objects].sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
 }
+
+// Connection attempts: a key is stored only if its listing finishes while
+// the attempt is still current. `cancel()` (Keep, Forget) and any newer
+// attempt invalidate the ones in flight, so a late listing changes nothing.
+export function createConnection({ list, store }) {
+  let current = 0;
+  return {
+    cancel() {
+      current += 1;
+    },
+    async connect(config) {
+      current += 1;
+      const attempt = current;
+      const objects = await list(config);
+      if (attempt !== current) return null;
+      store(config);
+      return objects;
+    },
+  };
+}
