@@ -1,3 +1,4 @@
+import { Budget, EVENT_MS } from "./budget.mjs";
 import {
   envelope,
   unwrap,
@@ -22,6 +23,7 @@ export class Relay {
     this.ctx = ctx;
     this.env = env;
     this.limits = routeLimits(env);
+    this.ledger = new Budget(ctx, this.limits);
   }
   sockets() {
     return this.ctx
@@ -39,27 +41,42 @@ export class Relay {
     );
   }
   save(s, a) {
-    s.serializeAttachment(a);
+    s.serializeAttachment({
+      ...a,
+      ...(this.ledger.used ? { account: this.ledger.used } : {}),
+    });
   }
-  async budget(bytes = 0, failure = false, writes = 1) {
-    const day = Math.floor(Date.now() / 86400000);
-    let b = await this.ctx.storage.get("budget");
-    if (b?.day !== day)
-      b = { day, bytes: 0, messages: 0, failures: 0, writes: 0 };
-    b.writes ??= b.messages;
-    const ok =
-      b.bytes + bytes <= this.limits.dailyBytes &&
-      b.messages + 1 <= this.limits.dailyMessages &&
-      b.writes + writes <= this.limits.dailyWrites &&
-      b.failures + (failure ? 1 : 0) <= this.limits.dailyFailures;
-    if (ok) {
-      b.bytes += bytes;
-      b.messages++;
-      b.writes += writes;
-      if (failure) b.failures++;
-      await this.ctx.storage.put("budget", b);
-    }
-    return ok;
+  async budget(bytes = 0, failure = false, extraWrites = 0) {
+    this.ledger.limits = this.limits;
+    return this.ledger.charge({
+      bytes,
+      messages: 1,
+      failures: failure ? 1 : 0,
+      writes: extraWrites,
+    });
+  }
+  run(f) {
+    return this.ctx.blockConcurrencyWhile(async () => {
+      const started = Date.now();
+      this.ledger.eventDay = Math.floor(started / 86400000);
+      this.ledger.limits = this.limits;
+      try {
+        await this.ledger.load();
+        this.ledger.finishPrevious(started);
+        if (
+          !(await this.ledger.charge({
+            durationMs: EVENT_MS,
+            pendingSince: started,
+          }))
+        ) {
+          for (const s of this.sockets()) this.drop(s, true);
+          return new Response(null, { status: 429 });
+        }
+        return await f();
+      } finally {
+        delete this.ledger.eventDay;
+      }
+    });
   }
   async failAdmission(s) {
     await this.budget(0, true);
@@ -96,12 +113,12 @@ export class Relay {
     } catch {}
   }
   fetch(request) {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    return this.run(async () => {
       if (this.env.KILL_SWITCH !== "false") {
         for (const s of this.sockets()) this.drop(s);
         return new Response(null, { status: 503 });
       }
-      const b = await this.ctx.storage.get("budget");
+      const b = this.ledger.used;
       if (
         b?.day === Math.floor(Date.now() / 86400000) &&
         b.failures >= this.limits.dailyFailures
@@ -144,7 +161,7 @@ export class Relay {
     else await this.ctx.storage.deleteAlarm();
   }
   alarm() {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    return this.run(async () => {
       for (const s of this.sockets()) {
         const a = s.deserializeAttachment();
         if (this.env.KILL_SWITCH !== "false") this.drop(s);
@@ -161,7 +178,7 @@ export class Relay {
     });
   }
   webSocketClose(s) {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    return this.run(async () => {
       this.drop(s);
       await this.schedule();
     });
@@ -170,7 +187,7 @@ export class Relay {
     return this.webSocketClose(s);
   }
   webSocketMessage(s, message) {
-    return this.ctx.blockConcurrencyWhile(async () => {
+    return this.run(async () => {
       const a = s.deserializeAttachment();
       if (!a || a.closed) return;
       try {
@@ -183,7 +200,7 @@ export class Relay {
         const b = new Uint8Array(message);
         // Hash registration/removal writes one additional storage row.
         const writes =
-          a.role === "bridge" && b[0] === 1 && [4, 5].includes(b[1]) ? 2 : 1;
+          a.role === "bridge" && b[0] === 1 && [4, 5].includes(b[1]) ? 1 : 0;
         if (!(await this.budget(b.length, false, writes)))
           throw Error("budget");
         if (a.role === "pending") {

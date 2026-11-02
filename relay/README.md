@@ -26,8 +26,8 @@ The bridge remains responsible for device/invitation authorization and storage.
 
 Defaults live in `limits.mjs`. Rates use UTC epoch-aligned one-second windows;
 per-route budgets use UTC days. Socket attachment counters survive hibernation;
-budgets and global upgrade counters are committed to SQLite-backed DO storage
-before forwarding or granting an upgrade. Storage failures fail closed.
+budget reservations and global upgrade counters are committed to SQLite-backed
+DO storage before forwarding or granting an upgrade. Storage failures fail closed.
 
 | Limit | Value | On exhaustion / recovery |
 | --- | --- | --- |
@@ -43,17 +43,42 @@ before forwarding or granting an upgrade. Storage failures fail closed.
 | Daily incoming bytes, shared across routes | 256 MiB | Close offender / reject upgrades; UTC day reset |
 | Daily events, shared across routes | 60,000 | Close offender / reject upgrades; UTC day reset |
 | Daily failed upgrades/admissions, shared across routes | 100 | Refuse further upgrades; UTC day reset |
+| Conservative route handler duration, shared across routes | 90,000,000 ms per UTC day (11,520 GB-s) | Refuse work / close sockets; UTC day reset |
 | Global upgrade grants | 20 per second, 100 per UTC day | HTTP 429; next second or UTC day reset |
-| Budget/token row writes, shared across routes | 75,000 per UTC day | Close offender / reject upgrades; UTC day reset |
+| Budget/token row writes, shared across routes | 10,000 per UTC day | Close offender / reject upgrades; UTC day reset |
 | Registered hashes per route | 128 | Close bridge on overflow; reconnect and remove unused bindings |
 | Operator kill switch | `KILL_SWITCH` other than literal `false` | Reject upgrades and close sockets on their next event; normal bridge keepalive checks within 15 seconds |
 
-The daily route budgets above are divided evenly (rounded down) among configured
-routes, so adding routes does not multiply admitted-work allowance. The global
-upgrade budget is shared without division. Token mutations reserve two row
-writes (budget and token registry) before mutation; other budget events reserve
-one. Alarm/connection metadata and the global gate add small bounded overhead
-for at most 100 grants per day.
+The daily route budgets are divided evenly (rounded down) among configured
+routes; adding routes does not multiply allowance. The global upgrade budget
+is shared without division. `budget.mjs` durably reserves capacity in batches
+before admission: 128 events, 8 MiB, 4 failures, 32 writes and 124,000 ms of
+conservative duration. Reservations are clamped to the corresponding daily cap.
+Budget reservation writes and each token-registry mutation charge the write
+budget. Global gate and alarm/connection metadata add the bounded overhead below.
+
+Live usage is held in memory and copied to all socket attachments. Hibernation
+restores the latest snapshot, so even waking after every idle ping burst does
+not write each event to SQLite. A batch refill is persisted before any operation
+can exceed the durable reservation. **Undercount after eviction is zero**. If
+all sockets are lost, unused reservations are forfeited: overcount is less than
+128 events, 8 MiB, 4 failures, 32 writes, and 155 seconds of duration per such
+loss. Repeated losses may stop service early; they cannot reopen spent capacity.
+There is no periodic budget alarm or timer, active or idle. The existing alarm
+is set only for pending admission deadlines or an admitted session's expiry.
+
+Duration is conservatively reserved as 31 seconds before each route callback,
+covering `blockConcurrencyWhile`'s documented 30-second timeout. At the next
+event, its fresh I/O timestamp bounds the previous callback; retain the smaller
+of that gap and 31 seconds, deliberately including idle gaps. Do not refund
+using an in-callback CPU clock: Cloudflare freezes `Date.now()` between I/O.
+Thus an idle bridge at 15-second intervals consumes almost a full day's wall
+clock in this **guard**, while its actual hibernating billing estimate is much
+smaller. The guard is shared across routes and stops new work before the cap.
+An event spanning UTC midnight is charged to its start day (at most 31 seconds
+per active route of rollover skew). Clock/runtime billing details still need
+production validation. See [timer semantics](https://developers.cloudflare.com/workers/runtime-apis/performance/)
+and [concurrency timeout](https://developers.cloudflare.com/durable-objects/api/state/#blockconcurrencywhile).
 
 Daily events include upgrade attempts reaching the route and incoming socket
 messages, including controls and failed admission bookkeeping. Byte budgets count
@@ -102,43 +127,58 @@ Workers Free allows 100,000 DO requests/day (incoming WebSocket messages at
 Free limits reset at 00:00 UTC; exceeding a limit stops the affected operations.
 Eligible idle objects incur no duration charge.
 
-For one owner, two idle connected phones and an always-connected bridge, each
-15-second interval has 9 incoming messages: bridge ping (1), two encrypted
-phone ping/reply pairs (4), and four idle-flush ACKs (4). Thus per day:
+For one owner, two idle connected phones and an always-connected bridge, a
+15-second interval has 5 incoming messages: one bridge ping and two encrypted
+phone ping/reply pairs. Each encrypted keepalive is a 58-byte data envelope.
+A receiver ACKs at **64 KiB unacknowledged**, not after each small ping. In a
+24-hour model there are only 20 threshold ACKs across four session directions:
+28,800 + 20 = 28,820 incoming messages / 20 = 1,441 billed DO requests.
+At 10 ms active handler time, 28,820 x 0.01 x 0.128 = 36.8896 GB-s/day.
+The test reconstructs the relay after every 15-second burst and measures
+**870 row writes, 5,763 reads, zero alarms and 20 ACKs** for the full day.
+Those counts include the route's synthetic setup; allow under 1,000 writes
+with real upgrade/gate metadata. This replaces the former per-message writes.
 
-- 9 x 5,760 = 51,840 incoming messages, or 2,592 billed DO requests.
-- Assuming 10 ms active handler time: 51,840 x 0.01 x 0.128 = 66.3552 GB-s.
-- One persisted budget row per message: 51,840 row writes, plus setup/alarms.
+A **50 MB (50,000,000-byte) upload** has 814 chunks of at most 61,440 bytes,
+102 eight-chunk credit bursts and 8 handshake/metadata/end envelopes in this
+model. Two full chunks cross the 64 KiB threshold; allowing prior unacknowledged
+keepalive bytes, burst/end flushes and the reverse credit stream, budget at most
+410 relay ACKs: 814 + 102 + 8 + 410 = 1,334 incoming messages. This adds
+66.7 billed requests and 1.70752 GB-s at 10 ms/message. Conservatively allow
+50 extra reservation/metadata writes and 1,500 reads (even a cold reconstruction
+after every new message). Framing plus metadata fits a 1 MiB allowance, so the
+upload remains well inside the 256 MiB byte cap. This is arithmetic, not a
+50 MB target-device throughput result.
 
-This corrects the earlier 1,440-request/~37-GB-s estimate, which omitted ACKs.
-A **50 MB (50,000,000-byte) upload** needs ceil(50,000,000 / 61,440) = 814 chunks.
-For a conservative allowance, count one encrypted application credit per chunk,
-8 handshake/metadata/end envelopes, and one relay ACK per received data envelope:
-2 x (814 + 814 + 8) = 3,272 incoming messages. This adds 163.6 billed requests,
-4.18816 GB-s at 10 ms/message, and 3,272 budget-row writes. Batched credits/ACKs
-normally cost less. Even reserving 1 MiB for framing/metadata fits the 256 MiB byte cap. These are arithmetic assumptions, not a device throughput test.
+| Per-day workload | Billed DO requests | GB-s | SQLite rows written | SQLite rows read |
+| --- | ---: | ---: | ---: | ---: |
+| Free allowance | 100,000 | 13,000 | 100,000 | 5,000,000 |
+| Idle model, including setup allowance | <1,460 | <37 | <1,000 | <6,000 |
+| Idle plus one 50 MB upload | <1,530 | <39 | <1,050 | <7,500 |
+| Maximum admitted work under own caps, with auxiliary allowance | ≤4,200 | 11,916.8 handler reservation bound | ≤11,100 | <125,000 |
 
-Idle plus that upload totals **55,112 messages, about 2,756 billed requests,
-70.54 GB-s and 55,112 budget-row writes/day**, before setup/alarms. This leaves
-about 97,244 DO requests and 12,929 GB-s of Free allowance. Even allowing all
-100 daily upgrade grants (two DO calls each) and 100 alarm invocations leaves
-more than 96,900 requests. The 60,000-event cap leaves 4,888 event slots in this
-model; the 75,000 budget/token-write cap leaves room under the separate 100,000
-row-write quota for gate/connection/alarm metadata. Hash updates are charged to
-that write budget, not hidden by the WebSocket 20:1 compute discount.
+The last row derives from 60,000 incoming events / 20 = 3,000 request-equivalents,
+100 global upgrade grants x 2 DO calls, and allowance for 1,000 auxiliary
+alarm/close invocations. The route duration cap is 90,000 seconds x 0.128 =
+11,520 GB-s, plus 100 granted gate callbacks x 31 seconds x 0.128 = 396.8 GB-s.
+The write bound is 10,000 budget/token writes, 100 gate writes and up to 1,000
+alarm/connection metadata writes (`setAlarm` counts as a row write; deletes are
+also counted). Two reads per incoming event, plus auxiliary loads, stay under
+125,000. Batches can only reduce admitted work; no eviction grants free usage.
+This leaves at least 95,800 requests, 88,900 writes and 4,875,000 reads of
+headroom in that admitted-work model. Ordinary helper/setup counts fit the
+auxiliary allowance; platform retry,
+startup/dispatch overhead and rollover skew consume part of the remaining
+1,083.2 GB-s margin. These are application accounting bounds, not a promise of
+exact invoice metering. The low normal-use GB-s rows assume hibernation and
+10 ms/message; the conservative duration guard makes no 10 ms assumption.
 
-At the 60,000-event cap the same 10 ms model uses 76.8 GB-s and at most 3,000
-WebSocket-equivalent requests, plus bounded upgrade/setup work. Duration is an
-estimate, not a hard elapsed-time meter: slow handlers can consume more. A single
-non-hibernating route object would use 86,400 x 0.128 = 11,059.2 GB-s/day;
-hibernation provides the intended headroom. No production plan or billing was
-tested. The target model has $0 usage cost on Workers Free.
-
-These controls stop **admitted relay work** with headroom. They do not reserve
-account quota: unrelated account traffic and abusive HTTP/upgrade rejections
-still reach Cloudflare and can exhaust quotas. Multiple routes share the stated
-caps. No application can promise remaining platform quota under arbitrary
-external traffic; Free hard limits remain the final stop.
+There is no subscription cost assumed: the target is Workers Free. These caps
+bound **admitted relay work** with headroom, not arbitrary account traffic.
+Rejected requests already reaching Cloudflare, repeated platform failures and
+unrelated account workloads may still exhaust quota. No application can reserve
+the remaining account quota. Only local workerd has been tested; actual billing,
+platform hibernation and timer behavior remain unproven on a real deployment.
 
 Keep the agreed binary ping/pong. The documented hibernation auto-response API
 matches a fixed **string** pair on all attached sockets; it does not match this

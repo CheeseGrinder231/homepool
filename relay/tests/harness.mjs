@@ -23,17 +23,25 @@ export class Socket {
 export function harness(overrides = {}) {
   const values = new Map(),
     sockets = [];
+  const stats = { reads: 0, writes: 0, alarms: 0 };
   let tail = Promise.resolve();
   const ctx = {
     storage: {
-      get: async (k) => structuredClone(values.get(k)),
+      get: async (k) => {
+        stats.reads++;
+        return structuredClone(values.get(k));
+      },
       put: async (k, v) => {
+        stats.writes++;
         values.set(k, structuredClone(v));
       },
       setAlarm: async (n) => {
+        stats.writes++;
+        stats.alarms++;
         ctx.alarm = n;
       },
       deleteAlarm: async () => {
+        stats.writes++;
         ctx.alarm = null;
       },
     },
@@ -53,6 +61,7 @@ export function harness(overrides = {}) {
   relay.limits = { ...defaults, ...overrides };
   return {
     ctx,
+    stats,
     env,
     values,
     sockets,

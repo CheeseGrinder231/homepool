@@ -1,5 +1,5 @@
 export const RELAY_WINDOW = 1024 * 1024;
-export const ACK_INTERVAL = 256 * 1024;
+export const ACK_INTERVAL = 64 * 1024;
 // Includes envelope/schema/AEAD overhead, not just plaintext file bytes.
 export const APPLICATION_WINDOW = RELAY_WINDOW / 2;
 export const defaults = Object.freeze({
@@ -12,7 +12,8 @@ export const defaults = Object.freeze({
   controlBytesPerSecond: 4096,
   dailyBytes: 256 * 1024 ** 2,
   dailyMessages: 60000,
-  dailyWrites: 75000,
+  dailyWrites: 10000,
+  dailyDurationMs: 90000000,
   dailyUpgrades: 100,
   dailyFailures: 100,
   upgradesPerSecond: 20,
@@ -60,9 +61,13 @@ export function routeLimits(env) {
   return {
     ...defaults,
     ...Object.fromEntries(
-      ["dailyBytes", "dailyMessages", "dailyWrites", "dailyFailures"].map(
-        (k) => [k, Math.floor(defaults[k] / count)],
-      ),
+      [
+        "dailyBytes",
+        "dailyMessages",
+        "dailyWrites",
+        "dailyFailures",
+        "dailyDurationMs",
+      ].map((k) => [k, Math.floor(defaults[k] / count)]),
     ),
   };
 }

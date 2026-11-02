@@ -174,9 +174,10 @@ rounding through a JavaScript Number. Shared exact vectors are in
 ACK is endpoint-to-relay only: a phone acknowledges its assigned session, and
 the bridge acknowledges each session independently. Each direction starts at
 zero on open and counts the entire forwarded data envelope, including its
-six-byte header (Noise handshake messages count too). ACK at least every
-256 KiB received and once when a receive burst goes idle. Duplicate ACKs are
-idempotent; decreasing totals or totals beyond bytes forwarded close the session.
+six-byte header (Noise handshake messages count too). ACK when at least
+64 KiB is unacknowledged, or flush once after a file/handshake burst or before
+closing. Individual small keepalives do not trigger an idle-flush ACK.
+Duplicate ACKs are idempotent; decreasing totals or totals beyond bytes forwarded close the session.
 Controls never count toward the data window and are rate-limited separately.
 
 Before every data send the relay reserves `forwarded - acked + envelope length`.
@@ -188,7 +189,10 @@ even if close/error follows the data. These bounded reservations survive
 hibernation and cannot allocate new sessions. Application credit windows
 must be at most half RELAY_WINDOW (512 KiB), including all schema/Noise/envelope
 overhead, to leave headroom for ACK scheduling. The integration tests use eight
-60 KiB chunks per burst (492,032 envelope bytes) and flush idle ACKs.
+60 KiB chunks per burst (492,032 envelope bytes) and flush at transfer-burst
+boundaries. Threshold plus application window is 576 KiB, below the 1 MiB relay
+window. Small encrypted ping/pong traffic accumulates toward the same threshold;
+a 24-hour regression includes hibernation and verifies it never fills the window.
 Keepalive and token controls are fixed-size and separately capped; ACKs cannot
 allocate stale sessions or select another phone. The relay trusts cumulative
 receipt claims only for flow control, never for identity or storage permission.

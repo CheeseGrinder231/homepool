@@ -295,10 +295,13 @@ test("pending upgrade cap and failed admission budget trip and recover", async (
   await x.send(wrong, admission("bridge", "00".repeat(32)));
   x.restart();
   assert.equal((await upgrade(x)).status, 429);
-  const saved = x.values.get("budget");
-  saved.day--;
-  x.values.set("budget", saved);
-  assert.equal((await upgrade(x)).status, 101);
+  const now = Date.now;
+  Date.now = () => now() + 86400000;
+  try {
+    assert.equal((await upgrade(x)).status, 101);
+  } finally {
+    Date.now = now;
+  }
 });
 test("daily byte and message caps reject data before forwarding and reset after reconstruction", async () => {
   for (const key of ["dailyBytes", "dailyMessages"]) {
@@ -307,7 +310,7 @@ test("daily byte and message caps reject data before forwarding and reset after 
     await register(h, b);
     const p = await phone(h),
       before = b.sent.length;
-    const budget = h.values.get("budget");
+    const budget = h.relay.ledger.used;
     h.relay.limits = {
       ...h.relay.limits,
       [key]: key === "dailyBytes" ? budget.bytes : budget.messages,
@@ -317,9 +320,13 @@ test("daily byte and message caps reject data before forwarding and reset after 
     assert.equal(b.sent.filter((x) => unwrap(x).kind === "data").length, 0);
     assert.ok(b.sent.length >= before);
     h.restart();
-    budget.day--;
-    h.values.set("budget", budget);
-    assert.equal((await upgrade(h)).status, 101);
+    const now = Date.now;
+    Date.now = () => now() + 86400000;
+    try {
+      assert.equal((await upgrade(h)).status, 101);
+    } finally {
+      Date.now = now;
+    }
   }
 });
 test("message, byte, and control rate windows reset on the next second", async () => {
@@ -450,10 +457,13 @@ test("storage-write budget reserves token mutations before sending and resets da
   await h.send(b, envelope("token-remove", 0, bindingBytes(42)));
   assert.equal(b.readyState, 3);
   assert.equal(Object.keys(h.values.get("tokens")).length, 1);
-  const budget = h.values.get("budget");
-  budget.day--;
-  h.values.set("budget", budget);
-  assert.equal(await h.relay.budget(0, false, 2), true);
+  const now = Date.now;
+  Date.now = () => now() + 86400000;
+  try {
+    assert.equal(await h.relay.budget(0, false, 2), true);
+  } finally {
+    Date.now = now;
+  }
 });
 
 import { routeLimits, defaults } from "../limits.mjs";
@@ -465,6 +475,7 @@ test("configured routes share Free-plan admitted-work budgets", () => {
     "dailyMessages",
     "dailyWrites",
     "dailyFailures",
+    "dailyDurationMs",
   ])
     assert.equal(two[k] * 2, one[k]);
   assert.equal(one.dailyMessages, 60000);

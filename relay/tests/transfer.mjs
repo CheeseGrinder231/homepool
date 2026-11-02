@@ -1,3 +1,4 @@
+import { AckTracker } from "../ack.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { Session, keyPair, publicBytes } from "../../web/protocol/noise.mjs";
@@ -6,10 +7,9 @@ import {
   decode,
   envelope,
   unwrap,
-  ack,
   tokenSet,
 } from "../../web/protocol/wire.mjs";
-import { hash, APPLICATION_WINDOW, ACK_INTERVAL } from "../limits.mjs";
+import { hash, APPLICATION_WINDOW } from "../limits.mjs";
 const token = "cd".repeat(32),
   unhex = (s) => new Uint8Array(Buffer.from(s, "hex"));
 const digest = (b) => createHash("sha256").update(b).digest("hex");
@@ -49,10 +49,8 @@ export async function transfer(io) {
       i,
       r,
       id: opened.session,
-      up: 0n,
-      down: 0n,
-      upAck: 0n,
-      downAck: 0n,
+      up: new AckTracker(opened.session),
+      down: new AckTracker(opened.session),
     };
     sessions.push(s);
     const move = async (from, to, payload, down) => {
@@ -61,8 +59,8 @@ export async function transfer(io) {
       assert.equal(e.kind, "data");
       assert.equal(e.session, s.id);
       const dir = down ? "down" : "up";
-      s[dir] += BigInt(e.data.length + 6);
-      await io.send(to, ack(s.id, s[dir]));
+      const receipt = s[dir].receive(e.data.length + 6);
+      if (receipt) await io.send(to, receipt);
       return e.data;
     };
     await r.readHandshake(await move(p, b, await i.writeHandshake(), false));
@@ -109,23 +107,24 @@ export async function transfer(io) {
       assert.deepEqual(y, expected);
       up.update(x);
       down.update(y);
-      a.up += BigInt(u.data.length + 6);
-      c.down += BigInt(d.data.length + 6);
-      if (a.up - a.upAck >= BigInt(ACK_INTERVAL)) {
-        await io.send(b, ack(a.id, a.up));
-        a.upAck = a.up;
-      }
-      if (c.down - c.downAck >= BigInt(ACK_INTERVAL)) {
-        await io.send(c.p, ack(c.id, c.down));
-        c.downAck = c.down;
-      }
+      const upAck = a.up.receive(u.data.length + 6),
+        downAck = c.down.receive(d.data.length + 6);
+      if (upAck) await io.send(b, upAck);
+      if (downAck) await io.send(c.p, downAck);
     }
-    // Idle flush: even a burst shorter than the ACK interval releases its window.
-    await io.send(b, ack(a.id, a.up));
-    a.upAck = a.up;
-    await io.send(c.p, ack(c.id, c.down));
-    c.downAck = c.down;
+    // Explicit file-transfer burst boundaries, not individual keepalive messages.
+    const upAck = a.up.flush(),
+      downAck = c.down.flush();
+    if (upAck) await io.send(b, upAck);
+    if (downAck) await io.send(c.p, downAck);
     if (io.pause) await io.pause();
+  }
+  // Flush the otherwise-idle handshake directions at session close.
+  for (const s of sessions) {
+    const u = s.up.flush(),
+      d = s.down.flush();
+    if (u) await io.send(b, u);
+    if (d) await io.send(s.p, d);
   }
   assert.equal(up.digest("hex"), digest(source));
   assert.equal(down.digest("hex"), digest(source));

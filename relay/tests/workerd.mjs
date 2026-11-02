@@ -10,6 +10,7 @@ for (const file of [
   "relay/worker.mjs",
   "relay/route.mjs",
   "relay/limits.mjs",
+  "relay/budget.mjs",
   "web/protocol/wire.mjs",
   "web/protocol/schema.mjs",
   "web/protocol/noise.mjs",
