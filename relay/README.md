@@ -180,23 +180,26 @@ physical-device result is claimed.
 | Steady idle keepalive | ≤288 | 0 handler duration | 0 | 0 |
 | Idle + 1 GiB, excluding setup | ≤1,838 | ≤39.68 at 10 ms/message | ≤500 | ≤2,300 |
 | Idle + 2 GiB, excluding setup | ≤3,388 | ≤79.36 at 10 ms/message | ≤1,000 | ≤4,600 |
-| Maximum admitted work with auxiliary allowance | ≤41,488 | 5,516.8 handler-reservation bound | ≤11,100 | ≤1,602,000 |
+| Maximum admitted work with auxiliary allowance | ≤42,288 | 5,516.8 handler-reservation bound | ≤12,100 | ≤1,604,000 |
 
 The worst row uses 800,000 JS events / 20 = 40,000 request-equivalents, 288 for
-one scheduled bridge, 100 upgrade grants x 2 DO calls, and 1,000 auxiliary
-alarm/close invocations. The guard reserves at most 40,000 seconds x 0.128 =
+one scheduled bridge, and 2,000 auxiliary invocations including global grants,
+route upgrades, alarms and closes. The guard reserves at most 40,000 seconds x 0.128 =
 5,120 GB-s across routes; 100 granted gate callbacks x 31 seconds x 0.128 adds
 396.8 GB-s. This is **below half of 13,000 GB-s** before the remaining 983.2
 GB-s half-quota margin for dispatch/startup, rollover skew and platform overhead.
-The write bound is 10,000 budget/token writes + 100 gate writes + 1,000 alarm/
+The write bound is 10,000 budget/token writes + 100 gate writes + 2,000 alarm/
 connection metadata writes; `setAlarm` and deletes count as writes. At most two
-reads per admitted event plus 2,000 auxiliary reads is 1,602,000. Both writes
-and reads also stay below half of their Free allowances.
+reads per admitted event plus at most 4,000 auxiliary reads is 1,604,000. Both writes
+and reads also stay below half of their Free allowances. The auxiliary allowance covers
+up to 100 carried pending sockets, up to 5N admitted bridge/phone sockets, and
+100 new daily grants: at N=100 this permits at most 700 closes, 600 deadline/
+expiry alarms and 200 gate/route upgrade calls (1,500 invocations), plus margin.
 
 For N configured routes (at most 100), split byte/write/duration/failure budgets
 evenly. Also reserve 288 daily request-equivalents per scheduled bridge and
-1,200 for auxiliaries. Total JS-event allowance is the smaller of 800,000 and
-`20 x (50,000 - 1,200 - 288 x N)`, then divided among routes. Thus planned
+2,000 for auxiliaries. Total JS-event allowance is the smaller of 800,000 and
+`20 x (50,000 - 2,000 - 288 x N)`, then divided among routes. Thus planned
 compute requests remain **at or below 50,000/day for every allowed N**. A
 regression checks the arithmetic for 1, 2, 16 and 100 routes. The bridge is
 trusted to follow its 15-second cadence; auto-response cannot enforce that

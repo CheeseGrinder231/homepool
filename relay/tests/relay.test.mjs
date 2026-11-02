@@ -508,11 +508,11 @@ test("Free plan billed-request allowance includes every configured bridge auto-r
       ),
     });
     assert.ok(
-      (limits.dailyMessages * count) / 20 + (count * 5760) / 20 + 1200 <= 50000,
+      (limits.dailyMessages * count) / 20 + (count * 5760) / 20 + 2000 <= 50000,
     );
   }
   assert.ok(defaults.dailyBytes > 2 * 1024 ** 3);
-  assert.ok(defaults.dailyWrites + 1100 <= 50000);
+  assert.ok(defaults.dailyWrites + 2100 <= 50000);
   assert.ok(
     (defaults.dailyDurationMs / 1000) * 0.128 + 100 * 31 * 0.128 <= 6500,
   );

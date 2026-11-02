@@ -78,7 +78,7 @@ export function routeLimits(env) {
     dailyMessages: Math.floor(
       Math.min(
         defaults.dailyMessages,
-        (50000 - 1200 - count * AUTO_REQUESTS_PER_ROUTE) * 20,
+        (50000 - 2000 - count * AUTO_REQUESTS_PER_ROUTE) * 20,
       ) / count,
     ),
   };
