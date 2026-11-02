@@ -30,6 +30,9 @@ signing S3 requests in the browser.
 - The hub opens no network listener. It reaches remote members over existing SSH access, so remote members must accept SSH from the hub.
 - Structure checks from the first commit: layers point one way, no dependency cycles, no machine-specific data in code.
 
+The outbound [home bridge](docs/bridge.md) keeps consumer credentials at home
+while serving encrypted remote image sessions through the relay.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

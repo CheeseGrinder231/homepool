@@ -1,0 +1,20 @@
+[package]
+name = "homepool-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[dependencies]
+homepool-protocol = { version = "0.1.0", path = "../homepool-protocol" }
+homepool-adapter-s3 = { version = "0.1.0", path = "../adapters/homepool-adapter-s3" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting"] }
+getrandom = "0.3"
+snow = "=0.10.0"
+url = "2.5"
+rustix = { version = "1.1", features = ["fs"] }
+tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+[lints]
+workspace = true

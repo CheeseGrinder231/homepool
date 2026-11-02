@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/homepool-core", "crates/homepool-cli", "crates/adapters/homepool-adapter-docker", "crates/adapters/homepool-adapter-garage", "xtask", "crates/homepool-protocol"]
+members = ["crates/homepool-core", "crates/homepool-cli", "crates/adapters/homepool-adapter-docker", "crates/adapters/homepool-adapter-garage", "xtask", "crates/homepool-protocol", "crates/adapters/homepool-adapter-s3", "crates/homepool-bridge"]
 resolver = "3"
 
 [workspace.package]
