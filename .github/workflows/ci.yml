@@ -113,7 +113,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install 1.97.1 --profile minimal
       - run: cargo build -p homepool-protocol --example endpoint --locked
-      - run: node --test web/protocol/tests/*.test.mjs
+      - run: node --test web/protocol/tests/*.test.mjs relay/tests/*.test.mjs
         env:
           CARGO_TARGET_DIR: target
           TMPDIR: ${{ runner.temp }}

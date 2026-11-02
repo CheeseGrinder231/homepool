@@ -122,10 +122,12 @@ message without the caller's no-progress deadline or connection closure.
 
 Every post-admission binary message, including phone messages, has a six-byte
 header: version `1`, kind byte, unsigned 32-bit big-endian session ID. Kinds:
-`0=data`, `1=open`, `2=close`, `3=error`. Session IDs are nonzero, relay assigned,
+`0=data`, `1=open`, `2=close`, `3=error`, `4=token-set`, `5=token-remove`,
+`8=ack` (6/7 are unused). Data/open/close/error session IDs are nonzero, relay assigned,
 and scoped to one bridge connection. They are never device identities. Never
 reuse an ID while the bridge connection exists; reconnect before exhaustion.
-Controls contain exactly the header, with no content or human-readable reason.
+Close/error contain exactly the header, with no human-readable reason.
+Open has a four-byte unsigned big-endian token binding after the header.
 Data contains one opaque Noise message, up to 65,535 bytes. Relay cap: 65,541.
 
 The relay sends `open` before a phone's first data. It overwrites/checks the
@@ -141,7 +143,7 @@ URL parameter or logged. The relay forwards nothing until admission succeeds.
 Tokens admit relay use only. Token hashes and invitation/device binding are
 bridge/relay policy. Every reconnect sends admission again.
 
-## Clarifications and open design questions
+## Relay-level controls
 
 The type numbers, positional field encoding, bounds, pagination response,
 request correlation, relay ID lifetime, admission layout and credit record above
@@ -149,19 +151,77 @@ fill omissions in #50; they do not add operations or change either Noise pattern
 No aggregate page can exceed the plaintext cap even if all individual fields fit.
 The page must reduce its item count when long keys would exceed that cap.
 
-Three larger omissions remain for the parent to resolve before slice 2:
+Session zero is relay-level and is forbidden for data/open/close/error/ack.
+Token controls are accepted only from the admitted bridge. All integers below
+are unsigned big-endian; fixed payload sizes exclude the six-byte header.
 
-1. #50 needs the bridge to set/remove token hashes at the relay, but its specified
-   open/close/error controls carry no content. This slice deliberately does not
-   invent a privileged token-management channel or overload ciphertext data.
-2. The bridge needs relay-level ping/pong even with zero phones. The encrypted
-   phone ping here cannot satisfy that. Decide a bridge/relay keepalive control
-   separately from Noise session pings; do not send storage operations on it.
+| Kind | Payload | Bytes |
+| --- | --- | --- |
+| token-set (4) | SHA-256 token hash (32), class (u8: 0 invitation, 1 device), binding (u32), expiry (u64 Unix seconds; 0 means none) | 45 |
+| token-remove (5) | binding (u32) | 4 |
+| ack (8), nonzero session ID | cumulative data-envelope bytes received on this session (u64) | 8 |
 
-3. `open` currently identifies only a session. The bridge also needs the admitted
-   token binding to select an invitation/PSK and enforce its used/expiry rules.
-   The protocol intentionally adds no unapproved metadata channel; slice 2 must
-   resolve this alongside token registration. Session IDs alone cannot supply it.
+The relay stores only token hashes in Durable Object storage, never mints tokens,
+and closes all sessions admitted with a removed binding. Open carries the binding
+of the admitting token; only the bridge assigns its meaning and permissions.
+After binary admission, the bridge sends the exact TEXT frame
+`homepool/1/bridge-ping` every 15 seconds; hibernation auto-response returns the
+exact TEXT frame `homepool/1/bridge-pong`. The bridge allows one outstanding ping,
+requires its pong within 10 seconds, and closes/reconnects with backoff and
+jitter when late. A pong proves only that the relay connection responds: never
+bridge admission, token registration persistence, end-to-end identity or storage
+availability. It carries no storage operation and wakes no DO handler.
+
+The auto-response API applies to all sockets attached to the route, including
+pending/phone sockets. The exact fixed-string echo is a non-authoritative
+liveness exception outside JS admission/rate/budget handling. A pending socket
+still needs binary admission before its deadline and cannot forward data;
+matching text cannot install tokens, replace a bridge or acquire a session.
+Other text frames are rejected. Scheduled keepalive traffic is included
+conservatively in the request allowance; arbitrary echo flooding cannot be
+bounded by JS without defeating zero-wakeup auto-response.
+
+Phones send **no idle pings**. An idle phone may lose its socket silently; on
+the next user action it reconnects lazily as needed, sends fresh admission and
+completes a fresh Noise handshake. On page visibility return, treat the old
+transport as stale and reconnect with fresh admission and Noise.
+Never resume old transport counters. Only while an operation is outstanding
+may a phone send the encrypted application `ping` every 15 seconds, with a
+10-second pong deadline. A late pong interrupts the operation and reconnects;
+use `put-status` to resolve uncertain uploads. No-progress deadlines still
+require file bytes/credits, so ping does not extend a stalled transfer. An idle
+phone does not send the bridge's text keepalive. Phone activity/visibility UI
+and bridge reconnect loops are contracts for the subsequent slices.
+The codec accepts the entire u64 expiry range (JavaScript uses BigInt), without
+rounding through a JavaScript Number. Shared exact vectors are in
+`protocol/relay-vectors.json`, including both classes and maximum integer values.
+
+ACK is endpoint-to-relay only: a phone acknowledges its assigned session, and
+the bridge acknowledges each session independently. Each direction starts at
+zero on open and counts the entire forwarded data envelope, including its
+six-byte header (Noise handshake messages count too). ACK when at least
+64 KiB is unacknowledged, or flush once after a file/handshake burst or before
+closing. Individual small keepalives do not trigger an idle-flush ACK.
+Duplicate ACKs are idempotent; decreasing totals or totals beyond bytes forwarded close the session.
+Controls never count toward the data window and are rate-limited separately.
+
+Before every data send the relay reserves `forwarded - acked + envelope length`.
+If that exceeds RELAY_WINDOW (1 MiB), it sends no data and errors/closes that
+session. It never queues the excess. The shared bridge's aggregate data bound
+is session cap times window (four sessions: 4 MiB). Closed sessions keep their
+slot while bridge-bound bytes remain unacknowledged; the bridge must ACK them
+even if close/error follows the data. These bounded reservations survive
+hibernation and cannot allocate new sessions. Application credit windows
+must be at most half RELAY_WINDOW (512 KiB), including all schema/Noise/envelope
+overhead, to leave headroom for ACK scheduling. The integration tests use eight
+60 KiB chunks per burst (492,032 envelope bytes) and flush at transfer-burst
+boundaries. Threshold plus application window is 576 KiB, below the 1 MiB relay
+window. Operation-only encrypted ping/pong traffic uses the same threshold.
+A 24-hour regression sends only bridge text keepalive and verifies zero JS
+wakeups, reads, writes, alarms or phone traffic. Binary controls are fixed-size
+and separately capped; ACKs cannot
+allocate stale sessions or select another phone. The relay trusts cumulative
+receipt claims only for flow control, never for identity or storage permission.
 
 ## Evidence and limits
 
@@ -185,7 +245,19 @@ with `CARGO_TARGET_DIR` set to the same build directory. The process test builds
 the endpoint offline; fetch/build dependencies first. Existing page tests remain
 under `web/images/tests`. There are no npm dependencies or build step.
 
-Unproven here: this implementation on either target phone; wrapped-key reload;
-real WebSockets/relay and its budgets; live enrollment/revocation/durable journal;
+Unproven here: this implementation on either target phone; browser persistence of wrapped keys;
+real Cloudflare deployment/billing; live enrollment/revocation/durable journal;
 S3/storage behavior; browser backgrounding and memory; encrypted 50 MB phone
 transfers or real-world throughput. These require later slices and device runs.
+
+The #52 regressions preserve leading U+FEFF in text fields (UTF-8 decoding does
+not treat it as a removable BOM). Shared tests cover U+FEFF-only names, leading
+U+FEFF cursors, non-ASCII names and consistent text refusals. Live transfer tests
+reject duplicate/skipped indices and wrong end counts. JavaScript tests exercise
+both cipher directions at nonce 2^64-2 and the reserved 2^64-1, plus both session
+patterns with a non-extractable private key restored by `unwrapKey`.
+
+Slice 2's Worker and tests are under `relay/`. Its in-memory harness and pinned
+local workerd runner both move an encrypted, interleaved 10 MiB upload/download
+through the actual relay code. See [relay notes](../relay/README.md) for limits,
+hibernation cost arithmetic, exact local commands and remaining deployment gaps.

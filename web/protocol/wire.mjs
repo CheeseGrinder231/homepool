@@ -1,7 +1,7 @@
 import schema from "./schema.mjs";
 import { concat } from "./noise.mjs";
 const enc = new TextEncoder(),
-  dec = new TextDecoder("utf-8", { fatal: true });
+  dec = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const bounds = {
   length: 2 ** 53 - 1,
   count: 0xffffffff,
@@ -158,33 +158,87 @@ export function decode(b) {
   if (at !== b.length) throw Error("trailing");
   return out;
 }
-// A fixed 6-byte relay header, including on phones. Control has no content.
+// Relay controls have fixed positional payloads; session zero is privileged.
+const kinds = [
+  "data",
+  "open",
+  "close",
+  "error",
+  "token-set",
+  "token-remove",
+  null, // Kinds 6/7 retired: bridge keepalive uses fixed text auto-response.
+  null,
+  "ack",
+];
 export function envelope(kind, session, data = new Uint8Array()) {
+  const k = kinds.indexOf(kind);
+  const sizes = [null, 4, 0, 0, 45, 4, null, null, 8];
   if (
-    !["data", "open", "close", "error"].includes(kind) ||
+    k < 0 ||
+    !kinds[k] ||
     !Number.isInteger(session) ||
-    session < 1 ||
+    session < 0 ||
     session > 0xffffffff ||
     !(data instanceof Uint8Array) ||
     data.length > 65535 ||
-    (kind !== "data" && data.length)
+    (k >= 4 && k <= 5 ? session !== 0 : session === 0) ||
+    (k !== 0 && data.length !== sizes[k]) ||
+    (k === 4 && data[32] > 1)
   )
     throw Error("envelope");
-  return concat(
-    new Uint8Array([1, ["data", "open", "close", "error"].indexOf(kind)]),
-    number(session, 4),
-    data,
-  );
+  return concat(new Uint8Array([1, k]), number(session, 4), data);
 }
 export function unwrap(b) {
-  if (b.length < 6 || b.length > 65541 || b[0] !== 1 || b[1] > 3)
+  if (
+    !(b instanceof Uint8Array) ||
+    b.length < 6 ||
+    b.length > 65541 ||
+    b[0] !== 1
+  )
     throw Error("envelope");
-  const kind = ["data", "open", "close", "error"][b[1]],
+  const kind = kinds[b[1]],
     session = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(2),
     data = b.slice(6);
   envelope(kind, session, data);
   return { kind, session, data };
 }
+export function tokenSet(hash, tokenClass, binding, expiry = 0n) {
+  if (
+    !(hash instanceof Uint8Array) ||
+    hash.length !== 32 ||
+    ![0, 1].includes(tokenClass) ||
+    !Number.isInteger(binding) ||
+    binding < 0 ||
+    binding > 0xffffffff ||
+    typeof expiry !== "bigint" ||
+    expiry < 0n ||
+    expiry > 0xffffffffffffffffn
+  )
+    throw Error("token-set");
+  return envelope(
+    "token-set",
+    0,
+    concat(
+      hash,
+      new Uint8Array([tokenClass]),
+      number(binding, 4),
+      number(expiry, 8),
+    ),
+  );
+}
+export function ack(session, received) {
+  if (
+    typeof received !== "bigint" ||
+    received < 0n ||
+    received > 0xffffffffffffffffn
+  )
+    throw Error("ack");
+  return envelope("ack", session, number(received, 8));
+}
+export const bindingBytes = (binding) => {
+  valid("count", binding);
+  return number(binding, 4);
+};
 export function admission(role, token) {
   if (!["phone", "bridge"].includes(role)) throw Error("role");
   valid("token", token);

@@ -187,3 +187,53 @@ fn transfer_end_and_schema_refusals() {
     assert!(wire::envelope(1, 1, b"content").is_err());
     assert!(wire::read_admission(&[1, 2]).is_err());
 }
+
+#[test]
+fn shared_relay_and_unicode_vectors() {
+    let cases: Value =
+        serde_json::from_str(include_str!("../../../protocol/relay-vectors.json")).unwrap();
+    for v in cases["envelopes"].as_array().unwrap() {
+        let b = unhex(v["hex"].as_str().unwrap());
+        let (k, s, d) = wire::unwrap(&b).unwrap();
+        assert_eq!(s, v["session"].as_u64().unwrap() as u32);
+        assert_eq!(d, unhex(v["data"].as_str().unwrap()));
+        assert_eq!(wire::envelope(k, s, d).unwrap(), b);
+    }
+    for b in cases["decodeRefuse"].as_array().unwrap() {
+        assert!(wire::decode(&unhex(b.as_str().unwrap())).is_err());
+    }
+    for m in cases["unicode"].as_array().unwrap() {
+        assert_eq!(wire::decode(&wire::encode(m).unwrap()).unwrap(), *m);
+    }
+    for m in cases["refuse"].as_array().unwrap() {
+        assert!(wire::encode(m).is_err());
+    }
+    for b in cases["invalid"].as_array().unwrap() {
+        assert!(wire::unwrap(&unhex(b.as_str().unwrap())).is_err());
+    }
+}
+
+#[test]
+fn live_transfer_order_and_count() {
+    let id = "01".repeat(16);
+    for fault in 0..3 {
+        let mut t = wire::Transfer::new(id.clone(), 2).unwrap();
+        t.accept(&json!({"type":"chunk","id":id,"index":0,"data":[1]}))
+            .unwrap();
+        if fault == 2 {
+            t.accept(&json!({"type":"chunk","id":id,"index":1,"data":[2]}))
+                .unwrap();
+            assert!(
+                t.accept(&json!({"type":"get-end","id":id,"length":2,"count":1}))
+                    .is_err()
+            );
+        } else {
+            assert!(
+                t.accept(
+                    &json!({"type":"chunk","id":id,"index":if fault == 0 {0} else {2},"data":[2]})
+                )
+                .is_err()
+            );
+        }
+    }
+}

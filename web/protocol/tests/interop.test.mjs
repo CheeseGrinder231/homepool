@@ -12,6 +12,9 @@ import {
   unwrap,
   admission,
   Transfer,
+  tokenSet,
+  ack,
+  bindingBytes,
 } from "../wire.mjs";
 import schema from "../schema.mjs";
 const hex = (b) => Buffer.from(b).toString("hex"),
@@ -197,7 +200,11 @@ test("shared schema and all field vectors, refusals, envelopes and admission", a
     await assert.rejects(rpc({ op: "decode", data: hex(b) }));
   }
   for (const kind of ["open", "data", "close", "error"]) {
-    const b = envelope(kind, 1);
+    const b = envelope(
+      kind,
+      1,
+      kind === "open" ? new Uint8Array(4) : new Uint8Array(),
+    );
     assert.equal(await rpc({ op: "envelope", data: hex(b) }), hex(b));
   }
   for (const role of ["phone", "bridge"]) {
@@ -282,4 +289,65 @@ test("two phones, one Rust bridge, interleaved 10 MiB put/get through memory rel
   const uploaded = uploadHash.digest("hex");
   assert.equal(uploaded, storedHash.digest("hex"));
   assert.equal(downloadHash.digest("hex"), uploaded);
+});
+
+test("shared relay control and Unicode vectors", async (t) => {
+  const rpc = endpoint(t);
+  const cases = JSON.parse(
+    await readFile(
+      new URL("../../../protocol/relay-vectors.json", import.meta.url),
+    ),
+  );
+  for (const v of cases.envelopes) {
+    const b = unhex(v.hex);
+    assert.equal(hex(envelope(v.kind, v.session, unhex(v.data))), v.hex);
+    assert.deepEqual(unwrap(b), {
+      kind: v.kind,
+      session: v.session,
+      data: unhex(v.data),
+    });
+    assert.equal(await rpc({ op: "envelope", data: v.hex }), v.hex);
+  }
+  for (const v of cases.envelopes.filter((v) => v.kind === "token-set")) {
+    const d = unhex(v.data),
+      view = new DataView(d.buffer);
+    assert.equal(
+      hex(
+        tokenSet(
+          d.slice(0, 32),
+          d[32],
+          view.getUint32(33),
+          view.getBigUint64(37),
+        ),
+      ),
+      v.hex,
+    );
+  }
+  for (const v of cases.envelopes.filter((v) => v.kind === "ack"))
+    assert.equal(
+      hex(ack(v.session, new DataView(unhex(v.data).buffer).getBigUint64(0))),
+      v.hex,
+    );
+  assert.throws(() => ack(1, 0x10000000000000000n));
+  assert.equal(hex(bindingBytes(0xffffffff)), "ffffffff");
+  assert.throws(() => bindingBytes(-1));
+  assert.throws(() => tokenSet(new Uint8Array(32), 2, 0));
+  for (const b of cases.decodeRefuse) {
+    assert.throws(() => decode(unhex(b)));
+    await assert.rejects(rpc({ op: "decode", data: b }));
+  }
+  for (const m of cases.unicode) {
+    const b = encode(m);
+    assert.deepEqual(decode(b), m);
+    assert.deepEqual(await rpc({ op: "decode", data: hex(b) }), m);
+    assert.equal(await rpc({ op: "encode", message: m }), hex(b));
+  }
+  for (const m of cases.refuse) {
+    assert.throws(() => encode(m));
+    await assert.rejects(rpc({ op: "encode", message: m }));
+  }
+  for (const hex of cases.invalid) {
+    assert.throws(() => unwrap(unhex(hex)));
+    await assert.rejects(rpc({ op: "envelope", data: hex }));
+  }
 });
