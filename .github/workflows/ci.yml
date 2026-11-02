@@ -103,3 +103,17 @@ jobs:
         with:
           rust-version: '1.97.1'
           command: check licenses bans sources
+
+  protocol:
+    name: protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.97.1 --profile minimal
+      - run: cargo build -p homepool-protocol --example endpoint --locked
+      - run: node --test web/protocol/tests/*.test.mjs
+        env:
+          CARGO_TARGET_DIR: target
+          TMPDIR: ${{ runner.temp }}
