@@ -93,7 +93,9 @@ home as well (`homepool-bridge revoke CONFIG ID`).
 One relay session and one Noise session per phone, opened on demand: when the
 library opens, on a user action, or for queued work. There are no idle pings.
 An idle session is closed after three minutes, and at once when the page is
-hidden, which frees the relay's session slot. When the page becomes visible
+hidden, which frees the relay's session slot. Each connection is one of the
+relay's 1,000 daily upgrades, shared with the bridge's reconnects, and one or
+two bursts of its daily duration budget ([cost](../relay/README.md)). When the page becomes visible
 again during a transfer, the page sends one encrypted ping with a 5-second
 deadline; a dead session interrupts the transfer, which then recovers below.
 While an operation is outstanding, the page pings every 15 seconds with a

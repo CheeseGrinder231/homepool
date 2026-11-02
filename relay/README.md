@@ -62,8 +62,8 @@ DO storage before forwarding or granting an upgrade. Storage failures fail close
 | Daily incoming binary bytes, shared across routes | 3 GiB | Close offender / reject upgrades; UTC day reset |
 | Daily JS events, shared across routes | At most 800,000; reduced for configured bridge count | Close offender / reject upgrades; UTC day reset |
 | Daily failed upgrades/admissions, shared across routes | 100 | Refuse further upgrades; UTC day reset |
-| Conservative route handler duration, shared across routes | 40,000,000 ms per UTC day (5,120 GB-s) | Refuse work / close sockets; UTC day reset |
-| Global upgrade grants | 20 per second, 100 per UTC day | HTTP 429; next second or UTC day reset |
+| Conservative route handler duration, shared across routes | 16,000,000 ms per UTC day (2,048 GB-s) | Refuse work / close sockets; UTC day reset |
+| Global upgrade grants | 20 per second, 1,000 per UTC day | HTTP 429; next second or UTC day reset |
 | Budget/token row writes, shared across routes | 10,000 per UTC day | Close offender / reject upgrades; UTC day reset |
 | Registered hashes per route | 128 | Close bridge on overflow; reconnect and remove unused bindings |
 | Operator kill switch | `KILL_SWITCH` other than literal `false` | Reject upgrades and close sockets on the next JS event; fixed-text auto-response alone is not a kill-switch check |
@@ -198,26 +198,45 @@ physical-device result is claimed.
 | Steady idle keepalive | ≤288 | 0 handler duration | 0 | 0 |
 | Idle + 1 GiB, excluding setup | ≤1,838 | ≤39.68 at 10 ms/message | ≤500 | ≤2,300 |
 | Idle + 2 GiB, excluding setup | ≤3,388 | ≤79.36 at 10 ms/message | ≤1,000 | ≤4,600 |
-| Maximum admitted work with auxiliary allowance | ≤42,288 | 5,516.8 handler-reservation bound | ≤12,100 | ≤1,604,000 |
+| Maximum admitted work with auxiliary allowance | ≤46,288 | 6,016 handler-reservation bound | ≤17,000 | ≤1,612,000 |
 
-The worst row uses 800,000 JS events / 20 = 40,000 request-equivalents, 288 for
-one scheduled bridge, and 2,000 auxiliary invocations including global grants,
-route upgrades, alarms and closes. The guard reserves at most 40,000 seconds x 0.128 =
-5,120 GB-s across routes; 100 granted gate callbacks x 31 seconds x 0.128 adds
-396.8 GB-s. This is **below half of 13,000 GB-s** before the remaining 983.2
-GB-s half-quota margin for dispatch/startup, rollover skew and platform overhead.
-The write bound is 10,000 budget/token writes + 100 gate writes + 2,000 alarm/
+Each granted upgrade costs one Worker request, one gate Durable Object call
+and one route Durable Object call. The worst row uses 800,000 JS events / 20 =
+40,000 request-equivalents, 288 for one scheduled bridge, and 6,000 auxiliary
+invocations: gate calls, route upgrades, alarms and closes. The guard reserves
+at most 16,000 seconds x 0.128 = 2,048 GB-s across routes; 1,000 granted gate
+callbacks x 31 seconds x 0.128 adds 3,968 GB-s. Rollover skew adds at most
+31 seconds x 0.128 = 3.968 GB-s per active route, 396.8 GB-s at N=100, for
+6,412.8 GB-s: **below half of 13,000 GB-s**, with 87.2 GB-s (480.0 at N=1) of
+half-quota margin for dispatch/startup and platform overhead.
+The write bound is 10,000 budget/token writes + 1,000 gate writes + 6,000 alarm/
 connection metadata writes; `setAlarm` and deletes count as writes. At most two
-reads per admitted event plus at most 4,000 auxiliary reads is 1,604,000. Both writes
-and reads also stay below half of their Free allowances. The auxiliary allowance covers
-up to 100 carried pending sockets, up to 5N admitted bridge/phone sockets, and
-100 new daily grants: at N=100 this permits at most 700 closes, 600 deadline/
-expiry alarms and 200 gate/route upgrade calls (1,500 invocations), plus margin.
+reads per admitted event plus at most 12,000 auxiliary reads is 1,612,000. Both
+writes and reads also stay below half of their Free allowances. The auxiliary
+allowance covers up to 100 carried pending sockets, up to 5N admitted
+bridge/phone sockets, and 1,000 new daily grants, each firing at most one alarm
+and one close: at N=100 this permits at most 1,600 closes, 1,500 deadline/expiry
+alarms and 2,000 gate/route upgrade calls (5,100 invocations), plus margin.
+
+Workers Free also allows 100,000 Worker requests/day. Admitted upgrades use at
+most 1,000 of them; the page costs at most 12 per load (fewer when cached), so
+1,000 page loads and the full upgrade allowance total 13,000, **13% of the
+Free allowance**. The relay does not count page requests.
+
+The daily upgrade allowance is sized so phones reconnecting on every
+visibility return and bridge reconnects do not exhaust it by midday. Under the
+conservative 31-second charge, the duration guard binds first: every burst of
+route events after an idle gap charges up to 31 seconds, so 16,000 seconds
+covers at least 516 such bursts a day across routes, less the time spent
+actively transferring. A phone visit is one or two bursts (opening, and closing
+if it idles out). When the guard is spent, the relay refuses work until UTC
+midnight. Real billed duration is expected to be far lower; the guard trades
+capacity for a provable bound.
 
 For N configured routes (at most 100), split byte/write/duration/failure budgets
 evenly. Also reserve 288 daily request-equivalents per scheduled bridge and
-2,000 for auxiliaries. Total JS-event allowance is the smaller of 800,000 and
-`20 x (50,000 - 2,000 - 288 x N)`, then divided among routes. Thus planned
+6,000 for auxiliaries. Total JS-event allowance is the smaller of 800,000 and
+`20 x (50,000 - 6,000 - 288 x N)`, then divided among routes. Thus planned
 compute requests remain **at or below 50,000/day for every allowed N**. A
 regression checks the arithmetic for 1, 2, 16 and 100 routes. The bridge is
 trusted to follow its 15-second cadence; auto-response cannot enforce that

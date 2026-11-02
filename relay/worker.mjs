@@ -99,7 +99,7 @@ export default {
     }
     if (
       !Array.isArray(routes) ||
-      routes.length > defaults.dailyUpgrades ||
+      routes.length > defaults.maxRoutes ||
       routes.some(
         (route) =>
           typeof route !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(route),
