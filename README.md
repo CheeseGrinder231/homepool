@@ -31,7 +31,9 @@ signing S3 requests in the browser.
 - Structure checks from the first commit: layers point one way, no dependency cycles, no machine-specific data in code.
 
 The outbound [home bridge](docs/bridge.md) keeps consumer credentials at home
-while serving encrypted remote image sessions through the relay.
+while serving encrypted remote image sessions through the relay. The
+[remote image page](docs/remote-page.md), served by the relay, pairs a phone
+with home and uses those sessions from anywhere.
 
 ## License
 

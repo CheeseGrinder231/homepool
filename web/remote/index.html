@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Homepool photos</title>
+<link rel="stylesheet" href="/images/style.css">
+<link rel="stylesheet" href="/remote/remote.css">
+<link rel="icon" href="/remote/icon.png">
+<script type="module" src="/remote/app.mjs"></script>
+</head>
+<body>
+<header class="top">
+  <h1>Homepool photos</h1>
+  <div class="top-side">
+    <span id="status" class="status" hidden></span>
+    <button id="refresh" type="button" class="quiet" hidden>Refresh</button>
+  </div>
+</header>
+
+<main>
+  <div id="alert" class="alert" role="alert" hidden>
+    <span id="alert-text"></span>
+    <span class="alert-actions">
+      <button id="alert-action" type="button" class="quiet" hidden></button>
+      <button id="alert-close" type="button" class="quiet">Dismiss</button>
+    </span>
+  </div>
+
+  <section id="starting" class="panel quiet-panel">
+    <p>Loading…</p>
+  </section>
+
+  <section id="unsupported" class="panel" hidden>
+    <h2>This browser can't be used</h2>
+    <p id="unsupported-text">This page needs a newer browser. Update Safari (iOS 17 or later) or Firefox, then open the page again.</p>
+  </section>
+
+  <section id="welcome" class="panel" hidden>
+    <p id="welcome-note" class="welcome-note" hidden></p>
+    <h2>Pair this phone</h2>
+    <p>Pair once, and this page works from anywhere: on home Wi-Fi or on mobile data.</p>
+    <ol class="steps">
+      <li>At home, show a pairing code on the computer that runs your pool.</li>
+      <li>Point this phone's camera at the code and open the link.</li>
+      <li>Wait a few seconds until this page says <strong>Paired</strong>.</li>
+    </ol>
+    <p class="small">A code works for 10 minutes and pairs one phone.</p>
+    <details class="paste">
+      <summary>No camera? Paste the link instead</summary>
+      <form id="paste-form">
+        <label for="paste-text">Pairing link</label>
+        <textarea id="paste-text" rows="3" autocomplete="off" autocapitalize="off"
+          autocorrect="off" spellcheck="false" required></textarea>
+        <button type="submit" class="primary">Pair</button>
+      </form>
+    </details>
+    <p id="welcome-retry-row" class="welcome-retry" hidden>
+      <button id="welcome-retry" type="button" class="quiet">Check again</button>
+    </p>
+  </section>
+
+  <section id="pairing" class="panel" hidden aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <h2>Pairing this phone…</h2>
+    <ol class="progress-steps">
+      <li id="step-connect">Connecting to home</li>
+      <li id="step-check">Checking the code</li>
+      <li id="step-save">Saving the pairing</li>
+    </ol>
+    <p class="small">Keep this page open. It takes a few seconds.</p>
+  </section>
+
+  <section id="paired" class="panel success" hidden>
+    <div class="check" aria-hidden="true"></div>
+    <h2>Paired</h2>
+    <p>This phone can now add and view photos in your pool, from anywhere.</p>
+    <button id="paired-continue" type="button" class="primary wide">Show my photos</button>
+    <details class="fingerprint">
+      <summary>Check this phone at home (optional)</summary>
+      <p>The list of paired phones at home shows this same code for this phone:</p>
+      <p id="fingerprint" class="code"></p>
+    </details>
+  </section>
+
+  <section id="replace" class="panel" hidden>
+    <h2>This phone is already paired</h2>
+    <p>You opened a new pairing code. Keep using the current pairing, or pair again with the new code?</p>
+    <div class="choices">
+      <button id="replace-keep" type="button" class="primary">Keep the current pairing</button>
+      <button id="replace-accept" type="button">Pair again with the new code</button>
+    </div>
+  </section>
+
+  <section id="library" hidden>
+    <div class="actions">
+      <label class="primary button">
+        Add photos
+        <input id="file-input" type="file" accept="image/*" multiple>
+      </label>
+      <p class="note"><strong>One copy, not a backup.</strong>
+        The pool keeps a single copy of what you add. Keep the originals on your phone.</p>
+    </div>
+    <p id="keep-open" class="keep-open" hidden>Keep this page open until the transfer finishes. If you switch apps, it may stop.</p>
+    <ul id="uploads" class="uploads" aria-live="polite"></ul>
+    <p id="summary" class="summary" aria-live="polite"></p>
+    <p id="empty" class="empty" hidden>No photos yet. Tap <strong>Add photos</strong>, and they show up here on every paired phone.</p>
+    <ul id="grid" class="grid"></ul>
+    <p class="footer"><button id="forget" type="button" class="quiet">Forget this phone</button></p>
+  </section>
+</main>
+
+<dialog id="viewer" class="viewer" aria-labelledby="viewer-name">
+  <div class="viewer-bar">
+    <button id="viewer-close" type="button" class="quiet" autofocus>Close</button>
+    <button id="viewer-download" type="button" class="primary">Download</button>
+  </div>
+  <div class="viewer-stage">
+    <img id="viewer-image" alt="" decoding="async" hidden>
+    <div id="viewer-loading" class="file-card" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="viewer-loading-text">Loading…</p>
+      <progress id="viewer-progress" max="1" value="0"></progress>
+    </div>
+    <div id="viewer-fallback" class="file-card" hidden>
+      <span id="viewer-kind" class="kind"></span>
+      <p id="viewer-fallback-text"></p>
+    </div>
+  </div>
+  <p id="viewer-name" class="viewer-name"></p>
+  <p id="viewer-meta" class="viewer-meta"></p>
+</dialog>
+
+<template id="tile-template">
+  <li class="tile">
+    <button type="button" class="tile-button">
+      <img alt="" decoding="async">
+      <span class="kind" hidden></span>
+      <span class="tile-name"></span>
+    </button>
+  </li>
+</template>
+
+<template id="upload-template">
+  <li class="upload">
+    <img class="upload-thumb" alt="">
+    <div class="upload-body">
+      <span class="upload-name"></span>
+      <span class="upload-status"></span>
+      <progress class="upload-progress" max="1" value="0"></progress>
+    </div>
+    <span class="upload-buttons">
+      <button type="button" class="quiet upload-action" hidden></button>
+      <button type="button" class="quiet upload-dismiss" hidden>Dismiss</button>
+    </span>
+  </li>
+</template>
+</body>
+</html>

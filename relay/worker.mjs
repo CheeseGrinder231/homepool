@@ -1,6 +1,63 @@
 import { Relay } from "./route.mjs";
 import { defaults } from "./limits.mjs";
 export { Relay };
+// The remote image page, served from the Worker's static assets (`web/`) on
+// the relay's own origin. Only these exact paths are served; everything else
+// falls through to the route handling below.
+export const PAGE = new Map([
+  ["/", "/remote/index.html"],
+  ["/remote/app.mjs", "/remote/app.mjs"],
+  ["/remote/client.mjs", "/remote/client.mjs"],
+  ["/remote/keys.mjs", "/remote/keys.mjs"],
+  ["/remote/model.mjs", "/remote/model.mjs"],
+  ["/remote/remote.css", "/remote/remote.css"],
+  ["/remote/icon.png", "/remote/icon.png"],
+  ["/images/model.mjs", "/images/model.mjs"],
+  ["/images/style.css", "/images/style.css"],
+  ["/protocol/noise.mjs", "/protocol/noise.mjs"],
+  ["/protocol/schema.mjs", "/protocol/schema.mjs"],
+  ["/protocol/wire.mjs", "/protocol/wire.mjs"],
+]);
+const TYPES = {
+  html: "text/html; charset=utf-8",
+  mjs: "text/javascript; charset=utf-8",
+  css: "text/css; charset=utf-8",
+  png: "image/png",
+};
+// connect-src 'self' covers the same-origin wss: relay socket.
+export const PAGE_HEADERS = Object.freeze({
+  "Content-Security-Policy":
+    "default-src 'none'; script-src 'self'; style-src 'self'; " +
+    "img-src 'self' blob:; connect-src 'self'; base-uri 'none'; " +
+    "form-action 'none'; frame-ancestors 'none'",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Resource-Policy": "same-origin",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
+  "X-Robots-Tag": "noindex",
+  "Cache-Control": "no-cache",
+});
+async function page(request, env, path) {
+  if (!["GET", "HEAD"].includes(request.method) || !env.ASSETS)
+    return new Response(null, { status: 404 });
+  const headers = new Headers();
+  const tag = request.headers.get("If-None-Match");
+  if (tag) headers.set("If-None-Match", tag);
+  const asset = await env.ASSETS.fetch(
+    new Request(new URL(path, request.url), { method: request.method, headers }),
+  );
+  if (asset.status !== 200 && asset.status !== 304)
+    return new Response(null, { status: 404 });
+  const out = new Headers(PAGE_HEADERS);
+  out.set("Content-Type", TYPES[path.split(".").pop()]);
+  const etag = asset.headers.get("ETag");
+  if (etag) out.set("ETag", etag);
+  return new Response(asset.status === 304 ? null : asset.body, {
+    status: asset.status,
+    headers: out,
+  });
+}
 // One global coordinator, separate from the per-route objects. No isolate-local gate.
 export class UpgradeGate {
   constructor(ctx, env) {
@@ -32,6 +89,8 @@ export default {
   async fetch(request, env) {
     if (env.KILL_SWITCH !== "false") return new Response(null, { status: 503 });
     const url = new URL(request.url);
+    const asset = url.search ? undefined : PAGE.get(url.pathname);
+    if (asset) return page(request, env, asset);
     let routes;
     try {
       routes = JSON.parse(env.ROUTES);
