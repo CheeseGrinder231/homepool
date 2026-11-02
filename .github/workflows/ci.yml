@@ -67,6 +67,17 @@ jobs:
           cargo test -p homepool-cli --test hub --locked -- --ignored --test-threads=1 --nocapture | tee "$RUNNER_TEMP/hub-engine-tests.log"
           grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$RUNNER_TEMP/hub-engine-tests.log"
 
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: node --version
+      - name: Image page unit tests
+        run: node --test web/images/tests/sigv4.test.mjs web/images/tests/model.test.mjs web/images/tests/site.test.mjs
+
   structure:
     name: structure
     runs-on: ubuntu-latest

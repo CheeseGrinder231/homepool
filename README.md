@@ -18,6 +18,10 @@ and `create-consumer`. They use an existing Garage installation directly, with
 consumer credentials written only to a new private file. **A single-node layout
 keeps a single copy. It is not a backup.**
 
+The [image page](docs/images.md) is a static page for phones that uploads,
+lists, previews and downloads photos in one consumer bucket through Caddy,
+signing S3 requests in the browser.
+
 ## Principles
 
 - The hub knows and decides. It holds no data and runs no workloads.

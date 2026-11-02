@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Homepool images</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:,">
+<script type="module" src="app.mjs"></script>
+</head>
+<body>
+<header class="top">
+  <h1>Homepool images</h1>
+  <button id="refresh" type="button" class="quiet" hidden>Refresh</button>
+</header>
+
+<main>
+  <div id="alert" class="alert" role="alert" hidden>
+    <span id="alert-text"></span>
+    <button id="alert-close" type="button" class="quiet">Dismiss</button>
+  </div>
+
+  <section id="replace" class="panel" hidden>
+    <h2>Replace the key on this phone?</h2>
+    <p>This link carries a different key. Keep the current one unless you expect the change.</p>
+    <p id="replace-detail" class="detail"></p>
+    <div class="choices">
+      <button id="replace-accept" type="button" class="primary">Use the new key</button>
+      <button id="replace-keep" type="button">Keep the current key</button>
+    </div>
+  </section>
+
+  <section id="setup" class="panel" hidden>
+    <h2>Connect this phone</h2>
+    <p>Scan the setup code shown by your pool, or paste the setup link below.
+      The link is the key to your images: keep it to your own devices.</p>
+    <form id="setup-form">
+      <label for="setup-text">Setup link</label>
+      <textarea id="setup-text" rows="3" autocomplete="off" autocapitalize="off"
+        autocorrect="off" spellcheck="false" required></textarea>
+      <button type="submit" class="primary">Connect</button>
+    </form>
+  </section>
+
+  <section id="library" hidden>
+    <div class="actions">
+      <label class="primary button">
+        Add photos
+        <input id="file-input" type="file" accept="image/*" multiple>
+      </label>
+      <p class="note"><strong>One copy, not a backup.</strong>
+        The pool keeps a single copy of what you add. Keep the originals on your phone.</p>
+    </div>
+    <ul id="uploads" class="uploads" aria-live="polite"></ul>
+    <p id="summary" class="summary" aria-live="polite"></p>
+    <p id="empty" class="empty" hidden>No images yet. Add photos and they show up here on both phones.</p>
+    <ul id="grid" class="grid"></ul>
+    <p class="footer"><button id="forget" type="button" class="quiet">Forget this phone</button></p>
+  </section>
+</main>
+
+<dialog id="viewer" class="viewer" aria-labelledby="viewer-name">
+  <div class="viewer-bar">
+    <button id="viewer-close" type="button" class="quiet" autofocus>Close</button>
+    <a id="viewer-download" class="button primary" href="#" download>Download</a>
+  </div>
+  <div class="viewer-stage">
+    <img id="viewer-image" alt="" decoding="async">
+    <div id="viewer-fallback" class="file-card" hidden>
+      <span id="viewer-kind" class="kind"></span>
+      <p id="viewer-fallback-text"></p>
+    </div>
+  </div>
+  <p id="viewer-name" class="viewer-name"></p>
+  <p id="viewer-meta" class="viewer-meta"></p>
+</dialog>
+
+<template id="tile-template">
+  <li class="tile">
+    <button type="button" class="tile-button">
+      <img alt="" decoding="async">
+      <span class="kind" hidden></span>
+      <span class="tile-name"></span>
+    </button>
+  </li>
+</template>
+
+<template id="upload-template">
+  <li class="upload">
+    <img class="upload-thumb" alt="">
+    <div class="upload-body">
+      <span class="upload-name"></span>
+      <span class="upload-status"></span>
+      <progress class="upload-progress" max="1" value="0"></progress>
+    </div>
+    <button type="button" class="quiet upload-retry" hidden>Retry</button>
+  </li>
+</template>
+</body>
+</html>
