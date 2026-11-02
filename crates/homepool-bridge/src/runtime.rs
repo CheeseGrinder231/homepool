@@ -1,3 +1,4 @@
+use crate::settlement::Settlements;
 use crate::{
     peer::Peer,
     settings,
@@ -104,6 +105,7 @@ pub fn run(c: &Config) -> Result<()> {
     let listener = UnixListener::bind("control.sock").map_err(|_| "control")?;
     listener.set_nonblocking(true).map_err(|_| "control")?;
     let mut backoff = 1u64;
+    let mut settlements = Settlements::default();
     loop {
         let config = c.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -114,7 +116,16 @@ pub fn run(c: &Config) -> Result<()> {
             match receiver.try_recv() {
                 Ok(result) => break result,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    control(c, &identity, &mut s, &listener, None, &mut BTreeMap::new())?;
+                    settlements.tick(c, &mut s)?;
+                    control(
+                        c,
+                        &identity,
+                        &mut s,
+                        &listener,
+                        None,
+                        &mut BTreeMap::new(),
+                        &mut settlements,
+                    )?;
                     std::thread::sleep(settings::TICK);
                 }
                 Err(_) => break Err("relay connector".into()),
@@ -124,22 +135,41 @@ pub fn run(c: &Config) -> Result<()> {
             && register(&mut ws, &s).is_ok()
         {
             backoff = 1;
-            let _ = connected(c, &identity, &mut s, &listener, &mut ws);
+            let _ = connected(c, &identity, &mut s, &listener, &mut ws, &mut settlements);
         }
         let jitter = u64::from(state::unhex(&state::random(1)?)?[0]);
         let until = Instant::now() + std::time::Duration::from_millis(backoff * 1000 + jitter);
         while Instant::now() < until {
-            control(c, &identity, &mut s, &listener, None, &mut BTreeMap::new())?;
+            settlements.tick(c, &mut s)?;
+            control(
+                c,
+                &identity,
+                &mut s,
+                &listener,
+                None,
+                &mut BTreeMap::new(),
+                &mut settlements,
+            )?;
             std::thread::sleep(settings::TICK);
         }
         backoff = (backoff * 2).min(60);
     }
 }
-fn retire(ws: &mut Socket, peers: &mut BTreeMap<u32, Peer>, id: u32, notify: bool) -> Result<()> {
-    if let Some(peer) = peers.remove(&id)
-        && peer.received > peer.acked
-    {
-        send(ws, 8, id, &peer.received.to_be_bytes())?;
+fn retire(
+    c: &Config,
+    s: &mut State,
+    settlements: &mut Settlements,
+    ws: &mut Socket,
+    peers: &mut BTreeMap<u32, Peer>,
+    id: u32,
+    notify: bool,
+) -> Result<()> {
+    if let Some(peer) = peers.remove(&id) {
+        let receipt = (peer.received > peer.acked).then_some(peer.received);
+        peer.abandon(c, s, settlements)?;
+        if let Some(receipt) = receipt {
+            send(ws, 8, id, &receipt.to_be_bytes())?;
+        }
     }
     if notify {
         send(ws, 2, id, &[])?;
@@ -152,99 +182,107 @@ fn connected(
     s: &mut State,
     listener: &UnixListener,
     ws: &mut Socket,
+    settlements: &mut Settlements,
 ) -> Result<()> {
     let mut peers = BTreeMap::<u32, Peer>::new();
     let mut ping = Instant::now();
     let mut pending = None::<Instant>;
-    loop {
-        control(c, identity, s, listener, Some(ws), &mut peers)?;
-        if pending.is_some_and(|p| p.elapsed() > settings::PONG) {
-            return Err("relay pong deadline".into());
-        }
-        if pending.is_none() && ping.elapsed() >= settings::PING {
-            ws.send(Message::Text("homepool/1/bridge-ping".into()))
-                .map_err(|_| "ping")?;
-            pending = Some(Instant::now());
-            ping = Instant::now();
-        }
-        let mut closed = vec![];
-        for (&id, peer) in &mut peers {
-            match peer.tick(c, s) {
-                Ok(frames) => {
-                    for frame in frames {
-                        send(ws, 0, id, &frame)?;
+    let result = (|| {
+        loop {
+            settlements.tick(c, s)?;
+            control(c, identity, s, listener, Some(ws), &mut peers, settlements)?;
+            if pending.is_some_and(|p| p.elapsed() > settings::PONG) {
+                return Err("relay pong deadline".into());
+            }
+            if pending.is_none() && ping.elapsed() >= settings::PING {
+                ws.send(Message::Text("homepool/1/bridge-ping".into()))
+                    .map_err(|_| "ping")?;
+                pending = Some(Instant::now());
+                ping = Instant::now();
+            }
+            let mut closed = vec![];
+            for (&id, peer) in &mut peers {
+                match peer.tick(s) {
+                    Ok(frames) => {
+                        for frame in frames {
+                            send(ws, 0, id, &frame)?;
+                        }
                     }
+                    Err(_) => closed.push(id),
                 }
-                Err(_) => closed.push(id),
             }
-        }
-        for id in closed {
-            retire(ws, &mut peers, id, true)?;
-        }
-        match ws.read() {
-            Ok(Message::Text(t)) if t == "homepool/1/bridge-pong" => {
-                pending = None;
+            for id in closed {
+                retire(c, s, settlements, ws, &mut peers, id, true)?;
             }
-            Ok(Message::Binary(b)) => {
-                let (kind, id, data) = wire::unwrap(&b)?;
-                match kind {
-                    1 => {
-                        if peers.len() < settings::SESSIONS && !peers.contains_key(&id) {
-                            let binding =
-                                u32::from_be_bytes(data.try_into().map_err(|_| "binding")?);
-                            match Peer::new(c, s, identity, binding) {
-                                Ok(peer) => {
-                                    peers.insert(id, peer);
+            match ws.read() {
+                Ok(Message::Text(t)) if t == "homepool/1/bridge-pong" => {
+                    pending = None;
+                }
+                Ok(Message::Binary(b)) => {
+                    let (kind, id, data) = wire::unwrap(&b)?;
+                    match kind {
+                        1 => {
+                            if peers.len() < settings::SESSIONS && !peers.contains_key(&id) {
+                                let binding =
+                                    u32::from_be_bytes(data.try_into().map_err(|_| "binding")?);
+                                match Peer::new(c, s, identity, binding) {
+                                    Ok(peer) => {
+                                        peers.insert(id, peer);
+                                    }
+                                    Err(_) => send(ws, 2, id, &[])?,
                                 }
-                                Err(_) => send(ws, 2, id, &[])?,
-                            }
-                        } else {
-                            send(ws, 2, id, &[])?;
-                        }
-                    }
-                    0 => {
-                        let Some(peer) = peers.get_mut(&id) else {
-                            continue;
-                        };
-                        peer.received += b.len() as u64;
-                        let was_authenticated = peer.authenticated();
-                        let result = peer.receive(c, s, data);
-                        // Receipt is independent of Noise authentication; acknowledge before retiring a session.
-                        let flush = peer.flush || !was_authenticated || result.as_ref().is_err();
-                        if peer.received - peer.acked >= 65536 || flush {
-                            send(ws, 8, id, &peer.received.to_be_bytes())?;
-                            peer.acked = peer.received;
-                        }
-                        match result {
-                            Ok(frames) => {
-                                if !was_authenticated {
-                                    register_if_enrolled(ws, s, peer)?;
-                                }
-                                for frame in frames {
-                                    send(ws, 0, id, &frame)?;
-                                }
-                            }
-                            Err(_) => {
-                                peers.remove(&id);
+                            } else {
                                 send(ws, 2, id, &[])?;
                             }
                         }
+                        0 => {
+                            let Some(peer) = peers.get_mut(&id) else {
+                                continue;
+                            };
+                            peer.received += b.len() as u64;
+                            let was_authenticated = peer.authenticated();
+                            let result = peer.receive(c, s, settlements, data);
+                            // Receipt is independent of Noise authentication; acknowledge before retiring a session.
+                            let flush =
+                                peer.flush || !was_authenticated || result.as_ref().is_err();
+                            if peer.received - peer.acked >= 65536 || flush {
+                                send(ws, 8, id, &peer.received.to_be_bytes())?;
+                                peer.acked = peer.received;
+                            }
+                            match result {
+                                Ok(frames) => {
+                                    if !was_authenticated {
+                                        register_if_enrolled(ws, s, peer)?;
+                                    }
+                                    for frame in frames {
+                                        send(ws, 0, id, &frame)?;
+                                    }
+                                }
+                                Err(_) => {
+                                    retire(c, s, settlements, ws, &mut peers, id, true)?;
+                                }
+                            }
+                        }
+                        2 | 3 => {
+                            retire(c, s, settlements, ws, &mut peers, id, false)?;
+                        }
+                        _ => return Err("relay control".into()),
                     }
-                    2 | 3 => {
-                        retire(ws, &mut peers, id, false)?;
-                    }
-                    _ => return Err("relay control".into()),
                 }
+                Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                _ => return Err("relay disconnected".into()),
             }
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-            Err(tungstenite::Error::Io(e))
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            _ => return Err("relay disconnected".into()),
         }
+    })();
+    for peer in peers.into_values() {
+        peer.abandon(c, s, settlements)?;
     }
+    result
 }
 fn register_if_enrolled(ws: &mut Socket, s: &State, peer: &Peer) -> Result<()> {
     if peer.authenticated()
@@ -262,6 +300,7 @@ fn control(
     listener: &UnixListener,
     mut ws: Option<&mut Socket>,
     peers: &mut BTreeMap<u32, Peer>,
+    settlements: &mut Settlements,
 ) -> Result<()> {
     let (mut stream, _) = match listener.accept() {
         Ok(s) => s,
@@ -339,9 +378,11 @@ fn control(
                     .collect::<Vec<_>>();
                 for id in ids {
                     if let Some(ws) = &mut ws {
-                        retire(ws, peers, id, true)?;
+                        retire(c, s, settlements, ws, peers, id, true)?;
                     } else {
-                        peers.remove(&id);
+                        if let Some(peer) = peers.remove(&id) {
+                            peer.abandon(c, s, settlements)?;
+                        }
                     }
                 }
                 if let Some(ws) = &mut ws {

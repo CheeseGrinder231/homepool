@@ -1,3 +1,4 @@
+use crate::settlement::Settlements;
 use crate::{
     operations::{self, Download, Job, JobResult, Upload},
     settings,
@@ -7,6 +8,7 @@ use homepool_protocol::{Mode, Session, wire};
 use serde_json::{Value, json};
 use std::time::Instant;
 pub struct Peer {
+    put_wait: Option<Instant>,
     expiry: Option<u64>,
     pub flush: bool,
     noise: Session,
@@ -60,6 +62,7 @@ impl Peer {
             psk.as_deref(),
         )?;
         Ok(Self {
+            put_wait: None,
             expiry,
             flush: false,
             noise,
@@ -82,7 +85,13 @@ impl Peer {
     pub fn encode(&mut self, m: &Value) -> Result<Vec<u8>> {
         self.noise.message(false, false, &wire::encode(m)?)
     }
-    pub fn receive(&mut self, c: &Config, s: &mut State, bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
+    pub fn receive(
+        &mut self,
+        c: &Config,
+        s: &mut State,
+        settlements: &mut Settlements,
+        bytes: &[u8],
+    ) -> Result<Vec<Vec<u8>>> {
         if self.phase < 2 {
             if bytes.len() > 256 || self.created.elapsed() > settings::HANDSHAKE {
                 return Err("handshake bounds".into());
@@ -134,15 +143,28 @@ impl Peer {
         let m = wire::decode(&plaintext)?;
         self.flush = !matches!(m["type"].as_str(), Some("chunk" | "ping" | "pong"));
         let id = m["id"].as_str().ok_or("id")?;
-        let result = self.operation(c, s, &m);
+        let result = self.operation(c, s, settlements, &m);
         let messages = match result {
             Ok(messages) => messages,
-            Err(_) => vec![json!({"type":"error","id":id,"code":"refused"})],
+            Err(_) => {
+                if matches!(m["type"].as_str(), Some("chunk" | "put-end"))
+                    && let Some(upload) = self.upload.take()
+                {
+                    Settlements::abort(c, s, upload)?;
+                }
+                vec![json!({"type":"error","id":id,"code":"refused"})]
+            }
         };
         self.flush |= messages.iter().any(|m| m["type"] == "credit");
         messages.iter().map(|m| self.encode(m)).collect()
     }
-    fn operation(&mut self, c: &Config, s: &mut State, m: &Value) -> Result<Vec<Value>> {
+    fn operation(
+        &mut self,
+        c: &Config,
+        s: &mut State,
+        settlements: &mut Settlements,
+        m: &Value,
+    ) -> Result<Vec<Value>> {
         let id = m["id"].as_str().ok_or("id")?;
         let device = self.device.as_ref().ok_or("device")?;
         match m["type"].as_str().ok_or("type")? {
@@ -158,7 +180,11 @@ impl Peer {
                 }])
             }
             "put-begin" | "get" | "list" => {
-                if self.upload.is_some() || self.download.is_some() || self.job.is_some() {
+                if self.upload.is_some()
+                    || self.download.is_some()
+                    || self.job.is_some()
+                    || self.put_wait.is_some()
+                {
                     return Err("busy".into());
                 }
                 self.request = id.into();
@@ -189,7 +215,8 @@ impl Peer {
                 let upload = self.upload.as_mut().ok_or("transfer")?;
                 if operations::chunk(upload, m)? {
                     let upload = self.upload.take().unwrap();
-                    self.job = Some(operations::put(c, s, upload)?);
+                    settlements.start(c, s, upload)?;
+                    self.put_wait = Some(Instant::now());
                     Ok(vec![])
                 } else if upload.credits == 0 {
                     upload.credits = settings::CREDIT;
@@ -216,7 +243,24 @@ impl Peer {
             _ => Err("operation".into()),
         }
     }
-    pub fn tick(&mut self, c: &Config, s: &mut State) -> Result<Vec<Vec<u8>>> {
+    pub fn abandon(
+        mut self,
+        c: &Config,
+        s: &mut State,
+        settlements: &mut Settlements,
+    ) -> Result<()> {
+        if let Some(upload) = self.upload.take() {
+            Settlements::abort(c, s, upload)?;
+        }
+        if self.put_wait.is_some()
+            && let Some(journal) = &self.journal
+        {
+            settlements.cancel(journal);
+        }
+        // Non-PUT jobs cancel on drop and retain their bounded worker reservations.
+        Ok(())
+    }
+    pub fn tick(&mut self, s: &mut State) -> Result<Vec<Vec<u8>>> {
         if self.expiry.is_some_and(|expiry| expiry <= state::now())
             || self.created.elapsed() > settings::LIFETIME
             || !self.authenticated() && self.created.elapsed() > settings::HANDSHAKE
@@ -229,6 +273,9 @@ impl Peer {
                 .as_ref()
                 .is_some_and(|d| d.progress.elapsed() > settings::PROGRESS)
             || self
+                .put_wait
+                .is_some_and(|started| started.elapsed() > settings::PROGRESS)
+            || self
                 .job
                 .as_ref()
                 .is_some_and(|j| j.started.elapsed() > settings::PROGRESS)
@@ -236,47 +283,40 @@ impl Peer {
             return Err("deadline".into());
         }
         let mut messages = vec![];
-        if let Some(job) = &self.job {
-            match job.receiver.try_recv() {
-                Ok(result) => {
-                    self.job = None;
-                    match result {
-                        Ok(JobResult::Put) => {
-                            let e = s
-                                .journal
-                                .get_mut(self.journal.as_ref().ok_or("journal")?)
-                                .ok_or("journal")?;
-                            e.status = "committed".into();
-                            e.committed_at = Some(state::now());
-                            let key = e.key.clone();
-                            s.save(&c.state_dir)?;
-                            messages.push(json!({"type":"put-done","id":self.request,"key":key}));
-                            let path = operations::spool(
-                                c,
-                                &self.journal.as_ref().unwrap().replace(':', "-"),
-                            );
-                            std::fs::remove_file(path).map_err(|_| "spool cleanup")?;
-                        }
-                        Ok(JobResult::Get(file, length, mime, reservation)) => {
-                            self.download = Some(Download {
-                                _reservation: reservation,
-                                file,
-                                length,
-                                sent: 0,
-                                count: 0,
-                                credits: 0,
-                                progress: Instant::now(),
-                            });
-                            messages.push(json!({"type":"get-head","id":self.request,"length":length,"mime":mime}));
-                        }
-                        Ok(JobResult::List(m)) => messages.push(m),
-                        Err(_) => {
-                            messages.push(json!({"type":"error","id":self.request,"code":"store"}))
-                        }
-                    }
+        if self.put_wait.is_some() {
+            let e = s
+                .journal
+                .get(self.journal.as_ref().ok_or("journal")?)
+                .ok_or("journal")?;
+            if e.status != "pending" {
+                self.put_wait = None;
+                messages.push(if e.status == "committed" {
+                    json!({"type":"put-done","id":self.request,"key":e.key})
+                } else {
+                    json!({"type":"error","id":self.request,"code":"store"})
+                });
+            }
+        }
+        if let Some(result) = self.job.as_mut().and_then(Job::poll) {
+            self.job = None;
+            match result {
+                Ok(JobResult::Get(file, length, mime, reservation)) => {
+                    self.download = Some(Download {
+                        _reservation: reservation,
+                        file,
+                        length,
+                        sent: 0,
+                        count: 0,
+                        credits: 0,
+                        progress: Instant::now(),
+                    });
+                    messages.push(
+                        json!({"type":"get-head","id":self.request,"length":length,"mime":mime}),
+                    );
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(_) => return Err("store worker".into()),
+                Ok(JobResult::List(m)) => messages.push(m),
+                Err(_) => messages.push(json!({"type":"error","id":self.request,"code":"store"})),
+                _ => return Err("unexpected store job".into()),
             }
         }
         if let Some(download) = &mut self.download

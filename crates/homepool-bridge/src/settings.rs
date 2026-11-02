@@ -18,3 +18,4 @@ pub const MAX_INVITES: usize = 32;
 pub const MAX_JOURNAL: usize = 10000;
 pub const STATE_BYTES: u64 = 16 * 1024 * 1024;
 pub const TOKEN_INTERVAL: Duration = Duration::from_millis(75);
+pub const SETTLEMENT_RETRY: Duration = Duration::from_secs(1);

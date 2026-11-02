@@ -3,6 +3,7 @@ mod operations;
 mod peer;
 mod runtime;
 mod settings;
+mod settlement;
 mod state;
 fn execute() -> state::Result<()> {
     let a = std::env::args().skip(1).collect::<Vec<_>>();

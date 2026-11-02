@@ -65,8 +65,8 @@ its original device. Every connection starts new Noise counters.
 The relay loop never calls S3. At most four transfer reservations survive across
 sessions, including detached workers from closed sessions. Results have one-slot
 channels. Uploads reserve their journal entry, daily quota and spool capacity
-and allocates the spool file before granting eight 60 KiB chunks. Hashing is incremental. A matching end is
-required before PUT. The fixed random key uses the #48 safe filename suffix and is generated at home.
+and allocate the spool file before granting eight 60 KiB chunks. Hashing is
+incremental. A matching end is required before PUT. The fixed random key uses the #48 safe filename suffix and is generated at home.
 GET returns the bounded stored MIME type. Caller-supplied
 keys/headers/methods/queries/copy sources and delete are unavailable. GET keys
 pass the protocol's #48 validator. List pages have at most 100 items, with a
@@ -75,14 +75,30 @@ and 2 GiB total per UTC day; private spool capacity is 200 MiB, shared with
 whole-file download reservations. Limits live in `src/settings.rs`.
 
 Upload journal entries are scoped by device and random request ID. Repeated
-begins are refused. Before store PUT, the complete spool is synced and its hash
-is durable. After confirmation, committed state is durable before `put-done`.
-Startup checks every pending fixed key with HEAD. Only a matching length becomes
-committed; absence or mismatch becomes failed. Store errors abort recovery without
-removing spools. Spools are removed only after that reconciliation snapshot is
-synced. Committed entries are retained for 30 days from commitment (including
-recovery); pruning happens at startup.
-An interrupted/failed upload can retain its quota/spool reservation until restart.
+begins are refused, including after a failed upload. Before store PUT, the complete
+spool is synced and its hash and `write_attempted` marker are durable. New entries
+start with that marker false; older journal entries without it are treated as
+uncertain for safe compatibility. Wire records and private config are unchanged.
+
+A bridge-wide settlement manager owns PUT workers and their reservations even
+when a phone disconnects, times out, is revoked, or the relay reconnects. Abandoned
+uploads that never reached PUT are durably failed directly. Attempted writes are
+cancelled when their session goes away; their worker is joined before any HEAD or
+spool cleanup. Successful PUT confirmation commits directly. A failed or uncertain
+PUT is reconciled by HEAD of its fixed key: matching length commits, absence or
+mismatch fails. If HEAD itself fails, the entry stays pending, its spool and
+reservation stay intact, and the manager retries with a bounded worker. Other
+available transfer slots continue serving phones. Settlement also runs while the
+relay is disconnected.
+
+After terminal status is durably saved, the spool is removed and its worker/spool
+reservation released. A spool cleanup failure stops the bridge. `put-done` is sent
+only after this settlement; disconnected phones use device-scoped `put-status`.
+Startup applies the same never-PUT/uncertain distinction before cleaning spools.
+No uncertain spool is deleted before reconciliation. Failed request IDs remain
+in the journal for 30 days after settlement; committed entries retain the full
+30 days from commitment, including recovery. Eligible terminal history is pruned
+durably before enforcing the 10,000-entry limit. Pending entries are never pruned.
 
 Home enforces four sessions, 10-second/256-byte-per-message handshakes, protocol
 message caps, eight-chunk windows, four active workers, a 60-second transfer
@@ -123,7 +139,14 @@ two enrollments, invitation-token acknowledgement recovery and wrong-device
 refusal, IK reconnects, interleaved 10 MiB PUTs, listing, checksum GETs,
 a kill after store confirmation but before journal commitment, recovery/status,
 relay replacement with fresh token registration, short-burst receipt cleanup
-under session churn, and live-session revocation.
+under session churn, and live-session revocation. Review regressions exercise
+four 50 MiB-declared partial uploads with one-byte payloads, the real 60-second
+progress timeout, rejected PUTs, confirmed PUTs with lost/error responses,
+failed-HEAD retry without spool deletion, and revocation of an active upload.
+Another device completes PUT/GET after each failure without a bridge restart.
+Rust regressions cover 10,000 expired committed entries, full retention of recent
+commits/pending entries, legacy journal safety, and joining workers before using
+their result.
 
 Local evidence uses JS endpoints and loopback WS, not physical phones or a public
 WSS deployment. Unproven: target-phone persistence/backgrounding and 50 MiB

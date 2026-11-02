@@ -15,13 +15,30 @@ use std::{
 };
 pub enum JobResult {
     Put,
+    Head(Option<u64>),
     Get(File, u64, String, crate::limits::Reservation),
     List(Value),
 }
 pub struct Job {
+    pub worker: Option<std::thread::JoinHandle<()>>,
     pub receiver: Receiver<Result<JobResult>>,
     pub started: Instant,
     pub cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl Job {
+    pub fn poll(&mut self) -> Option<Result<JobResult>> {
+        if !self.worker.as_ref()?.is_finished() {
+            return None;
+        }
+        let joined = self.worker.take().unwrap().join();
+        Some(if joined.is_err() {
+            Err("store worker".into())
+        } else {
+            self.receiver
+                .try_recv()
+                .unwrap_or_else(|_| Err("store worker".into()))
+        })
+    }
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -128,6 +145,8 @@ pub fn begin(c: &Config, s: &mut State, device: &str, m: &Value) -> Result<Uploa
         false,
     )?;
     let entry = Entry {
+        write_attempted: false,
+        settled_at: None,
         committed_at: None,
         device: device.into(),
         id: m["id"].as_str().ok_or("id")?.into(),
@@ -140,11 +159,21 @@ pub fn begin(c: &Config, s: &mut State, device: &str, m: &Value) -> Result<Uploa
         created: state::now(),
     };
     let journal = s.reserve(&c.state_dir, entry.clone())?;
-    let file = create(c, &journal.replace(':', "-"))?;
-    if entry.length > 0 {
-        rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, entry.length)
-            .map_err(|_| "spool reservation")?;
-    }
+    let prepared = (|| {
+        let file = create(c, &journal.replace(':', "-"))?;
+        if entry.length > 0 {
+            rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, entry.length)
+                .map_err(|_| "spool reservation")?;
+        }
+        Ok(file)
+    })();
+    let file = match prepared {
+        Ok(file) => file,
+        Err(error) => {
+            finish(c, s, &journal, false)?;
+            return Err(error);
+        }
+    };
     Ok(Upload {
         hasher: Sha256::new(),
         reservation,
@@ -174,28 +203,25 @@ pub fn chunk(upload: &mut Upload, m: &Value) -> Result<bool> {
     }
     Ok(end)
 }
-pub fn put(c: &Config, s: &mut State, mut upload: Upload) -> Result<Job> {
+pub fn put(c: &Config, s: &mut State, upload: &mut Upload) -> Result<Job> {
+    let store = c.store()?;
     upload.file.sync_all().map_err(|_| "spool sync")?;
     use std::io::Seek;
     upload.file.rewind().map_err(|_| "spool")?;
-    let hash = state::hex(&upload.hasher.finalize());
+    let mut file = upload.file.try_clone().map_err(|_| "spool")?;
+    let hash = state::hex(&upload.hasher.clone().finalize());
     let e = s.journal.get_mut(&upload.journal).ok_or("journal")?;
     e.hash = hash.clone();
+    e.write_attempted = true;
     let entry = e.clone();
+    // No PUT can begin before the uncertain-write marker is durable.
     s.save(&c.state_dir)?;
-    let store = c.store()?;
     let (sender, receiver) = mpsc::sync_channel(1);
     let cancelled = upload.reservation.cancelled.clone();
-    std::thread::spawn(move || {
-        let _reservation = upload.reservation;
+    let cancellation = cancelled.clone();
+    let worker = std::thread::spawn(move || {
         let result = store
-            .put(
-                &entry.key,
-                &mut upload.file,
-                &entry.mime,
-                &hash,
-                &_reservation.cancelled,
-            )
+            .put(&entry.key, &mut file, &entry.mime, &hash, &cancellation)
             .map(|_| JobResult::Put)
             .map_err(Into::into);
         let _ = sender.send(result);
@@ -204,7 +230,45 @@ pub fn put(c: &Config, s: &mut State, mut upload: Upload) -> Result<Job> {
         receiver,
         started: Instant::now(),
         cancelled,
+        worker: Some(worker),
     })
+}
+pub fn head(c: &Config, key: &str) -> Result<Job> {
+    let store = c.store()?;
+    let key = key.to_owned();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = std::thread::spawn(move || {
+        let _ = sender.send(store.head(&key).map(JobResult::Head).map_err(Into::into));
+    });
+    Ok(Job {
+        receiver,
+        started: Instant::now(),
+        cancelled,
+        worker: Some(worker),
+    })
+}
+// Called only after the writer is joined, or for an upload that never reached PUT.
+pub fn finish(c: &Config, s: &mut State, journal: &str, committed: bool) -> Result<()> {
+    let e = s.journal.get_mut(journal).ok_or("journal")?;
+    e.status = if committed { "committed" } else { "failed" }.into();
+    e.settled_at = Some(state::now());
+    if committed {
+        e.committed_at = Some(state::now());
+    }
+    s.save(&c.state_dir)?;
+    cleanup(c, journal);
+    Ok(())
+}
+fn cleanup(c: &Config, journal: &str) {
+    match std::fs::remove_file(spool(c, &journal.replace(':', "-"))) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            eprintln!("spool cleanup failed; stopping bridge");
+            std::process::exit(1);
+        }
+    }
 }
 pub fn get(c: &Config, s: &State, m: &Value) -> Result<Job> {
     let reservation = crate::limits::Reservation::new(
@@ -224,7 +288,7 @@ pub fn get(c: &Config, s: &State, m: &Value) -> Result<Job> {
     // Unlink immediately: the private open file is bounded and disappears on process exit.
     std::fs::remove_file(path).map_err(|_| "spool unlink")?;
     let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         let result = (|| {
             let mut body = store.get(&key)?;
             let length = body.length;
@@ -256,6 +320,7 @@ pub fn get(c: &Config, s: &State, m: &Value) -> Result<Job> {
         let _ = sender.send(result);
     });
     Ok(Job {
+        worker: Some(worker),
         receiver,
         started: Instant::now(),
         cancelled,
@@ -276,7 +341,7 @@ pub fn list(c: &Config, s: &State, m: &Value) -> Result<Job> {
     let limit = m["limit"].as_u64().ok_or("limit")? as u32;
     let id = m["id"].clone();
     let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         let _reservation = reservation;
         let result=store.list(&cursor,limit).map_err(Into::into).map(|page|JobResult::List(json!({"type":"list-page","id":id,"cursor":page.next_continuation_token,"items":page.contents.into_iter().filter_map(|item| {
         let m=json!({"type":"get","id":id,"key":item.key});if homepool_protocol::wire::encode(&m).is_err(){None}else{Some(json!({"key":item.key,"length":item.size,"type":""}))}
@@ -284,6 +349,7 @@ pub fn list(c: &Config, s: &State, m: &Value) -> Result<Job> {
         let _ = sender.send(result);
     });
     Ok(Job {
+        worker: Some(worker),
         receiver,
         started: Instant::now(),
         cancelled,
@@ -310,7 +376,8 @@ pub fn next(d: &mut Download, id: &str) -> Result<Option<Value>> {
 pub fn reconcile(c: &Config, s: &mut State) -> Result<()> {
     let store = c.store()?;
     for e in s.journal.values_mut().filter(|e| e.status == "pending") {
-        e.status = if store.head(&e.key)? == Some(e.length) {
+        e.settled_at = Some(state::now());
+        e.status = if e.write_attempted && store.head(&e.key)? == Some(e.length) {
             e.committed_at = Some(state::now());
             "committed"
         } else {
@@ -331,4 +398,38 @@ pub fn reconcile(c: &Config, s: &mut State) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn worker_result_is_not_exposed_until_the_writer_has_exited() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (ready, observed) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            sender.send(Ok(JobResult::Put)).unwrap();
+            ready.send(()).unwrap();
+            gate.recv().unwrap();
+        });
+        observed.recv().unwrap();
+        let mut job = Job {
+            receiver,
+            started: Instant::now(),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            worker: Some(worker),
+        };
+        assert!(job.poll().is_none());
+        job.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + settings::HANDSHAKE;
+        while !job.worker.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(matches!(job.poll(), Some(Ok(JobResult::Put))));
+        assert!(job.worker.is_none());
+    }
 }
