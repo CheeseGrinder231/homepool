@@ -452,7 +452,7 @@ test("global daily upgrade cap survives reconstruction and resets at UTC midnigh
   let clock = 100000;
   Date.now = () => clock;
   try {
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < defaults.dailyUpgrades; i++) {
       clock += 1000;
       assert.equal((await new UpgradeGate(h.ctx, {}).fetch()).status, 204);
     }
@@ -484,7 +484,7 @@ test("storage-write budget reserves token mutations before sending and resets da
   }
 });
 
-import { routeLimits, defaults } from "../limits.mjs";
+import { routeLimits, defaults, AUXILIARY_REQUESTS } from "../limits.mjs";
 test("configured routes share Free-plan admitted-work budgets", () => {
   const one = routeLimits({ ROUTES: '["a"]' }),
     two = routeLimits({ ROUTES: '["a","b"]' });
@@ -497,7 +497,9 @@ test("configured routes share Free-plan admitted-work budgets", () => {
   ])
     assert.equal(two[k] * 2, one[k]);
   assert.equal(one.dailyMessages, 800000);
-  assert.equal(defaults.dailyUpgrades, 100);
+  assert.equal(defaults.dailyUpgrades, 1000);
+  assert.equal(defaults.dailyFailures, 100);
+  assert.equal(defaults.maxRoutes, 100);
 });
 
 test("Free plan billed-request allowance includes every configured bridge auto-response", () => {
@@ -508,12 +510,34 @@ test("Free plan billed-request allowance includes every configured bridge auto-r
       ),
     });
     assert.ok(
-      (limits.dailyMessages * count) / 20 + (count * 5760) / 20 + 2000 <= 50000,
+      (limits.dailyMessages * count) / 20 +
+        (count * 5760) / 20 +
+        AUXILIARY_REQUESTS <=
+        50000,
     );
   }
-  assert.ok(defaults.dailyBytes > 2 * 1024 ** 3);
-  assert.ok(defaults.dailyWrites + 2100 <= 50000);
+  // Every grant costs a gate call and a route upgrade; each admitted or
+  // carried socket fires at most one alarm and one close.
+  const carried = 100 + 5 * defaults.maxRoutes;
   assert.ok(
-    (defaults.dailyDurationMs / 1000) * 0.128 + 100 * 31 * 0.128 <= 6500,
+    2 * defaults.dailyUpgrades +
+      (carried + defaults.dailyUpgrades) +
+      (5 * defaults.maxRoutes + defaults.dailyUpgrades) <=
+      AUXILIARY_REQUESTS,
+  );
+  assert.ok(defaults.dailyBytes > 2 * 1024 ** 3);
+  // Budget/token rows, one gate row per grant, alarm/connection metadata.
+  assert.ok(
+    defaults.dailyWrites + defaults.dailyUpgrades + AUXILIARY_REQUESTS <= 50000,
+  );
+  assert.ok(
+    defaults.dailyMessages * 2 + 2 * AUXILIARY_REQUESTS <= 2500000,
+  );
+  // Route guard plus a 31-second gate callback per grant, with rollover skew.
+  assert.ok(
+    (defaults.dailyDurationMs / 1000) * 0.128 +
+      defaults.dailyUpgrades * 31 * 0.128 +
+      defaults.maxRoutes * 31 * 0.128 <=
+      6500,
   );
 });

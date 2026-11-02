@@ -20,6 +20,19 @@ const tokenBytes = (s) =>
     ? Uint8Array.from(s.match(/../g), (x) => parseInt(x, 16))
     : null;
 const view = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
+// Close codes for a refused phone admission, so the page can tell the owner
+// what happened. Nothing else about the route or its tokens is disclosed.
+export const PHONE_CLOSE = Object.freeze({
+  notAccepted: 4001,
+  homeOffline: 4002,
+  busy: 4003,
+});
+class Refused extends Error {
+  constructor(code) {
+    super("phone");
+    this.code = code;
+  }
+}
 export class Relay {
   constructor(ctx, env) {
     this.ctx = ctx;
@@ -85,11 +98,11 @@ export class Relay {
       }
     });
   }
-  async failAdmission(s) {
+  async failAdmission(s, code) {
     await this.budget(0, true);
-    this.drop(s);
+    this.drop(s, false, code);
   }
-  drop(s, error = false) {
+  drop(s, error = false, code) {
     const a = s.deserializeAttachment();
     if (!a || a.closed) return;
     a.closed = true;
@@ -116,7 +129,7 @@ export class Relay {
       }
     }
     try {
-      s.close(error ? 1008 : 1000);
+      s.close(code ?? (error ? 1008 : 1000));
     } catch {}
   }
   fetch(request) {
@@ -290,8 +303,8 @@ export class Relay {
         f.sent = next.toString();
         this.save(p, state);
         target.send(b);
-      } catch {
-        if (a.role === "pending") await this.failAdmission(s);
+      } catch (e) {
+        if (a.role === "pending") await this.failAdmission(s, e?.code);
         else this.drop(s, true);
       }
     });
@@ -313,19 +326,24 @@ export class Relay {
       this.save(s, { role: "bridge", next: 1 });
       return;
     }
+    // Home first: while the bridge is away its token registrations may be
+    // stale, so an unknown token is reported only to a connected bridge's route.
     const bridge = this.bridge();
+    if (!bridge) throw new Refused(PHONE_CLOSE.homeOffline);
     const tokens = (await this.ctx.storage.get("tokens")) ?? {};
     const t = tokens[await hash(b.slice(2))];
     if (
-      !bridge ||
       !t ||
       (t.expiry !== "0" &&
-        BigInt(t.expiry) <= BigInt(Math.floor(Date.now() / 1000))) ||
-      this.phones().length +
-        Object.keys(bridge?.deserializeAttachment().retired ?? {}).length >=
-        this.limits.sessions
+        BigInt(t.expiry) <= BigInt(Math.floor(Date.now() / 1000)))
     )
-      throw Error("phone");
+      throw new Refused(PHONE_CLOSE.notAccepted);
+    if (
+      this.phones().length +
+        Object.keys(bridge.deserializeAttachment().retired ?? {}).length >=
+      this.limits.sessions
+    )
+      throw new Refused(PHONE_CLOSE.busy);
     const ba = bridge.deserializeAttachment();
     if (ba.next > 0xffffffff) throw Error("ids");
     const id = ba.next++;

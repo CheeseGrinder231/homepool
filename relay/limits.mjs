@@ -2,6 +2,8 @@
 export const BRIDGE_PING = "homepool/1/bridge-ping";
 export const BRIDGE_PONG = "homepool/1/bridge-pong";
 export const AUTO_REQUESTS_PER_ROUTE = 5760 / 20;
+// Gate and route upgrade calls, alarms and closes; see relay/README.md.
+export const AUXILIARY_REQUESTS = 6000;
 export const RELAY_WINDOW = 1024 * 1024;
 export const ACK_INTERVAL = 64 * 1024;
 // Includes envelope/schema/AEAD overhead, not just plaintext file bytes.
@@ -17,11 +19,12 @@ export const defaults = Object.freeze({
   dailyBytes: 3 * 1024 ** 3,
   dailyMessages: 800000,
   dailyWrites: 10000,
-  dailyDurationMs: 40000000,
-  dailyUpgrades: 100,
+  dailyDurationMs: 16000000,
+  dailyUpgrades: 1000,
   dailyFailures: 100,
   upgradesPerSecond: 20,
   tokens: 128,
+  maxRoutes: 100,
 });
 export const hex = (b) =>
   Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
@@ -78,7 +81,7 @@ export function routeLimits(env) {
     dailyMessages: Math.floor(
       Math.min(
         defaults.dailyMessages,
-        (50000 - 2000 - count * AUTO_REQUESTS_PER_ROUTE) * 20,
+        (50000 - AUXILIARY_REQUESTS - count * AUTO_REQUESTS_PER_ROUTE) * 20,
       ) / count,
     ),
   };

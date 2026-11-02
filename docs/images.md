@@ -9,6 +9,9 @@ the bucket on the same origin through Caddy, so there is no CORS.
 **One copy, not a backup.** The page says so next to the upload button. The
 pool keeps a single copy of each photo; keep the originals on the phone.
 
+For use away from home, see the [remote image page](remote-page.md), which
+works through the encrypted relay instead of a key on the phone.
+
 Out of scope on purpose: background sync, delete, thumbnails, multipart
 uploads, accounts, jobs and the Homepool API. The grid shows the originals,
 loaded lazily as tiles scroll into view.

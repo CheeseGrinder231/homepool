@@ -1,0 +1,6 @@
+# Uploaded as the relay Worker's static assets; the Worker serves only the
+# page files it lists. Keep tests and the LAN page's own code out of the upload.
+**/tests/
+images/app.mjs
+images/sigv4.mjs
+images/index.html
