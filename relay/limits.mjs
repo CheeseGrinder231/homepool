@@ -10,9 +10,11 @@ export const defaults = Object.freeze({
   bytesPerSecond: 8 * 1024 * 1024,
   controlsPerSecond: 32,
   controlBytesPerSecond: 4096,
-  dailyBytes: 1024 ** 3,
-  dailyMessages: 1000000,
-  dailyFailures: 1000,
+  dailyBytes: 256 * 1024 ** 2,
+  dailyMessages: 60000,
+  dailyWrites: 75000,
+  dailyUpgrades: 100,
+  dailyFailures: 100,
   upgradesPerSecond: 20,
   tokens: 128,
 });
@@ -49,4 +51,18 @@ export function rate(a, now, bytes, control, limits) {
     a.controls <= limits.controlsPerSecond &&
     a.controlBytes <= limits.controlBytesPerSecond
   );
+}
+
+// Share admitted-work budgets across configured routes; they are not per-account
+// quota reservations. Rejected requests and other Workers can still consume quota.
+export function routeLimits(env) {
+  const count = Math.max(1, JSON.parse(env.ROUTES || "[]").length);
+  return {
+    ...defaults,
+    ...Object.fromEntries(
+      ["dailyBytes", "dailyMessages", "dailyWrites", "dailyFailures"].map(
+        (k) => [k, Math.floor(defaults[k] / count)],
+      ),
+    ),
+  };
 }

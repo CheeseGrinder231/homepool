@@ -420,3 +420,53 @@ test("exact window is allowed and an ACK replenishes it without reconnect", asyn
   await h.send(p, data(id, 65530));
   assert.equal(p.readyState, 1);
 });
+
+test("global daily upgrade cap survives reconstruction and resets at UTC midnight", async () => {
+  const h = harness(),
+    now = Date.now;
+  let clock = 100000;
+  Date.now = () => clock;
+  try {
+    for (let i = 0; i < 100; i++) {
+      clock += 1000;
+      assert.equal((await new UpgradeGate(h.ctx, {}).fetch()).status, 204);
+    }
+    clock += 1000;
+    assert.equal((await new UpgradeGate(h.ctx, {}).fetch()).status, 429);
+    clock += 86400000;
+    assert.equal((await new UpgradeGate(h.ctx, {}).fetch()).status, 204);
+  } finally {
+    Date.now = now;
+  }
+});
+
+test("storage-write budget reserves token mutations before sending and resets daily", async () => {
+  const h = harness({ dailyWrites: 3 }),
+    b = await bridge(h);
+  await register(h, b); // admission budget row + token budget/mutation rows = 3
+  assert.equal(b.readyState, 1);
+  assert.equal(h.values.get("budget").writes, 3);
+  h.restart();
+  await h.send(b, envelope("token-remove", 0, bindingBytes(42)));
+  assert.equal(b.readyState, 3);
+  assert.equal(Object.keys(h.values.get("tokens")).length, 1);
+  const budget = h.values.get("budget");
+  budget.day--;
+  h.values.set("budget", budget);
+  assert.equal(await h.relay.budget(0, false, 2), true);
+});
+
+import { routeLimits, defaults } from "../limits.mjs";
+test("configured routes share Free-plan admitted-work budgets", () => {
+  const one = routeLimits({ ROUTES: '["a"]' }),
+    two = routeLimits({ ROUTES: '["a","b"]' });
+  for (const k of [
+    "dailyBytes",
+    "dailyMessages",
+    "dailyWrites",
+    "dailyFailures",
+  ])
+    assert.equal(two[k] * 2, one[k]);
+  assert.equal(one.dailyMessages, 60000);
+  assert.equal(defaults.dailyUpgrades, 100);
+});

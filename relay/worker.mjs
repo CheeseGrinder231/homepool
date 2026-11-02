@@ -10,11 +10,19 @@ export class UpgradeGate {
   fetch() {
     return this.ctx.blockConcurrencyWhile(async () => {
       const second = Math.floor(Date.now() / 1000);
+      const day = Math.floor(Date.now() / 86400000);
       let a = await this.ctx.storage.get("rate");
-      if (a?.second !== second) a = { second, count: 0 };
+      if (a?.day !== day) a = { day, second, count: 0, daily: 0 };
+      if (a.second !== second) {
+        a.second = second;
+        a.count = 0;
+      }
+      if (a.daily >= defaults.dailyUpgrades)
+        return new Response(null, { status: 429 });
       if (a.count >= defaults.upgradesPerSecond)
         return new Response(null, { status: 429 });
       a.count++;
+      a.daily++;
       await this.ctx.storage.put("rate", a);
       return new Response(null, { status: 204 });
     });

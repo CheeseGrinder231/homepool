@@ -5,7 +5,7 @@ import {
   bindingBytes,
 } from "../web/protocol/wire.mjs";
 import {
-  defaults,
+  routeLimits,
   hex,
   hash,
   constantTimeToken,
@@ -21,7 +21,7 @@ export class Relay {
   constructor(ctx, env) {
     this.ctx = ctx;
     this.env = env;
-    this.limits = defaults;
+    this.limits = routeLimits(env);
   }
   sockets() {
     return this.ctx
@@ -41,17 +41,21 @@ export class Relay {
   save(s, a) {
     s.serializeAttachment(a);
   }
-  async budget(bytes = 0, failure = false) {
+  async budget(bytes = 0, failure = false, writes = 1) {
     const day = Math.floor(Date.now() / 86400000);
     let b = await this.ctx.storage.get("budget");
-    if (b?.day !== day) b = { day, bytes: 0, messages: 0, failures: 0 };
+    if (b?.day !== day)
+      b = { day, bytes: 0, messages: 0, failures: 0, writes: 0 };
+    b.writes ??= b.messages;
     const ok =
       b.bytes + bytes <= this.limits.dailyBytes &&
       b.messages + 1 <= this.limits.dailyMessages &&
+      b.writes + writes <= this.limits.dailyWrites &&
       b.failures + (failure ? 1 : 0) <= this.limits.dailyFailures;
     if (ok) {
       b.bytes += bytes;
       b.messages++;
+      b.writes += writes;
       if (failure) b.failures++;
       await this.ctx.storage.put("budget", b);
     }
@@ -177,7 +181,11 @@ export class Relay {
         if (!(message instanceof ArrayBuffer) || message.byteLength > 65541)
           throw Error("frame");
         const b = new Uint8Array(message);
-        if (!(await this.budget(b.length))) throw Error("budget");
+        // Hash registration/removal writes one additional storage row.
+        const writes =
+          a.role === "bridge" && b[0] === 1 && [4, 5].includes(b[1]) ? 2 : 1;
+        if (!(await this.budget(b.length, false, writes)))
+          throw Error("budget");
         if (a.role === "pending") {
           await this.admit(s, a, b);
           await this.schedule();
