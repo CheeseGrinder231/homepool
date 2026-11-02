@@ -257,7 +257,7 @@ impl Peer {
                             );
                             std::fs::remove_file(path).map_err(|_| "spool cleanup")?;
                         }
-                        Ok(JobResult::Get(file, length, reservation)) => {
+                        Ok(JobResult::Get(file, length, mime, reservation)) => {
                             self.download = Some(Download {
                                 _reservation: reservation,
                                 file,
@@ -267,7 +267,7 @@ impl Peer {
                                 credits: 0,
                                 progress: Instant::now(),
                             });
-                            messages.push(json!({"type":"get-head","id":self.request,"length":length,"mime":""}));
+                            messages.push(json!({"type":"get-head","id":self.request,"length":length,"mime":mime}));
                         }
                         Ok(JobResult::List(m)) => messages.push(m),
                         Err(_) => {

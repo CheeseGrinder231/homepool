@@ -66,7 +66,8 @@ The relay loop never calls S3. At most four transfer reservations survive across
 sessions, including detached workers from closed sessions. Results have one-slot
 channels. Uploads reserve their journal entry, daily quota and spool capacity
 and allocates the spool file before granting eight 60 KiB chunks. Hashing is incremental. A matching end is
-required before PUT. The fixed random key is generated at home; caller-supplied
+required before PUT. The fixed random key uses the #48 safe filename suffix and is generated at home.
+GET returns the bounded stored MIME type. Caller-supplied
 keys/headers/methods/queries/copy sources and delete are unavailable. GET keys
 pass the protocol's #48 validator. List pages have at most 100 items, with a
 bounded XML response. Files are at most 50 MiB. Upload quotas are 1 GiB per device

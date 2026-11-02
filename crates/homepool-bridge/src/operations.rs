@@ -15,7 +15,7 @@ use std::{
 };
 pub enum JobResult {
     Put,
-    Get(File, u64, crate::limits::Reservation),
+    Get(File, u64, String, crate::limits::Reservation),
     List(Value),
 }
 pub struct Job {
@@ -59,7 +59,41 @@ pub fn create(c: &Config, key: &str) -> Result<File> {
         .open(spool(c, key))
         .map_err(|_| "spool".into())
 }
-fn key() -> Result<String> {
+fn safe_name(name: &str) -> String {
+    fn clean(s: &str, max: usize) -> String {
+        let mut out = String::new();
+        let mut replaced = false;
+        for c in s.chars() {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                out.push(c);
+                replaced = false;
+            } else if !replaced {
+                out.push('-');
+                replaced = true;
+            }
+        }
+        out.trim_matches(['.', '-'])
+            .chars()
+            .take(max)
+            .collect::<String>()
+            .trim_matches(['.', '-'])
+            .to_owned()
+    }
+    let base = name.rsplit(['\\', '/']).next().unwrap_or("");
+    let (stem, extension) = match base.rfind('.') {
+        Some(i) if i > 0 => (&base[..i], &base[i + 1..]),
+        _ => (base, ""),
+    };
+    let stem = clean(stem, 60);
+    let stem = if stem.is_empty() { "image" } else { &stem };
+    let extension = clean(extension, 12).to_ascii_lowercase();
+    if extension.is_empty() {
+        stem.to_owned()
+    } else {
+        format!("{stem}.{extension}")
+    }
+}
+fn key(name: &str) -> Result<String> {
     let date = time::OffsetDateTime::now_utc();
     let f = time::format_description::parse_borrowed::<2>(
         "[year]-[month]-[day]/[hour][minute][second]",
@@ -82,7 +116,7 @@ fn key() -> Result<String> {
     if bits > 0 {
         tag.push(alphabet[((acc << (5 - bits)) & 31) as usize] as char);
     }
-    Ok(format!("{stamp}-{tag}-image"))
+    Ok(format!("{stamp}-{tag}-{}", safe_name(name)))
 }
 pub fn begin(c: &Config, s: &mut State, device: &str, m: &Value) -> Result<Upload> {
     let reservation = crate::limits::Reservation::new(
@@ -97,7 +131,7 @@ pub fn begin(c: &Config, s: &mut State, device: &str, m: &Value) -> Result<Uploa
         committed_at: None,
         device: device.into(),
         id: m["id"].as_str().ok_or("id")?.into(),
-        key: key()?,
+        key: key(m["name"].as_str().ok_or("name")?)?,
         name: m["name"].as_str().ok_or("name")?.into(),
         mime: m["mime"].as_str().ok_or("mime")?.into(),
         length: m["length"].as_u64().ok_or("length")?,
@@ -217,7 +251,7 @@ pub fn get(c: &Config, s: &State, m: &Value) -> Result<Job> {
             }
             use std::io::Seek;
             file.rewind().map_err(|_| "spool")?;
-            Ok(JobResult::Get(file, length, reservation))
+            Ok(JobResult::Get(file, length, body.mime, reservation))
         })();
         let _ = sender.send(result);
     });

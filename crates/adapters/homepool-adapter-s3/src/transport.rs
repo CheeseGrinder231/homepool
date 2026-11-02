@@ -36,6 +36,7 @@ impl Write for DeadlineTcp {
     }
 }
 pub struct Body {
+    pub mime: String,
     stream: Box<dyn Stream>,
     pub length: u64,
     remaining: u64,
@@ -194,7 +195,16 @@ pub fn request(
         .find(|h| h.name.eq_ignore_ascii_case("content-length"))
         .and_then(|h| std::str::from_utf8(h.value).ok()?.parse().ok())
         .ok_or("length")?;
+    let mime = response
+        .headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("content-type"))
+        .and_then(|h| std::str::from_utf8(h.value).ok())
+        .filter(|s| s.len() <= 127 && s.bytes().all(|b| (32..127).contains(&b)))
+        .unwrap_or("")
+        .to_owned();
     Ok(Body {
+        mime,
         stream,
         length,
         remaining: if method == "HEAD" { 0 } else { length },

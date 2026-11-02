@@ -269,9 +269,14 @@ fn spool_is_reserved_before_credit_and_hashes_only_received_bytes() {
     let mut f = Fixture::new();
     let (_, _, device) = f.enroll();
     let id = random(16).unwrap();
-    let begin = json!({"type":"put-begin","id":id,"name":"image","mime":"","length":3});
+    let begin =
+        json!({"type":"put-begin","id":id,"name":"../folder/photo.JPG","mime":"","length":3});
     let mut upload = crate::operations::begin(&f.c, &mut f.s, &device, &begin).unwrap();
     assert_eq!(upload.file.metadata().unwrap().len(), 3);
+    let entry = &f.s.journal[&upload.journal];
+    assert!(entry.key.ends_with("-photo.jpg"));
+    assert_eq!(entry.name, "../folder/photo.JPG");
+    wire::encode(&json!({"type":"get","id":id,"key":entry.key})).unwrap();
     assert_eq!(
         State::load(&f.dir).unwrap().journal[&upload.journal].status,
         "pending"
