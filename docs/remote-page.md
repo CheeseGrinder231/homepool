@@ -73,8 +73,13 @@ IndexedDB `homepool-remote` holds:
   encrypted enrollment acknowledgement;
 - during pairing only, the invitation token, until the acknowledgement arrives;
 - the IDs, names and sizes of uploads that began but are not settled.
+  These stay until home reports an outcome or the owner dismisses them, never
+  dropped for age or count. While 50 are unsettled, a new upload is refused
+  before anything is sent ("Not sent… check or dismiss them"), so every
+  attempt home may hold can still be checked.
 
-The PSK is never stored or sent. Same-origin page code could unwrap an
+Once pairing completes, and on Forget, the page drops the link it was opened
+with and empties the paste box. The PSK is never stored or sent. Same-origin page code could unwrap an
 extractable copy of the key; that is inside the accepted page-code trust
 boundary of #50. The page asks for persistent storage; if the browser clears
 it anyway, the phone pairs again.
@@ -91,9 +96,10 @@ home as well (`homepool-bridge revoke CONFIG ID`).
 ## Connection
 
 One relay session and one Noise session per phone, opened on demand: when the
-library opens, on a user action, or for queued work. There are no idle pings.
-An idle session is closed after three minutes, and at once when the page is
-hidden, which frees the relay's session slot. Each connection is one of the
+library opens, on a user action, for queued work, or once when the library
+becomes visible again. There are no idle pings. An idle session is closed
+after three minutes, and at once when the page is hidden, which frees the
+relay's session slot. Each connection is one of the
 relay's 1,000 daily upgrades, shared with the bridge's reconnects, and one or
 two bursts of its daily duration budget ([cost](../relay/README.md)). When the page becomes visible
 again during a transfer, the page sends one encrypted ping with a 5-second
@@ -118,7 +124,9 @@ tokens. A paired phone whose key home no longer accepts reads "Home didn't
 recognize this phone". In both cases the page shows the pairing screen with
 "Check again"; its records stay until it pairs again or is forgotten. After a
 connection failure, queued work waits for the next action, "Try again" or the
-page becoming visible, rather than dialling again on its own.
+page becoming visible, rather than dialling again on its own. A return that
+cannot connect says why once and does not retry until the next return or
+action.
 
 ## Transfers
 
@@ -176,11 +184,12 @@ node --test web/remote/tests/*.test.mjs relay/tests/*.test.mjs
 ```
 
 `model.test.mjs` covers link parsing (including hostile links), name and type
-handling, the Blob URL cache and the queue. `client.test.mjs` runs the page's
+handling, the Blob URL cache, the queue and the unsettled-upload record
+(nothing dropped, concurrent changes kept, the bound). `client.test.mjs` runs the page's
 connection code with real Noise against a scripted relay and bridge: pairing
 with the wrapped key, credits and the relay window, interrupted uploads and
 `put-status`, close codes, refused codes keeping a pairing, a lost enrollment
-acknowledgement, and Forget. `relay/tests/page.test.mjs` covers page serving,
+acknowledgement, Forget, and the single reconnect on visibility return. `relay/tests/page.test.mjs` covers page serving,
 headers and refusals, and the admission close codes.
 
 `web/remote/tests/e2e.mjs` is an explicit runner with real browsers at phone
@@ -202,7 +211,10 @@ SCREENSHOTS="$TMPDIR/remote-shots" \
 `chromium,firefox,webkit` and `CHROMIUM_PATH` selects a system Chromium. It
 pairs from the link, uploads a 12 MB image among others, and lists, previews
 and downloads it with a matching SHA-256. It reloads and stays paired through
-`unwrapKey`, and runs two browsers as two phones at once. It kills the relay
+`unwrapKey`, and runs two browsers as two phones at once, the second paired
+from a pasted link that is cleared afterwards. Each phone is hidden and shown
+again: the idle session closes, and exactly one new session opens without a
+tap. It kills the relay
 and then the bridge mid-upload and checks that the page shows the journal's
 outcome, followed by a fresh upload that commits. It also covers a store write
 confirmed before the journal commit. It then refuses a malformed link, a

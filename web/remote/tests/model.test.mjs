@@ -4,6 +4,8 @@ import {
   BlobCache,
   CancelledError,
   LinkError,
+  MAX_UNSETTLED,
+  UploadLog,
   WorkQueue,
   fingerprint,
   imageType,
@@ -178,4 +180,37 @@ test("one queue: priority order, cancel queued work, promote, pause", async () =
   queue.clear();
   await a.done;
   await assert.rejects(b.done, CancelledError);
+});
+
+test("unsettled uploads are kept until settled; new ones wait at the bound", async () => {
+  const map = new Map();
+  const store = { get: async (k) => map.get(k), put: async (k, v) => void map.set(k, v) };
+  const log = new UploadLog(store);
+  const ids = Array.from({ length: MAX_UNSETTLED }, (_, n) => `id-${n}`);
+  // Begun at once: serialized, so no entry overwrites another.
+  await Promise.all(ids.map((id) => log.remember({ id, name: `${id}.jpg`, size: 1 })));
+  assert.deepEqual(
+    (await log.entries()).map((u) => u.id),
+    ids,
+  );
+  // At the bound the oldest is never dropped; the new upload is refused.
+  await assert.rejects(log.remember({ id: "new", name: "new.jpg", size: 1 }), (e) => e.reason === "unsettled");
+  assert.equal((await new UploadLog(store).entries())[0].id, "id-0");
+  assert.equal((await log.entries()).length, MAX_UNSETTLED);
+  // The same attempt remembered twice is one entry.
+  await log.remember({ id: "id-3", name: "x", size: 2 });
+  assert.equal((await log.entries()).length, MAX_UNSETTLED);
+  // Settling (an outcome or a dismissal) makes room; the rest stay, in order.
+  await Promise.all([log.settle("id-7"), log.remember({ id: "new", name: "new.jpg", size: 1 })]);
+  const after = (await log.entries()).map((u) => u.id);
+  assert.equal(after.length, MAX_UNSETTLED);
+  assert.deepEqual(after, [...ids.filter((id) => id !== "id-7"), "new"]);
+  // A reload reads the same entries back, with only ID, name, size and time.
+  const reloaded = await new UploadLog(store).entries();
+  assert.deepEqual(Object.keys(reloaded[0]).sort(), ["at", "id", "name", "size"]);
+  assert.equal(reloaded.length, MAX_UNSETTLED);
+  // A failed write rejects that step only; later steps still run.
+  const failing = new UploadLog({ get: async () => [], put: async () => Promise.reject(Error("quota")) });
+  await assert.rejects(failing.remember({ id: "a", name: "a", size: 1 }));
+  assert.deepEqual(await failing.entries(), []);
 });

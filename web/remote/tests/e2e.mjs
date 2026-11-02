@@ -103,6 +103,8 @@ async function phone(kind, label, colorScheme = "light") {
     acceptDownloads: true,
   });
   const page = await context.newPage();
+  const sockets = { opened: 0 };
+  page.on("websocket", () => sockets.opened++);
   page.on("pageerror", (e) => problems.push(`${label}: ${e.message}`));
   page.on("console", (m) => {
     // The browser logs refused sockets itself while the relay is stopped.
@@ -110,7 +112,7 @@ async function phone(kind, label, colorScheme = "light") {
     if (m.type() === "error" || /Content.Security/i.test(m.text())) problems.push(`${label}: ${m.text()}`);
   });
   page.on("dialog", (d) => d.accept());
-  return { kind, label, context, page };
+  return { kind, label, context, page, sockets };
 }
 const main = (p) => p.page.locator("main").innerText();
 async function see(p, pattern, timeout = 30000) {
@@ -195,6 +197,38 @@ async function stored(p) {
     };
   });
 }
+// Headless pages never become hidden on their own; switch the page's own view
+// of visibility and fire the event the browser would.
+async function setHidden(p, hidden) {
+  await p.page.evaluate((h) => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => h });
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (h ? "hidden" : "visible") });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+}
+const statusIs = (p, value) =>
+  p.page
+    .waitForFunction((v) => document.getElementById("status").classList.contains(v), value, { timeout: 30000 })
+    .catch(async (error) => {
+      const now = await p.page.evaluate(() => document.getElementById("status").className);
+      throw Error(`${p.label}: status never ${value}, still "${now}"`, { cause: error });
+    });
+// Hidden while idle closes the session; coming back opens exactly one new one
+// without a tap, and then nothing dials or pings while it sits idle.
+async function hideAndReturn(p) {
+  // A running transfer keeps the session while hidden, so start from idle.
+  await p.page.waitForFunction(() => !document.querySelector("#grid .tile.loading"), null, { timeout: 120000 });
+  await delay(300);
+  await statusIs(p, "connected");
+  await setHidden(p, true);
+  await statusIs(p, "idle");
+  const before = p.sockets.opened;
+  await setHidden(p, false);
+  await statusIs(p, "connected");
+  assert.equal(await p.page.locator("#status").innerText(), "Connected");
+  await delay(1500);
+  assert.equal(p.sockets.opened, before + 1, `${p.label}: one reconnect on return`);
+}
 async function fingerprintOf(p) {
   await p.page.click("#paired details summary");
   return (await p.page.locator("#fingerprint").innerText()).replace(/\s+/g, "");
@@ -275,8 +309,14 @@ try {
 
   // ---- second phone at the same time --------------------------------------------------------
   const B = await phone(wanted.includes("firefox") ? "firefox" : wanted[0], "B");
-  await B.page.goto(await stack.invite());
+  // B pairs from a pasted link; once paired, the page keeps no copy of it.
+  await B.page.goto(stack.origin + "/");
+  await see(B, /Pair this phone/);
+  await B.page.click("details.paste summary");
+  await B.page.fill("#paste-text", await stack.invite());
+  await B.page.click("#paste-form button[type=submit]");
   await see(B, /Paired/);
+  assert.equal(await B.page.inputValue("#paste-text"), "", "pasted link cleared after pairing");
   await B.page.click("#paired-continue");
   await see(B, /4 photos/);
   // Both sessions live: B uploads while A downloads the large photo.
@@ -294,6 +334,13 @@ try {
   await see(A, /5 photos/);
   assert.equal((await stack.devices()).length, 2);
   log(`two phones (${A.kind}, ${B.kind}) paired and working at once passed`);
+
+  // ---- visibility: hidden closes the session, returning reconnects once ----------------------
+  await hideAndReturn(A);
+  await hideAndReturn(B);
+  await A.page.click("#refresh");
+  await see(A, /5 photos/);
+  log("hidden page closes its session; return reconnects once without a tap");
 
   // ---- interrupted uploads ------------------------------------------------------------------
   // Relay dies mid-upload: the page says it is not confirmed, then asks home.
@@ -401,6 +448,7 @@ try {
     await see(W, /photos ·/);
     await W.page.reload();
     await see(W, /photos ·/);
+    await hideAndReturn(W);
     const storedW = await stored(W);
     assert.equal(storedW.exportable, false);
     await upload(W, { ...files.small, name: "IMG_webkit.png" });

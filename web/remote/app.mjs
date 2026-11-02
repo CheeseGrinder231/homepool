@@ -7,6 +7,7 @@ import { deviceKeys, openStore, supported } from "./keys.mjs";
 import {
   BlobCache,
   CancelledError,
+  MAX_UNSETTLED,
   PRIORITY,
   TILE_LIMIT,
   fingerprint,
@@ -15,6 +16,7 @@ import {
   newestFirst,
   parsePairing,
   randomId,
+  UploadLog,
   uploadType,
 } from "./model.mjs";
 
@@ -37,6 +39,7 @@ const MESSAGES = {
   removed: "This phone was removed at home, so it can't connect anymore. To use it again, pair it with a new code.",
   unrecognized:
     "Home didn't recognize this phone. If it was removed at home or home was set up again, pair it with a new code.",
+  unsettled: `${MAX_UNSETTLED} earlier uploads aren't confirmed yet. Check or dismiss them above, then try again.`,
   storage:
     "This browser isn't letting the page save its pairing. Private browsing can do this; open the page in a normal tab.",
 };
@@ -72,7 +75,8 @@ function takeFragment() {
     return { error: error.reason ?? "malformed" };
   }
 }
-const offered = takeFragment();
+// The link from the page load; dropped once it has been handed on.
+let offered = takeFragment();
 let started = null;
 window.addEventListener("hashchange", async () => {
   const offer = takeFragment();
@@ -83,6 +87,7 @@ window.addEventListener("hashchange", async () => {
 
 const store = openStore();
 const keys = deviceKeys(store);
+const uploadLog = new UploadLog(store);
 const state = {
   generation: 0,
   objects: [],
@@ -226,6 +231,9 @@ async function pairWith(invite) {
 }
 
 function paired(device) {
+  // The invitation is used up: drop every copy the page still holds.
+  state.invite = null;
+  ui.pasteText.value = "";
   state.removed = false;
   state.generation++;
   resetLibrary();
@@ -688,18 +696,7 @@ function rowState(row, kind, text, { action, dismiss = false } = {}) {
 
 // Begun uploads are remembered (ID, name, size only) so a reload, or iOS
 // discarding the tab in the background, can still ask home what happened.
-async function remember(up) {
-  const list = (await store.get("uploads")) ?? [];
-  list.push({ id: up.id, name: up.name, size: up.size, at: Date.now() });
-  await store.put("uploads", list.slice(-50));
-}
-async function settle(id) {
-  const list = (await store.get("uploads")) ?? [];
-  await store.put(
-    "uploads",
-    list.filter((u) => u.id !== id),
-  );
-}
+const settle = (id) => uploadLog.settle(id).catch(() => {});
 
 function addFiles(files) {
   clearAlert();
@@ -731,9 +728,10 @@ function upload(file, row) {
     PRIORITY.upload,
     (link) =>
       put(link, up, {
+        // Nothing is sent if this throws: at the bound or on a storage error.
         onBegin: async () => {
+          await uploadLog.remember(up);
           up.begun = true;
-          await remember(up);
         },
         onProgress: (fraction) => {
           row.progress.value = fraction;
@@ -772,7 +770,7 @@ function upload(file, row) {
 function added(up, object) {
   const { row } = up;
   rowState(row, "done", `Added · ${formatBytes(object.length)}`);
-  settle(up.id).catch(() => {});
+  settle(up.id);
   const type = up.file && imageType(object.key, object.type);
   if (type && !cache.get(object.key)) cache.put(object.key, new Blob([up.file], { type }));
   insertObject(object);
@@ -784,7 +782,7 @@ function retryButton(up) {
     ? {
         label: "Upload again",
         run: () => {
-          settle(up.id).catch(() => {});
+          settle(up.id);
           upload(up.file, up.row);
         },
       }
@@ -805,7 +803,7 @@ function uploadFailed(up, error) {
     return check(up, "This photo couldn't be read from the phone. Checking with home…");
   }
   if (["refused", "store"].includes(error.reason) && !up.accepted) {
-    settle(up.id).catch(() => {});
+    settle(up.id);
     return rowState(row, "failed", "Home didn't take this photo. It may be over today's upload limit; try again later.", {
       action: retryButton(up),
       dismiss: true,
@@ -819,6 +817,8 @@ function uploadFailed(up, error) {
 function check(up, text = "Checking with home…") {
   const { row } = up;
   const generation = state.generation;
+  // Dismissing an unconfirmed upload is the owner's call to stop checking it.
+  row.onDismiss = () => settle(up.id);
   rowState(row, "checking", text);
   row.progress.value = 0;
   remote
@@ -827,7 +827,7 @@ function check(up, text = "Checking with home…") {
       if (!current(generation)) return;
       if (m.type === "committed") return added(up, { key: m.key, length: m.length, type: m.mime });
       if (m.type === "failed") {
-        settle(up.id).catch(() => {});
+        settle(up.id);
         if (up.file) return rowState(row, "failed", "Upload failed.", { action: retryButton(up), dismiss: true });
         return rowState(row, "failed", "Upload failed. Pick the photo again to add it.", { dismiss: true });
       }
@@ -840,14 +840,13 @@ function check(up, text = "Checking with home…") {
         action: {
           label: "Check the list",
           run: () => {
-            settle(up.id).catch(() => {});
+            settle(up.id);
             row.item.remove();
             refresh();
           },
         },
         dismiss: true,
       });
-      row.onDismiss = () => settle(up.id).catch(() => {});
     })
     .catch((error) => {
       if (!current(generation) || ["removed", "unrecognized"].includes(error?.reason)) return;
@@ -863,11 +862,10 @@ async function restoreUploads() {
   if (restored) return;
   restored = true;
   const known = new Set([...state.active].map((u) => u.id));
-  for (const entry of (await store.get("uploads").catch(() => null)) ?? []) {
+  for (const entry of (await uploadLog.entries().catch(() => null)) ?? []) {
     if (known.has(entry.id)) continue;
     const row = uploadRow(entry.name);
     const up = { id: entry.id, file: null, name: entry.name, size: entry.size, row, begun: true, accepted: true };
-    row.onDismiss = () => settle(up.id).catch(() => {});
     check(up, "Interrupted while the page was closed. Checking with home…");
   }
 }
@@ -894,6 +892,8 @@ ui.forget.addEventListener("click", async () => {
   state.downloads.clear();
   restored = false;
   state.removed = false;
+  state.invite = null;
+  ui.pasteText.value = "";
   clearAlert();
   showWelcome(
     "This phone is no longer paired, and its pairing was deleted from this browser. Your photos at home are untouched. To also remove it from the list at home, remove it there.",
@@ -902,10 +902,13 @@ ui.forget.addEventListener("click", async () => {
 
 // ---- visibility ---------------------------------------------------------------
 
+// Coming back to the library reconnects once, so it is live without a tap;
+// there are still no idle pings, and the idle close applies as usual.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return remote.hidden();
-  remote.visible();
-  if (!ui.library.hidden && remote.queue.paused && remote.queue.length) remote.queue.resume();
+  const library = !ui.library.hidden && !state.removed;
+  remote.visible({ reconnect: library });
+  if (library && !state.listed) refresh();
 });
 
 // ---- start ---------------------------------------------------------------------
@@ -925,10 +928,12 @@ async function start() {
     showPanel("unsupported");
     return;
   }
-  if (offered.invite || offered.error) {
+  const offer = offered;
+  offered = null;
+  if (offer.invite || offer.error) {
     if (!device) showWelcome();
     else openLibrary();
-    return receive(offered);
+    return receive(offer);
   }
   if (pending) {
     // A pairing was interrupted after its last step; ask home once more.

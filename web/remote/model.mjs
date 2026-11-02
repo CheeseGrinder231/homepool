@@ -263,3 +263,40 @@ export class CancelledError extends Error {
     this.reason = "cancelled";
   }
 }
+
+// Begun uploads whose outcome home has not confirmed: ID, name and size only.
+// An entry leaves only when its outcome is settled or the owner dismisses it,
+// never by age or count. At the bound, a new upload is refused before
+// put-begin is sent, so every attempt home may hold can still be checked.
+export const MAX_UNSETTLED = 50;
+export class UploadLog {
+  constructor(store, { max = MAX_UNSETTLED } = {}) {
+    this.store = store;
+    this.max = max;
+    this.chain = Promise.resolve();
+  }
+  // Read-modify-write steps run one at a time so none loses another's entry.
+  #update(change) {
+    const next = this.chain.then(async () => {
+      const list = (await this.store.get("uploads")) ?? [];
+      const out = change(list);
+      if (out !== list) await this.store.put("uploads", out);
+      return out;
+    });
+    this.chain = next.catch(() => {});
+    return next;
+  }
+  entries() {
+    return this.#update((list) => list);
+  }
+  remember({ id, name, size }) {
+    return this.#update((list) => {
+      if (list.some((u) => u.id === id)) return list;
+      if (list.length >= this.max) throw new LinkError("unsettled");
+      return [...list, { id, name, size, at: Date.now() }];
+    });
+  }
+  settle(id) {
+    return this.#update((list) => (list.some((u) => u.id === id) ? list.filter((u) => u.id !== id) : list));
+  }
+}

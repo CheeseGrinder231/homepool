@@ -86,6 +86,7 @@ async function home({ objects = new Map() } = {}) {
     }
     send(bytes) {
       if (this.closed) return; // a closing socket drops sends, as browsers do
+      this.frames = (this.frames ?? 0) + 1;
       const copy = new Uint8Array(bytes);
       this.chain = this.chain.then(() => this.receive(copy)).catch((e) => {
         this.error = e;
@@ -432,4 +433,50 @@ test("forget closes the session and deletes every record", async () => {
   await assert.rejects(waiting.done, (e) => e.reason === "cancelled");
   void queued;
   await assert.rejects(p.remote.ensure(), (e) => e.reason === "unpaired");
+});
+
+test("returning to the page reconnects once, without idle pings", async () => {
+  const h = await home();
+  const p = phone(h);
+  await p.remote.pair(h.invite());
+  const first = h.sockets.length;
+  // Hidden while idle: the session closes and frees its slot.
+  p.remote.hidden();
+  assert.equal(p.remote.link, null);
+  await p.remote.visible({ reconnect: true });
+  assert.equal(h.sockets.length, first + 1);
+  assert.ok(p.remote.link && !p.remote.link.closed);
+  assert.equal(p.statuses.at(-1), "connected");
+  // A live link after a blink stays; a long absence replaces it, once.
+  p.remote.hiddenAt = Date.now();
+  await p.remote.visible({ reconnect: true });
+  assert.equal(h.sockets.length, first + 1);
+  p.remote.hiddenAt = Date.now() - 2000;
+  await p.remote.visible({ reconnect: true });
+  assert.equal(h.sockets.length, first + 2);
+  // Nothing is sent on an idle session: no pings, no other frames.
+  const socket = h.sockets.at(-1);
+  await new Promise((r) => setTimeout(r, 20));
+  const frames = socket.frames;
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(socket.frames, frames);
+  // Away from the library (reconnect false), returning does not dial.
+  p.remote.hidden();
+  await p.remote.visible();
+  assert.equal(h.sockets.length, first + 2);
+  // A failed reconnect is reported once and does not dial again on its own.
+  h.refuse = CLOSE.homeOffline;
+  await p.remote.visible({ reconnect: true });
+  const failed = h.sockets.length;
+  assert.equal(p.statuses.at(-1), "offline:home-offline");
+  assert.equal(p.remote.queue.paused, true);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(h.sockets.length, failed);
+  // The next return resumes work left paused by the failure.
+  const waiting = p.remote.run(3, async () => "later");
+  p.remote.hidden();
+  h.refuse = null;
+  await p.remote.visible({ reconnect: true });
+  assert.equal(await waiting.done, "later");
+  p.remote.disconnect();
 });
