@@ -159,19 +159,41 @@ export function decode(b) {
   return out;
 }
 // Relay controls have fixed positional payloads; session zero is privileged.
-const kinds = ["data", "open", "close", "error", "token-set", "token-remove", "ping", "pong"];
+const kinds = [
+  "data",
+  "open",
+  "close",
+  "error",
+  "token-set",
+  "token-remove",
+  "ping",
+  "pong",
+  "ack",
+];
 export function envelope(kind, session, data = new Uint8Array()) {
   const k = kinds.indexOf(kind);
-  const sizes = [null, 4, 0, 0, 45, 4, 8, 8];
-  if (k < 0 || !Number.isInteger(session) || session < 0 || session > 0xffffffff ||
-      !(data instanceof Uint8Array) || data.length > 65535 ||
-      (k >= 4 ? session !== 0 : session === 0) ||
-      (k !== 0 && data.length !== sizes[k]) || (k === 4 && data[32] > 1))
+  const sizes = [null, 4, 0, 0, 45, 4, 8, 8, 8];
+  if (
+    k < 0 ||
+    !Number.isInteger(session) ||
+    session < 0 ||
+    session > 0xffffffff ||
+    !(data instanceof Uint8Array) ||
+    data.length > 65535 ||
+    (k >= 4 && k <= 7 ? session !== 0 : session === 0) ||
+    (k !== 0 && data.length !== sizes[k]) ||
+    (k === 4 && data[32] > 1)
+  )
     throw Error("envelope");
   return concat(new Uint8Array([1, k]), number(session, 4), data);
 }
 export function unwrap(b) {
-  if (!(b instanceof Uint8Array) || b.length < 6 || b.length > 65541 || b[0] !== 1)
+  if (
+    !(b instanceof Uint8Array) ||
+    b.length < 6 ||
+    b.length > 65541 ||
+    b[0] !== 1
+  )
     throw Error("envelope");
   const kind = kinds[b[1]],
     session = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(2),
@@ -180,11 +202,37 @@ export function unwrap(b) {
   return { kind, session, data };
 }
 export function tokenSet(hash, tokenClass, binding, expiry = 0n) {
-  if (!(hash instanceof Uint8Array) || hash.length !== 32 || ![0, 1].includes(tokenClass) ||
-      !Number.isInteger(binding) || binding < 0 || binding > 0xffffffff ||
-      typeof expiry !== "bigint" || expiry < 0n || expiry > 0xffffffffffffffffn)
+  if (
+    !(hash instanceof Uint8Array) ||
+    hash.length !== 32 ||
+    ![0, 1].includes(tokenClass) ||
+    !Number.isInteger(binding) ||
+    binding < 0 ||
+    binding > 0xffffffff ||
+    typeof expiry !== "bigint" ||
+    expiry < 0n ||
+    expiry > 0xffffffffffffffffn
+  )
     throw Error("token-set");
-  return envelope("token-set", 0, concat(hash, new Uint8Array([tokenClass]), number(binding, 4), number(expiry, 8)));
+  return envelope(
+    "token-set",
+    0,
+    concat(
+      hash,
+      new Uint8Array([tokenClass]),
+      number(binding, 4),
+      number(expiry, 8),
+    ),
+  );
+}
+export function ack(session, received) {
+  if (
+    typeof received !== "bigint" ||
+    received < 0n ||
+    received > 0xffffffffffffffffn
+  )
+    throw Error("ack");
+  return envelope("ack", session, number(received, 8));
 }
 export const bindingBytes = (binding) => {
   valid("count", binding);

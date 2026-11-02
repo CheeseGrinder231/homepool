@@ -1,0 +1,27 @@
+name = "homepool-relay-example"
+main = "worker.mjs"
+compatibility_date = "2026-11-01"
+workers_dev = false
+preview_urls = false
+
+[observability]
+enabled = false
+
+[vars]
+# Fail closed until an operator supplies a private route allowlist and secret.
+KILL_SWITCH = "true"
+ROUTES = '[]'
+# BRIDGE_TOKENS must be a Worker secret: JSON object mapping each route to
+# its own 64-lowercase-hex bridge token. Never commit or log that value.
+
+[[durable_objects.bindings]]
+name = "ROUTES_DO"
+class_name = "Relay"
+
+[[durable_objects.bindings]]
+name = "UPGRADES"
+class_name = "UpgradeGate"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Relay", "UpgradeGate"]
