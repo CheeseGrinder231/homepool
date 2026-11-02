@@ -87,8 +87,9 @@ message caps, eight-chunk windows, four active workers, a 60-second transfer
 no-progress limit and a 24-hour session lifetime. Idle authenticated sessions are
 not closed for silence. Sessions are visited in turn, sending one download chunk
 per visit. Pings do not advance transfer progress. S3 sockets have 30-second
-operation budgets. OS DNS resolution is synchronous and remains subject to the
-host resolver's timeout. Relay text keepalive is every 15 seconds with a
+operation budgets. S3 resolution uses at most four background resolver threads; callers
+wait only within the operation deadline. Relay resolution runs off the control
+loop and follows the host resolver timeout. Relay text keepalive is every 15 seconds with a
 10-second pong deadline. Disconnects discard all Noise sessions and reconnect
 with exponential backoff and random jitter; token registrations are re-sent.
 

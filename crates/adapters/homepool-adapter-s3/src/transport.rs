@@ -68,6 +68,41 @@ impl Read for Body {
         Ok(n)
     }
 }
+static RESOLVING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+struct ResolvePermit;
+impl Drop for ResolvePermit {
+    fn drop(&mut self) {
+        RESOLVING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+fn resolve(host: &str, port: u16, deadline: Instant) -> Result<std::net::SocketAddr> {
+    if Instant::now() >= deadline {
+        return Err("resolve deadline");
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(std::net::SocketAddr::new(ip, port));
+    }
+    use std::sync::atomic::Ordering;
+    RESOLVING
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            (n < settings::RESOLVERS).then_some(n + 1)
+        })
+        .map_err(|_| "resolver capacity")?;
+    let permit = ResolvePermit;
+    let host = host.to_owned();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _permit = permit;
+        let result = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|_| "resolve")
+            .and_then(|mut addresses| addresses.next().ok_or("resolve"));
+        let _ = sender.send(result);
+    });
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| "resolve deadline")?
+}
 pub fn request(
     endpoint: &Url,
     method: &str,
@@ -79,12 +114,12 @@ pub fn request(
     let deadline = Instant::now() + settings::TIMEOUT;
     let host = endpoint.host_str().ok_or("endpoint")?;
     let port = endpoint.port_or_known_default().ok_or("endpoint")?;
-    let address = (host, port)
-        .to_socket_addrs()
-        .map_err(|_| "resolve")?
-        .next()
-        .ok_or("resolve")?;
-    let tcp = TcpStream::connect_timeout(&address, settings::TIMEOUT).map_err(|_| "connect")?;
+    let address = resolve(host, port, deadline)?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("connect deadline");
+    }
+    let tcp = TcpStream::connect_timeout(&address, remaining).map_err(|_| "connect")?;
     tcp.set_read_timeout(Some(settings::TIMEOUT))
         .map_err(|_| "timeout")?;
     tcp.set_write_timeout(Some(settings::TIMEOUT))
@@ -165,4 +200,25 @@ pub fn request(
         remaining: if method == "HEAD" { 0 } else { length },
         deadline,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn expired_resolution_budget_fails_before_work() {
+        assert_eq!(
+            resolve("192.0.2.1", 80, Instant::now()).unwrap_err(),
+            "resolve deadline"
+        );
+    }
+    #[test]
+    fn saturated_resolvers_refuse_without_allocating_another_worker() {
+        use std::sync::atomic::Ordering;
+        RESOLVING.store(settings::RESOLVERS, Ordering::SeqCst);
+        let result = resolve("localhost", 80, Instant::now() + settings::TIMEOUT);
+        let count = RESOLVING.swap(0, Ordering::SeqCst);
+        assert_eq!(result.unwrap_err(), "resolver capacity");
+        assert_eq!(count, settings::RESOLVERS);
+    }
 }
