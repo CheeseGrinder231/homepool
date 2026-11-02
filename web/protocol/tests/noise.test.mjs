@@ -187,3 +187,45 @@ test("transfer rejects truncation and extra chunks", async () => {
     empty.accept({ type: "chunk", id, index: 0, data: new Uint8Array([1]) }),
   );
 });
+
+test("live transfer rejects duplicate, skipped index, and wrong count", () => {
+  for (const fault of ["duplicate", "skip", "count"]) {
+    const id = "01".repeat(16), t = new TransferForTest(id, 2);
+    t.accept({type:"chunk", id, index:0, data:new Uint8Array([1])});
+    if (fault === "count") {
+      t.accept({type:"chunk", id, index:1, data:new Uint8Array([2])});
+      assert.throws(() => t.accept({type:"get-end", id, length:2, count:1}));
+    } else assert.throws(() => t.accept({type:"chunk", id, index:fault === "skip" ? 2 : 0, data:new Uint8Array([2])}));
+  }
+});
+import { Transfer as TransferForTest } from "../wire.mjs";
+
+test("final legal nonce and reserved nonce, both directions", async () => {
+  const a = await keyPair(), b = await keyPair();
+  const common = {mode:"reconnect", prologue:new Uint8Array()};
+  const i = await NoiseCore.create({...common, initiator:true, privateKey:a.privateKey,
+    publicKey:await publicBytes(a.publicKey), remoteStatic:await publicBytes(b.publicKey)});
+  const r = await NoiseCore.create({...common, initiator:false, privateKey:b.privateKey,
+    publicKey:await publicBytes(b.publicKey)});
+  await r.message(true, await i.message(false));
+  await i.message(true, await r.message(false));
+  for (const [sender, receiver] of [[i,r],[r,i]]) {
+    sender.send.n = receiver.recv.n = 0xfffffffffffffffen;
+    const cipher = await sender.send.run(bytes("last"), new Uint8Array());
+    assert.equal(hex(await receiver.recv.run(cipher, new Uint8Array(), true)), hex(bytes("last")));
+    await assert.rejects(sender.send.run(bytes("reserved"), new Uint8Array()));
+    await assert.rejects(receiver.recv.run(cipher, new Uint8Array(), true));
+  }
+});
+for (const mode of ["enroll", "reconnect"]) test(`unwrapped non-extractable key ${mode}`, async () => {
+  const original = await crypto.subtle.generateKey("X25519", true, ["deriveBits"]);
+  const wrapping = await crypto.subtle.generateKey({name:"AES-GCM",length:256}, false, ["wrapKey","unwrapKey"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const wrapped = await crypto.subtle.wrapKey("pkcs8", original.privateKey, wrapping, {name:"AES-GCM",iv});
+  const restored = await crypto.subtle.unwrapKey("pkcs8", wrapped, wrapping, {name:"AES-GCM",iv}, "X25519", false, ["deriveBits"]);
+  await assert.rejects(crypto.subtle.exportKey("pkcs8", restored));
+  const [i,r] = await pair(mode, {privateKey:restored, publicKey:await publicBytes(original.publicKey)});
+  await handshake(i,r,mode);
+  assert.equal(hex(await r.decrypt(await i.encrypt(bytes("restored")))), hex(bytes("restored")));
+  assert.equal(hex(await i.decrypt(await r.encrypt(bytes("reply")))), hex(bytes("reply")));
+});

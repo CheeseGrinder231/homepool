@@ -206,7 +206,22 @@ pub fn decode(mut b: &[u8]) -> Result<Value, String> {
     Ok(out)
 }
 pub fn envelope(kind: u8, session: u32, data: &[u8]) -> Result<Vec<u8>, String> {
-    if kind > 3 || session == 0 || data.len() > 65535 || (kind != 0 && !data.is_empty()) {
+    let size = match kind {
+        0 => None,
+        1 | 5 => Some(4),
+        2 | 3 => Some(0),
+        4 => Some(45),
+        6 | 7 => Some(8),
+        _ => return Err("envelope".into()),
+    };
+    if (if kind >= 4 {
+        session != 0
+    } else {
+        session == 0
+    }) || data.len() > 65535
+        || size.is_some_and(|n| data.len() != n)
+        || (kind == 4 && data[32] > 1)
+    {
         return Err("envelope".into());
     }
     let mut b = vec![1, kind];
