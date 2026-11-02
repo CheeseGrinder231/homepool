@@ -1,0 +1,19 @@
+[Unit]
+Description=Homepool outbound home bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/homepool-bridge run %h/.config/homepool/bridge.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/homepool/bridge
+
+[Install]
+WantedBy=default.target
