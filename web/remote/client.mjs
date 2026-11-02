@@ -710,21 +710,31 @@ export class Remote {
   }
 
   // Page visible again: if a transfer is running, prove the link is alive with
-  // one ping; a dead link interrupts the transfer, which then recovers.
-  async visible() {
+  // one ping; a dead link interrupts the transfer, which then recovers. With
+  // `reconnect`, an idle paired page connects once (and resumes paused work);
+  // a failure is reported and nothing dials again until the next action.
+  async visible({ reconnect = false } = {}) {
     const away = Date.now() - (this.hiddenAt ?? Date.now());
     this.hiddenAt = null;
     const link = this.link;
-    if (!link || link.closed) return;
-    if (!this.queue.busy) {
-      if (away > 1000) this.disconnect();
-      return;
+    if (link && !link.closed) {
+      if (this.queue.busy) {
+        try {
+          await link.ping(TIMES.check);
+        } catch {
+          link.close("interrupted");
+        }
+        return;
+      }
+      if (away <= 1000) return;
+      this.disconnect();
     }
+    // Running work reconnects through its own retry.
+    if (!reconnect || !this.device || this.connecting || this.queue.busy) return;
+    this.queue.resume();
     try {
-      await link.ping(TIMES.check);
-    } catch {
-      link.close("interrupted");
-    }
+      await this.ensure();
+    } catch {}
   }
 
   disconnect() {
