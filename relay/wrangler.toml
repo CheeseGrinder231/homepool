@@ -26,3 +26,12 @@ class_name = "UpgradeGate"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Relay", "UpgradeGate"]
+
+# The remote image page. The Worker runs first and serves only its fixed list
+# of page files, with the page's security headers (see worker.mjs).
+[assets]
+directory = "../web"
+binding = "ASSETS"
+run_worker_first = true
+html_handling = "none"
+not_found_handling = "none"

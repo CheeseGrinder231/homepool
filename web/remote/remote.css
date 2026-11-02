@@ -1,0 +1,155 @@
+/* Additions for the remote page; the base look comes from /images/style.css. */
+:root {
+  --ok: #1f7a3d;
+  --ok-soft: #e1f3e6;
+  --warn: #8a5a00;
+  --warn-soft: #fbf0d6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ok: #7fd79a;
+    --ok-soft: #1c3324;
+    --warn: #f0c46b;
+    --warn-soft: #3a2f16;
+  }
+}
+
+#library { display: grid; gap: 1rem; }
+
+.top-side { display: flex; align-items: center; gap: 0.25rem; min-width: 0; }
+
+.status {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: var(--tile);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.status::before { content: "●"; margin-right: 0.35rem; }
+.status.connected { background: var(--ok-soft); color: var(--ok); }
+.status.offline { background: var(--warn-soft); color: var(--warn); }
+
+.alert-actions { display: flex; flex-shrink: 0; }
+.alert.info { background: var(--accent-soft); color: var(--text); }
+.alert.info .quiet { color: var(--accent); }
+
+.quiet-panel { text-align: center; }
+
+.welcome-note {
+  background: var(--warn-soft);
+  color: var(--text) !important;
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+
+.steps, .progress-steps { margin: 0 0 0.75rem; padding-left: 1.4rem; display: grid; gap: 0.5rem; }
+.steps li::marker { font-weight: 700; color: var(--accent); }
+.small { font-size: 0.85rem; }
+
+details { margin-top: 0.25rem; }
+summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: 0.4rem 0; min-height: 36px; }
+details form { margin-top: 0.5rem; }
+.welcome-retry { text-align: center; margin: 0.5rem 0 0 !important; }
+
+.progress-steps { list-style: none; padding: 0; }
+.progress-steps li { color: var(--muted); padding-left: 1.6rem; position: relative; }
+.progress-steps li::before {
+  content: "";
+  position: absolute;
+  left: 0.2rem;
+  top: 0.35rem;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+}
+.progress-steps li.active { color: var(--text); font-weight: 600; }
+.progress-steps li.active::before { border-color: var(--accent); }
+.progress-steps li.done { color: var(--text); }
+.progress-steps li.done::before { background: var(--accent); border-color: var(--accent); }
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+  margin: 0 auto 0.75rem;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+#pairing h2, .success h2 { text-align: center; }
+
+.check {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--ok-soft);
+  margin: 0 auto 0.75rem;
+  position: relative;
+}
+.check::after {
+  content: "";
+  position: absolute;
+  left: 20px;
+  top: 12px;
+  width: 12px;
+  height: 24px;
+  border: solid var(--ok);
+  border-width: 0 4px 4px 0;
+  transform: rotate(45deg);
+}
+.success p { text-align: center; }
+.wide { width: 100%; margin-bottom: 0.5rem; }
+.fingerprint p { text-align: left; }
+.code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  color: var(--text) !important;
+  overflow-wrap: anywhere;
+  word-spacing: 0.2em;
+}
+
+.keep-open {
+  background: var(--warn-soft);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.9rem;
+  font-size: 0.9rem;
+}
+
+.upload { grid-template-columns: 48px 1fr auto; }
+.upload-buttons { display: grid; justify-items: end; }
+.upload.unsure .upload-status { color: var(--warn); }
+.upload.done .upload-status { color: var(--ok); }
+.upload.unsure .upload-progress, .upload.checking .upload-progress { display: none; }
+
+.tile.loading .tile-button::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  animation: spin 0.9s linear infinite;
+}
+.tile.file .tile-size {
+  position: absolute;
+  top: calc(50% + 1.1rem);
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 0.65rem;
+  color: var(--muted);
+}
+
+.viewer-stage progress { width: 12rem; accent-color: var(--accent); }

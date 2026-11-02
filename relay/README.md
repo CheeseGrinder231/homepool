@@ -1,8 +1,8 @@
 # Relay Worker (slice 2 of #50)
 
-The Worker joins one bridge and up to four phones per configured route. No npm
-runtime dependencies, bridge process, page UI, deployment, or account setup is
-included. The target is **Workers Free**, using SQLite-backed Durable Objects
+The Worker joins one bridge and up to four phones per configured route, and
+serves the remote page (slice 4, below). No npm runtime dependencies, bridge
+process, deployment, or account setup is included. The target is **Workers Free**, using SQLite-backed Durable Objects
 (`new_sqlite_classes` for both classes). No billing-plan change is requested.
 The wire contract is in [off-lan-protocol.md](../docs/off-lan-protocol.md).
 
@@ -21,6 +21,24 @@ bridge claimant never replaces the admitted socket. Bridge loss closes phones;
 reconnect starts fresh sessions with IDs starting at one. Session zero controls
 are privileged to the admitted bridge. The relay interprets no Noise content.
 The bridge remains responsible for device/invitation authorization and storage.
+
+## Remote page
+
+The Worker also serves the [remote image page](../docs/remote-page.md) from
+its static assets (`web/`, see `[assets]` in `wrangler.toml`). It runs first
+for every request and serves only the fixed list of page files in `PAGE`, with
+the page's CSP and security headers; any other path reaches the route handling
+and is refused as before. Page requests count against the Worker request
+allowance, not the Durable Object budgets: about a dozen per page load, with no
+DO wakeup and no storage. The kill switch also stops the page.
+
+A refused phone admission now closes with a code: 4002 when the route has no
+bridge, 4001 when the token is unknown or expired, 4003 when its sessions are
+full. Home status is checked first, so a phone is never told its token is
+unknown while the bridge is away and may still be re-registering. As a result,
+whoever knows a route can learn whether its bridge is connected; the route is
+only in pairing links and page connections. A malformed admission or a missed
+deadline keeps the generic close.
 
 ## Bounds and recovery
 

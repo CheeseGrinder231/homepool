@@ -77,6 +77,8 @@ jobs:
       - run: node --version
       - name: Image page unit tests
         run: node --test web/images/tests/sigv4.test.mjs web/images/tests/model.test.mjs web/images/tests/site.test.mjs
+      - name: Remote page unit tests
+        run: node --test web/remote/tests/*.test.mjs
 
   structure:
     name: structure

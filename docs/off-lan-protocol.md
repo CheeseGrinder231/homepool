@@ -142,6 +142,10 @@ PSK, key or content appears here. Route is connection context; token is never a
 URL parameter or logged. The relay forwards nothing until admission succeeds.
 Tokens admit relay use only. Token hashes and invitation/device binding are
 bridge/relay policy. Every reconnect sends admission again.
+A refused phone admission closes the socket with code 4002 when the route's
+bridge is not connected, 4001 when the token is unknown or expired, and 4003
+when the route's sessions are full, checked in that order; other failures use
+the generic close. The page uses these to explain the refusal.
 
 ## Relay-level controls
 

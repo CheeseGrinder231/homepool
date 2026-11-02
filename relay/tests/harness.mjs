@@ -16,8 +16,9 @@ export class Socket {
     if (this.readyState !== 1) throw Error("closed");
     this.sent.push(new Uint8Array(b));
   }
-  close() {
+  close(code) {
     this.readyState = 3;
+    this.code = code;
   }
 }
 globalThis.WebSocketRequestResponsePair ??= class {
