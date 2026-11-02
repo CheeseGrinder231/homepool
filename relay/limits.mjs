@@ -1,3 +1,7 @@
+// Fixed, non-authoritative liveness frames; never tokens or Noise messages.
+export const BRIDGE_PING = "homepool/1/bridge-ping";
+export const BRIDGE_PONG = "homepool/1/bridge-pong";
+export const AUTO_REQUESTS_PER_ROUTE = 5760 / 20;
 export const RELAY_WINDOW = 1024 * 1024;
 export const ACK_INTERVAL = 64 * 1024;
 // Includes envelope/schema/AEAD overhead, not just plaintext file bytes.
@@ -10,10 +14,10 @@ export const defaults = Object.freeze({
   bytesPerSecond: 8 * 1024 * 1024,
   controlsPerSecond: 32,
   controlBytesPerSecond: 4096,
-  dailyBytes: 256 * 1024 ** 2,
-  dailyMessages: 60000,
+  dailyBytes: 3 * 1024 ** 3,
+  dailyMessages: 800000,
   dailyWrites: 10000,
-  dailyDurationMs: 90000000,
+  dailyDurationMs: 40000000,
   dailyUpgrades: 100,
   dailyFailures: 100,
   upgradesPerSecond: 20,
@@ -68,6 +72,14 @@ export function routeLimits(env) {
         "dailyFailures",
         "dailyDurationMs",
       ].map((k) => [k, Math.floor(defaults[k] / count)]),
+    ),
+    // Include scheduled auto-response traffic and auxiliary invocations in the
+    // half-Free request allowance, even though auto-responses bypass JS budgets.
+    dailyMessages: Math.floor(
+      Math.min(
+        defaults.dailyMessages,
+        (50000 - 1200 - count * AUTO_REQUESTS_PER_ROUTE) * 20,
+      ) / count,
     ),
   };
 }

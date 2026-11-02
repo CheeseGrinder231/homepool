@@ -9,7 +9,13 @@ import {
   ack,
   bindingBytes,
 } from "../../web/protocol/wire.mjs";
-import { hash, RELAY_WINDOW, APPLICATION_WINDOW } from "../limits.mjs";
+import {
+  hash,
+  RELAY_WINDOW,
+  APPLICATION_WINDOW,
+  BRIDGE_PING,
+  BRIDGE_PONG,
+} from "../limits.mjs";
 import worker, { UpgradeGate } from "../worker.mjs";
 const unhex = (s) => new Uint8Array(Buffer.from(s, "hex"));
 const phoneToken = "cd".repeat(32);
@@ -74,17 +80,22 @@ test("token control privilege and phone routing cannot be forged", async () => {
   await h.send(q, data(q.data.id + 1));
   assert.equal(q.readyState, 3);
 });
-test("keepalive echoes eight opaque bytes and survives reconstruction", async () => {
+test("fixed text auto-response is liveness only and survives reconstruction", async () => {
   const h = harness(),
     b = await bridge(h);
   h.restart();
-  const value = unhex("0102030405060708");
-  await h.send(b, envelope("ping", 0, value));
-  assert.deepEqual(unwrap(b.sent.at(-1)), {
-    kind: "pong",
-    session: 0,
-    data: value,
-  });
+  const before = structuredClone(h.stats);
+  await h.send(b, BRIDGE_PING);
+  assert.equal(b.sent.pop(), BRIDGE_PONG);
+  assert.deepEqual(h.stats, before);
+  const pending = h.pending();
+  await h.send(pending, BRIDGE_PING);
+  assert.equal(pending.sent.pop(), BRIDGE_PONG);
+  assert.equal(pending.data.role, "pending");
+  assert.equal(h.relay.bridge(), b);
+  pending.data.deadline = Date.now() - 1;
+  await h.relay.alarm();
+  assert.equal(pending.readyState, 3);
 });
 test("slow receiver: hard window checked before send in both directions; ACK rejects false totals", async () => {
   for (const down of [false, true]) {
@@ -135,8 +146,8 @@ test("session cap recovers; oversize and per-socket byte/message/control rates c
       c = await bridge(x);
     await register(x, c);
     if (c.readyState === 1) {
-      await x.send(c, envelope("ping", 0, new Uint8Array(8)));
-      await x.send(c, envelope("ping", 0, new Uint8Array(8)));
+      await x.send(c, envelope("token-remove", 0, bindingBytes(999)));
+      await x.send(c, envelope("token-remove", 0, bindingBytes(999)));
     }
     assert.equal(c.readyState, 3);
   }
@@ -160,7 +171,7 @@ test("daily counters persist through reconstruction and reset at UTC day boundar
       if (limits.dailyFailures) {
         const wrong = h.pending();
         await h.send(wrong, admission("bridge", "00".repeat(32)));
-      } else await h.send(b, envelope("ping", 0, new Uint8Array(8)));
+      } else await h.send(b, envelope("token-remove", 0, bindingBytes(999)));
       h.restart();
       const saved = structuredClone(h.values.get("budget"));
       assert.ok(saved);
@@ -209,6 +220,13 @@ test("unknown routes allocate no objects; kill switch and invalid URLs reject be
         .status,
       404,
     );
+  env.ROUTES = JSON.stringify(Array.from({ length: 101 }, (_, n) => String(n)));
+  assert.equal(
+    (await worker.fetch(new Request(new URL("/0", import.meta.url)), env))
+      .status,
+    503,
+  );
+  env.ROUTES = '["example"]';
   env.KILL_SWITCH = "true";
   assert.equal(
     (await worker.fetch(new Request(new URL("/example", import.meta.url)), env))
@@ -219,7 +237,7 @@ test("unknown routes allocate no objects; kill switch and invalid URLs reject be
   const h = harness(),
     b = await bridge(h);
   h.env.KILL_SWITCH = "true";
-  await h.send(b, envelope("ping", 0, new Uint8Array(8)));
+  await h.send(b, envelope("token-remove", 0, bindingBytes(999)));
   assert.equal(b.readyState, 3);
 });
 test("global rate survives new coordinator instances and recovers next second", async () => {
@@ -341,12 +359,12 @@ test("message, byte, and control rate windows reset on the next second", async (
       }),
       b = await bridge(h);
     await register(h, b);
-    await h.send(b, envelope("ping", 0, new Uint8Array(8)));
+    await h.send(b, envelope("token-remove", 0, bindingBytes(999)));
     clock += 1000;
-    await h.send(b, envelope("ping", 0, new Uint8Array(8)));
-    await h.send(b, envelope("ping", 0, new Uint8Array(8)));
+    await h.send(b, envelope("token-remove", 0, bindingBytes(999)));
+    await h.send(b, envelope("token-remove", 0, bindingBytes(999)));
     assert.equal(b.readyState, 1);
-    await h.send(b, envelope("ping", 0, new Uint8Array(8)));
+    await h.send(b, envelope("token-remove", 0, bindingBytes(999)));
     assert.equal(b.readyState, 3);
     clock += 1000;
     assert.equal((await bridge(h)).readyState, 1);
@@ -478,6 +496,24 @@ test("configured routes share Free-plan admitted-work budgets", () => {
     "dailyDurationMs",
   ])
     assert.equal(two[k] * 2, one[k]);
-  assert.equal(one.dailyMessages, 60000);
+  assert.equal(one.dailyMessages, 800000);
   assert.equal(defaults.dailyUpgrades, 100);
+});
+
+test("Free plan billed-request allowance includes every configured bridge auto-response", () => {
+  for (const count of [1, 2, 16, 100]) {
+    const limits = routeLimits({
+      ROUTES: JSON.stringify(
+        Array.from({ length: count }, (_, n) => String(n)),
+      ),
+    });
+    assert.ok(
+      (limits.dailyMessages * count) / 20 + (count * 5760) / 20 + 1200 <= 50000,
+    );
+  }
+  assert.ok(defaults.dailyBytes > 2 * 1024 ** 3);
+  assert.ok(defaults.dailyWrites + 1100 <= 50000);
+  assert.ok(
+    (defaults.dailyDurationMs / 1000) * 0.128 + 100 * 31 * 0.128 <= 6500,
+  );
 });

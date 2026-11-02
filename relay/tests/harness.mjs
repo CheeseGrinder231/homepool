@@ -20,10 +20,22 @@ export class Socket {
     this.readyState = 3;
   }
 }
+globalThis.WebSocketRequestResponsePair ??= class {
+  constructor(request, response) {
+    this.request = request;
+    this.response = response;
+  }
+  getRequest() {
+    return this.request;
+  }
+  getResponse() {
+    return this.response;
+  }
+};
 export function harness(overrides = {}) {
   const values = new Map(),
     sockets = [];
-  const stats = { reads: 0, writes: 0, alarms: 0 };
+  const stats = { reads: 0, writes: 0, alarms: 0, wakeups: 0 };
   let tail = Promise.resolve();
   const ctx = {
     storage: {
@@ -46,6 +58,9 @@ export function harness(overrides = {}) {
       },
     },
     getWebSockets: () => sockets,
+    setWebSocketAutoResponse: (pair) => {
+      ctx.auto = pair;
+    },
     acceptWebSocket: (s) => sockets.push(s),
     blockConcurrencyWhile: (f) => {
       const task = tail.then(f);
@@ -84,9 +99,16 @@ export function harness(overrides = {}) {
       return s;
     },
     async send(s, b) {
+      if (typeof b === "string" && ctx.auto?.getRequest() === b) {
+        s.sent.push(ctx.auto.getResponse());
+        return;
+      }
+      stats.wakeups++;
       await relay.webSocketMessage(
         s,
-        b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength),
+        typeof b === "string"
+          ? b
+          : b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength),
       );
     },
   };

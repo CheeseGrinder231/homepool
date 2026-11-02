@@ -123,7 +123,7 @@ message without the caller's no-progress deadline or connection closure.
 Every post-admission binary message, including phone messages, has a six-byte
 header: version `1`, kind byte, unsigned 32-bit big-endian session ID. Kinds:
 `0=data`, `1=open`, `2=close`, `3=error`, `4=token-set`, `5=token-remove`,
-`6=ping`, `7=pong`, `8=ack`. Data/open/close/error session IDs are nonzero, relay assigned,
+`8=ack` (6/7 are unused). Data/open/close/error session IDs are nonzero, relay assigned,
 and scoped to one bridge connection. They are never device identities. Never
 reuse an ID while the bridge connection exists; reconnect before exhaustion.
 Close/error contain exactly the header, with no human-readable reason.
@@ -159,14 +159,39 @@ are unsigned big-endian; fixed payload sizes exclude the six-byte header.
 | --- | --- | --- |
 | token-set (4) | SHA-256 token hash (32), class (u8: 0 invitation, 1 device), binding (u32), expiry (u64 Unix seconds; 0 means none) | 45 |
 | token-remove (5) | binding (u32) | 4 |
-| ping (6), pong (7) | opaque value echoed unchanged | 8 |
 | ack (8), nonzero session ID | cumulative data-envelope bytes received on this session (u64) | 8 |
 
 The relay stores only token hashes in Durable Object storage, never mints tokens,
 and closes all sessions admitted with a removed binding. Open carries the binding
 of the admitting token; only the bridge assigns its meaning and permissions.
-The bridge sends relay ping every 15 seconds and reconnects when pong is late.
-This is independent of encrypted phone ping and carries no storage operation.
+After binary admission, the bridge sends the exact TEXT frame
+`homepool/1/bridge-ping` every 15 seconds; hibernation auto-response returns the
+exact TEXT frame `homepool/1/bridge-pong`. The bridge allows one outstanding ping,
+requires its pong within 10 seconds, and closes/reconnects with backoff and
+jitter when late. A pong proves only that the relay connection responds: never
+bridge admission, token registration persistence, end-to-end identity or storage
+availability. It carries no storage operation and wakes no DO handler.
+
+The auto-response API applies to all sockets attached to the route, including
+pending/phone sockets. The exact fixed-string echo is a non-authoritative
+liveness exception outside JS admission/rate/budget handling. A pending socket
+still needs binary admission before its deadline and cannot forward data;
+matching text cannot install tokens, replace a bridge or acquire a session.
+Other text frames are rejected. Scheduled keepalive traffic is included
+conservatively in the request allowance; arbitrary echo flooding cannot be
+bounded by JS without defeating zero-wakeup auto-response.
+
+Phones send **no idle pings**. An idle phone may lose its socket silently; on
+the next user action it reconnects lazily as needed, sends fresh admission and
+completes a fresh Noise handshake. On page visibility return, treat the old
+transport as stale and reconnect with fresh admission and Noise.
+Never resume old transport counters. Only while an operation is outstanding
+may a phone send the encrypted application `ping` every 15 seconds, with a
+10-second pong deadline. A late pong interrupts the operation and reconnects;
+use `put-status` to resolve uncertain uploads. No-progress deadlines still
+require file bytes/credits, so ping does not extend a stalled transfer. An idle
+phone does not send the bridge's text keepalive. Phone activity/visibility UI
+and bridge reconnect loops are contracts for the subsequent slices.
 The codec accepts the entire u64 expiry range (JavaScript uses BigInt), without
 rounding through a JavaScript Number. Shared exact vectors are in
 `protocol/relay-vectors.json`, including both classes and maximum integer values.
@@ -191,9 +216,10 @@ must be at most half RELAY_WINDOW (512 KiB), including all schema/Noise/envelope
 overhead, to leave headroom for ACK scheduling. The integration tests use eight
 60 KiB chunks per burst (492,032 envelope bytes) and flush at transfer-burst
 boundaries. Threshold plus application window is 576 KiB, below the 1 MiB relay
-window. Small encrypted ping/pong traffic accumulates toward the same threshold;
-a 24-hour regression includes hibernation and verifies it never fills the window.
-Keepalive and token controls are fixed-size and separately capped; ACKs cannot
+window. Operation-only encrypted ping/pong traffic uses the same threshold.
+A 24-hour regression sends only bridge text keepalive and verifies zero JS
+wakeups, reads, writes, alarms or phone traffic. Binary controls are fixed-size
+and separately capped; ACKs cannot
 allocate stale sessions or select another phone. The relay trusts cumulative
 receipt claims only for flow control, never for identity or storage permission.
 

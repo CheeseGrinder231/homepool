@@ -14,6 +14,8 @@ import {
   APPLICATION_WINDOW,
   RELAY_WINDOW,
   hash,
+  BRIDGE_PING,
+  BRIDGE_PONG,
 } from "../limits.mjs";
 import { EVENT_MS, batches } from "../budget.mjs";
 const unhex = (s) => new Uint8Array(Buffer.from(s, "hex"));
@@ -32,53 +34,27 @@ async function setup(h) {
   for (const p of phones) p.sent = [];
   return { b, phones };
 }
-test("24 h idle pings, threshold ACKs and hibernation stay below window and 1000 writes", async () => {
+test("24 h idle has no phone messages and zero keepalive wakes, writes, reads or alarms", async () => {
   const now = Date.now;
   let clock = 10 * 86400000;
   Date.now = () => clock;
   try {
     const h = harness(),
       { b, phones } = await setup(h),
-      up = phones.map((p) => new AckTracker(p.data.id)),
-      down = phones.map((p) => new AckTracker(p.data.id));
-    const size = encode({ type: "ping", id: "01".repeat(16) }).length + 16;
-    let acknowledgements = 0;
+      before = structuredClone(h.stats);
     for (let interval = 0; interval < 5760; interval++) {
-      await h.send(b, envelope("ping", 0, new Uint8Array(8)));
-      assert.equal(unwrap(b.sent.shift()).kind, "pong");
-      for (let n = 0; n < phones.length; n++) {
-        const p = phones[n],
-          frame = envelope("data", p.data.id, new Uint8Array(size));
-        await h.send(p, frame);
-        assert.equal(unwrap(b.sent.shift()).kind, "data");
-        const u = up[n].receive(frame.length);
-        if (u) {
-          await h.send(b, u);
-          acknowledgements++;
-        }
-        await h.send(b, frame);
-        assert.equal(unwrap(p.sent.shift()).kind, "data");
-        const d = down[n].receive(frame.length);
-        if (d) {
-          await h.send(p, d);
-          acknowledgements++;
-        }
-        assert.equal(p.readyState, 1);
-        for (const f of [p.data.up, p.data.down])
-          assert.ok(BigInt(f.sent) - BigInt(f.acked) < BigInt(ACK_INTERVAL));
-      }
-      h.restart(); // Every 15-second burst may hibernate; snapshots must restore exact usage.
+      await h.send(b, BRIDGE_PING);
+      assert.equal(b.sent.pop(), BRIDGE_PONG);
       if (interval < 5759) clock += 15000;
     }
-    assert.equal(acknowledgements, 20);
-    assert.ok(h.stats.writes < 1000, JSON.stringify(h.stats));
-    assert.ok(h.stats.reads < 6000, JSON.stringify(h.stats));
-    assert.equal(h.stats.alarms, 0);
+    assert.deepEqual(h.stats, before);
+    for (const p of phones)
+      for (const f of [p.data.up, p.data.down]) assert.equal(f.sent, "0");
+    h.restart();
+    await h.send(b, BRIDGE_PING);
+    assert.equal(b.sent.pop(), BRIDGE_PONG);
+    assert.deepEqual(h.stats, before);
     assert.ok(ACK_INTERVAL + APPLICATION_WINDOW < RELAY_WINDOW);
-    console.log(
-      "idle-day",
-      JSON.stringify({ ...h.stats, acknowledgements, frameBytes: size + 6 }),
-    );
   } finally {
     Date.now = now;
   }

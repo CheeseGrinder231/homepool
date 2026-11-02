@@ -211,10 +211,10 @@ pub fn envelope(kind: u8, session: u32, data: &[u8]) -> Result<Vec<u8>, String> 
         1 | 5 => Some(4),
         2 | 3 => Some(0),
         4 => Some(45),
-        6..=8 => Some(8),
+        8 => Some(8),
         _ => return Err("envelope".into()),
     };
-    if (if (4..=7).contains(&kind) {
+    if (if (4..=5).contains(&kind) {
         session != 0
     } else {
         session == 0

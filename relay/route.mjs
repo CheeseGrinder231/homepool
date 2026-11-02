@@ -12,6 +12,8 @@ import {
   constantTimeToken,
   rate,
   RELAY_WINDOW,
+  BRIDGE_PING,
+  BRIDGE_PONG,
 } from "./limits.mjs";
 const tokenBytes = (s) =>
   /^[0-9a-f]{64}$/.test(s ?? "")
@@ -24,6 +26,11 @@ export class Relay {
     this.env = env;
     this.limits = routeLimits(env);
     this.ledger = new Budget(ctx, this.limits);
+    if (env.KILL_SWITCH === "false")
+      ctx.setWebSocketAutoResponse(
+        new WebSocketRequestResponsePair(BRIDGE_PING, BRIDGE_PONG),
+      );
+    else ctx.setWebSocketAutoResponse();
   }
   sockets() {
     return this.ctx
@@ -336,11 +343,6 @@ export class Relay {
     s.send(opened);
   }
   async control(s, e) {
-    if (e.kind === "ping") {
-      s.send(envelope("pong", 0, e.data));
-      return;
-    }
-    if (e.kind === "pong") return;
     const tokens = (await this.ctx.storage.get("tokens")) ?? {};
     if (e.kind === "token-set") {
       const binding = view(e.data).getUint32(33),

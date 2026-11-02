@@ -166,21 +166,22 @@ const kinds = [
   "error",
   "token-set",
   "token-remove",
-  "ping",
-  "pong",
+  null, // Kinds 6/7 retired: bridge keepalive uses fixed text auto-response.
+  null,
   "ack",
 ];
 export function envelope(kind, session, data = new Uint8Array()) {
   const k = kinds.indexOf(kind);
-  const sizes = [null, 4, 0, 0, 45, 4, 8, 8, 8];
+  const sizes = [null, 4, 0, 0, 45, 4, null, null, 8];
   if (
     k < 0 ||
+    !kinds[k] ||
     !Number.isInteger(session) ||
     session < 0 ||
     session > 0xffffffff ||
     !(data instanceof Uint8Array) ||
     data.length > 65535 ||
-    (k >= 4 && k <= 7 ? session !== 0 : session === 0) ||
+    (k >= 4 && k <= 5 ? session !== 0 : session === 0) ||
     (k !== 0 && data.length !== sizes[k]) ||
     (k === 4 && data[32] > 1)
   )

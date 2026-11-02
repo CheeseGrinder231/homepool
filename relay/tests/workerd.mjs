@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { admission, envelope, unwrap } from "../../web/protocol/wire.mjs";
+import { BRIDGE_PING, BRIDGE_PONG } from "../limits.mjs";
 import { transfer } from "./transfer.mjs";
 const { Miniflare } = await import(pathToFileURL(process.env.MINIFLARE_MODULE));
 const modules = {};
@@ -64,41 +65,78 @@ try {
   );
   const result = await transfer({
     async connect(role, token) {
-      const response = await mf.dispatchFetch(
-        new URL("/example", process.env.RELAY_TEST_ORIGIN),
-        { headers: { Upgrade: "websocket" } },
-      );
-      assert.equal(response.status, 101);
-      const ws = response.webSocket;
-      ws.accept();
-      sockets.push(ws);
-      const q = [],
-        waiters = [];
-      ws.addEventListener("message", (e) => {
-        const b = new Uint8Array(e.data);
-        if (waiters.length) waiters.shift()(b);
-        else q.push(b);
-      });
-      ws.next = () =>
-        q.length
-          ? Promise.resolve(q.shift())
-          : new Promise((resolve, reject) => {
-              const timer = setTimeout(
-                () => reject(Error("receive deadline")),
-                10000,
-              );
-              waiters.push((b) => {
-                clearTimeout(timer);
-                resolve(b);
-              });
-            });
-      ws.send(admission(role, token));
-      return ws;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const response = await mf.dispatchFetch(
+          new URL("/example", process.env.RELAY_TEST_ORIGIN),
+          { headers: { Upgrade: "websocket" } },
+        );
+        assert.equal(response.status, 101);
+        const ws = response.webSocket;
+        ws.accept();
+        const q = [],
+          waiters = [];
+        let closed = false;
+        ws.addEventListener("message", (e) => {
+          const value =
+            typeof e.data === "string" ? e.data : new Uint8Array(e.data);
+          if (waiters.length) waiters.shift().resolve(value);
+          else q.push(value);
+        });
+        ws.addEventListener("close", () => {
+          closed = true;
+          for (const w of waiters.splice(0)) w.reject(Error("closed"));
+        });
+        ws.next = () =>
+          q.length
+            ? Promise.resolve(q.shift())
+            : closed
+              ? Promise.reject(Error("closed"))
+              : new Promise((resolve, reject) => {
+                  const timer = setTimeout(
+                    () => reject(Error("receive deadline")),
+                    10000,
+                  );
+                  waiters.push({
+                    resolve: (b) => {
+                      clearTimeout(timer);
+                      resolve(b);
+                    },
+                    reject: (e) => {
+                      clearTimeout(timer);
+                      reject(e);
+                    },
+                  });
+                });
+        ws.send(admission(role, token));
+        if (role === "phone") {
+          try {
+            const opened = await ws.next();
+            assert.equal(unwrap(opened).kind, "open");
+            q.unshift(opened);
+          } catch (error) {
+            ws.close();
+            if (attempt === 4) throw error;
+            await new Promise((r) => setTimeout(r, 100));
+            continue;
+          }
+        }
+        sockets.push(ws);
+        return ws;
+      }
     },
     send: async (s, b) => s.send(b),
     read: (s) => s.next(),
     pause: () => new Promise((r) => setTimeout(r, 150)),
   });
+  await mf.unsafeEvictDurableObject("relay", "Relay", {
+    name: "example",
+    webSockets: "hibernate",
+  });
+  for (let n = 0; n < 100; n++) {
+    sockets[0].send(BRIDGE_PING);
+    assert.equal(await sockets[0].next(), BRIDGE_PONG);
+  }
+  // A matching text frame would close the socket if delivered to the JS handler.
   // Deliberately withhold phone ACKs; the sixteenth max-size envelope must fail.
   const [bridge, slow] = sockets;
   for (let n = 0; n < 16; n++)

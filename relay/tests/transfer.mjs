@@ -9,15 +9,22 @@ import {
   unwrap,
   tokenSet,
 } from "../../web/protocol/wire.mjs";
-import { hash, APPLICATION_WINDOW } from "../limits.mjs";
+import {
+  hash,
+  APPLICATION_WINDOW,
+  BRIDGE_PING,
+  BRIDGE_PONG,
+} from "../limits.mjs";
 const token = "cd".repeat(32),
   unhex = (s) => new Uint8Array(Buffer.from(s, "hex"));
 const digest = (b) => createHash("sha256").update(b).digest("hex");
 export async function transfer(io) {
   const b = await io.connect("bridge", "ab".repeat(32));
   await io.send(b, tokenSet(unhex(await hash(unhex(token))), 1, 42));
-  await io.send(b, envelope("ping", 0, new Uint8Array(8)));
-  assert.equal(unwrap(await io.read(b)).kind, "pong");
+  await io.send(b, BRIDGE_PING);
+  assert.equal(await io.read(b), BRIDGE_PONG);
+  // Auto-pong is never admission or registration confirmation. A real socket
+  // adapter retries a refused phone admission until token registration completes.
   const sessions = [];
   for (const mode of ["enroll", "reconnect"]) {
     const p = await io.connect("phone", token),
