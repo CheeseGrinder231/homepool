@@ -133,6 +133,9 @@ try {
  const invitations=[await invite(),await invite()];await delay(300);
  const enrolled=await Promise.all(keys.map(async(key,i)=>{const p=await phone("enroll",invitations[i],key);const ack=await p.receive();assert.equal(ack.type,"enrolled");p.ws.close();return ack;}));
  await delay(300);
+ const invitationReconnect=await phone("reconnect",invitations[0],keys[0]);
+ assert.deepEqual(await invitationReconnect.receive(),enrolled[0]);invitationReconnect.ws.close();await delay(250);
+ await assert.rejects(phone("reconnect",invitations[0],keys[1]));
  const phones=await Promise.all(keys.map((key,i)=>phone("reconnect",invitations[i],key,enrolled[i].token)));
  console.log("two enrollments and IK reconnects passed");
  // A validly paired device sends records the schema or operation policy refuses.
@@ -146,6 +149,13 @@ try {
  await phones[0].raw(badGet);await wait(()=>{assert(phones[0].closed());});await delay(200);phones[0]=await phone("reconnect",invitations[0],keys[0],enrolled[0].token);
  await assert.rejects(phone("enroll",invitations[0],keys[0]));
  console.log("paired oversize, unknown operation, chosen key/overwrite, bad get key and used invitation refusals passed");
+ // Closing a short upload must flush its receipt and release the relay slot.
+ for(let churn=0;churn<4;churn++){
+  const request=requestRefuse();await phones[0].send({type:"put-begin",id:request,name:"short",mime:"",length:1});assert.equal((await phones[0].receive()).type,"credit");
+  await phones[0].send({type:"chunk",id:request,index:0,data:new Uint8Array([1])});phones[0].ws.close();await delay(350);
+  phones[0]=await phone("reconnect",invitations[0],keys[0],enrolled[0].token);
+ }
+ console.log("short-burst close churn releases relay receipt slots");
  const bytes=new Uint8Array(10*1024*1024);for(let i=0;i<bytes.length;i++)bytes[i]=i%251;
  const id=()=>randomBytes(16).toString("hex");
  async function upload(p){const request=id();await p.send({type:"put-begin",id:request,name:"image.jpg",mime:"image/jpeg",length:bytes.length});let at=0,index=0;while(at<bytes.length){const credit=await p.receive();assert.equal(credit.type,"credit",JSON.stringify(credit));for(let n=0;n<credit.chunks&&at<bytes.length;n++){const data=bytes.slice(at,at+61440);await p.send({type:"chunk",id:request,index:index++,data});at+=data.length;await delay(40);}}

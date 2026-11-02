@@ -94,6 +94,7 @@ pub fn begin(c: &Config, s: &mut State, device: &str, m: &Value) -> Result<Uploa
         false,
     )?;
     let entry = Entry {
+        committed_at: None,
         device: device.into(),
         id: m["id"].as_str().ok_or("id")?.into(),
         key: key()?,
@@ -276,15 +277,14 @@ pub fn reconcile(c: &Config, s: &mut State) -> Result<()> {
     let store = c.store()?;
     for e in s.journal.values_mut().filter(|e| e.status == "pending") {
         e.status = if store.head(&e.key)? == Some(e.length) {
+            e.committed_at = Some(state::now());
             "committed"
         } else {
             "failed"
         }
         .into();
     }
-    s.journal.retain(|_, e| {
-        state::now().saturating_sub(e.created) < settings::RETENTION || e.status == "pending"
-    });
+    s.prune();
     s.save(&c.state_dir)?;
     for entry in std::fs::read_dir(&c.state_dir).map_err(|_| "spools")? {
         let entry = entry.map_err(|_| "spools")?;

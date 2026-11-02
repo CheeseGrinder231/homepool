@@ -247,6 +247,7 @@ impl Peer {
                                 .get_mut(self.journal.as_ref().ok_or("journal")?)
                                 .ok_or("journal")?;
                             e.status = "committed".into();
+                            e.committed_at = Some(state::now());
                             let key = e.key.clone();
                             s.save(&c.state_dir)?;
                             messages.push(json!({"type":"put-done","id":self.request,"key":key}));

@@ -135,6 +135,17 @@ pub fn run(c: &Config) -> Result<()> {
         backoff = (backoff * 2).min(60);
     }
 }
+fn retire(ws: &mut Socket, peers: &mut BTreeMap<u32, Peer>, id: u32, notify: bool) -> Result<()> {
+    if let Some(peer) = peers.remove(&id)
+        && peer.received > peer.acked
+    {
+        send(ws, 8, id, &peer.received.to_be_bytes())?;
+    }
+    if notify {
+        send(ws, 2, id, &[])?;
+    }
+    Ok(())
+}
 fn connected(
     c: &Config,
     identity: &Identity,
@@ -168,8 +179,7 @@ fn connected(
             }
         }
         for id in closed {
-            peers.remove(&id);
-            send(ws, 2, id, &[])?;
+            retire(ws, &mut peers, id, true)?;
         }
         match ws.read() {
             Ok(Message::Text(t)) if t == "homepool/1/bridge-pong" => {
@@ -221,7 +231,7 @@ fn connected(
                         }
                     }
                     2 | 3 => {
-                        peers.remove(&id);
+                        retire(ws, &mut peers, id, false)?;
                     }
                     _ => return Err("relay control".into()),
                 }
@@ -328,9 +338,10 @@ fn control(
                     .map(|(id, _)| *id)
                     .collect::<Vec<_>>();
                 for id in ids {
-                    peers.remove(&id);
                     if let Some(ws) = &mut ws {
-                        send(ws, 2, id, &[])?;
+                        retire(ws, peers, id, true)?;
+                    } else {
+                        peers.remove(&id);
                     }
                 }
                 if let Some(ws) = &mut ws {

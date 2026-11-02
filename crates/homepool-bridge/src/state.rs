@@ -121,6 +121,8 @@ pub struct Invitation {
 }
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Entry {
+    #[serde(default)]
+    pub committed_at: Option<u64>,
     pub device: String,
     pub id: String,
     pub key: String,
@@ -152,6 +154,12 @@ impl State {
                 std::process::exit(1)
             }
         }
+    }
+    pub fn prune(&mut self) {
+        self.journal.retain(|_, e| {
+            e.status == "pending"
+                || now().saturating_sub(e.committed_at.unwrap_or(e.created)) < settings::RETENTION
+        });
     }
     pub fn binding(&mut self) -> Result<u32> {
         self.binding = self.binding.checked_add(1).ok_or("bindings exhausted")?;

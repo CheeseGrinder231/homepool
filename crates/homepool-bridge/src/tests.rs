@@ -136,6 +136,7 @@ fn paired_device_refusals_and_scoped_status() {
         );
     }
     let entry = Entry {
+        committed_at: None,
         device: random(16).unwrap(),
         id: id.clone(),
         key: String::new(),
@@ -164,6 +165,7 @@ fn paired_device_refusals_and_scoped_status() {
     f.s.journal.insert(
         format!("{device}:{quota_id}"),
         Entry {
+            committed_at: None,
             device: device.clone(),
             id: quota_id,
             key: String::new(),
@@ -219,6 +221,7 @@ fn durable_quota_and_duplicate_request_reservation() {
     let id = random(16).unwrap();
     let device = random(16).unwrap();
     let e = Entry {
+        committed_at: None,
         device: device.clone(),
         id: id.clone(),
         key: String::new(),
@@ -291,4 +294,27 @@ fn spool_is_reserved_before_credit_and_hashes_only_received_bytes() {
         upload.hasher.finalize().as_slice(),
         Sha256::digest([1, 2, 3]).as_slice()
     );
+}
+
+#[test]
+fn recovered_commit_gets_a_full_retention_period() {
+    let mut f = Fixture::new();
+    let e = Entry {
+        committed_at: Some(now()),
+        device: random(16).unwrap(),
+        id: random(16).unwrap(),
+        key: String::new(),
+        name: String::new(),
+        mime: String::new(),
+        length: 0,
+        status: "committed".into(),
+        hash: String::new(),
+        created: now() - settings::RETENTION - 1,
+    };
+    f.s.journal.insert("recovered".into(), e);
+    f.s.prune();
+    assert!(f.s.journal.contains_key("recovered"));
+    f.s.journal.get_mut("recovered").unwrap().committed_at = Some(now() - settings::RETENTION - 1);
+    f.s.prune();
+    assert!(f.s.journal.is_empty());
 }

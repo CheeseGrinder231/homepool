@@ -79,7 +79,8 @@ is durable. After confirmation, committed state is durable before `put-done`.
 Startup checks every pending fixed key with HEAD. Only a matching length becomes
 committed; absence or mismatch becomes failed. Store errors abort recovery without
 removing spools. Spools are removed only after that reconciliation snapshot is
-synced. Committed entries are retained for 30 days; pruning happens at startup.
+synced. Committed entries are retained for 30 days from commitment (including
+recovery); pruning happens at startup.
 An interrupted/failed upload can retain its quota/spool reservation until restart.
 
 Home enforces four sessions, 10-second/256-byte-per-message handshakes, protocol
@@ -117,9 +118,11 @@ It creates isolated loopback services and credentials. It does not read live
 configuration or require a Cloudflare account. Rust tests cover atomic private
 state, durable enrollment, used-invitation refusal, paired-device refusals,
 request-ID/quota reservation and device-scoped status. The runtime runner checks
-two enrollments, IK reconnects, interleaved 10 MiB PUTs, listing, checksum GETs,
+two enrollments, invitation-token acknowledgement recovery and wrong-device
+refusal, IK reconnects, interleaved 10 MiB PUTs, listing, checksum GETs,
 a kill after store confirmation but before journal commitment, recovery/status,
-relay replacement with fresh token registration, and live-session revocation.
+relay replacement with fresh token registration, short-burst receipt cleanup
+under session churn, and live-session revocation.
 
 Local evidence uses JS endpoints and loopback WS, not physical phones or a public
 WSS deployment. Unproven: target-phone persistence/backgrounding and 50 MiB
