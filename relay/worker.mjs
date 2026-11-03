@@ -10,6 +10,8 @@ export const PAGE = new Map([
   ["/remote/client.mjs", "/remote/client.mjs"],
   ["/remote/keys.mjs", "/remote/keys.mjs"],
   ["/remote/model.mjs", "/remote/model.mjs"],
+  ["/remote/tabs.mjs", "/remote/tabs.mjs"],
+  ["/remote/view.mjs", "/remote/view.mjs"],
   ["/remote/remote.css", "/remote/remote.css"],
   ["/remote/icon.png", "/remote/icon.png"],
   ["/images/model.mjs", "/images/model.mjs"],

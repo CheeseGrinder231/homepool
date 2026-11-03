@@ -56,8 +56,8 @@ pub struct Upload {
     pub progress: Instant,
 }
 pub struct Download {
-    pub _reservation: crate::limits::Reservation,
-    pub file: File,
+    pub _reservation: Option<crate::limits::Reservation>,
+    pub source: Box<dyn Read + Send>,
     pub length: u64,
     pub sent: u64,
     pub count: u32,
@@ -365,7 +365,7 @@ pub fn next(d: &mut Download, id: &str) -> Result<Option<Value>> {
         return Ok(None);
     }
     let mut bytes = vec![0; 61440usize.min((d.length - d.sent) as usize)];
-    d.file.read_exact(&mut bytes).map_err(|_| "download")?;
+    d.source.read_exact(&mut bytes).map_err(|_| "download")?;
     let m = json!({"type":"chunk","id":id,"index":d.count,"data":bytes});
     d.sent += bytes.len() as u64;
     d.count += 1;

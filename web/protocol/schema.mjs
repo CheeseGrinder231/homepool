@@ -109,4 +109,27 @@ export default [
       ["token", "token"],
     ],
   ],
+  // Read-only service tabs (#59).
+  ["services", [["id", "id"]]],
+  [
+    "services-list",
+    [
+      ["id", "id"],
+      ["services", "services"],
+    ],
+  ],
+  [
+    "service-get",
+    [
+      ["id", "id"],
+      ["service", "service"],
+    ],
+  ],
+  [
+    "refused",
+    [
+      ["id", "id"],
+      ["reason", "reason"],
+    ],
+  ],
 ];

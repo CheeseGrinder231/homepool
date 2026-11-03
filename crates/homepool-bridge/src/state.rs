@@ -264,6 +264,9 @@ pub struct Config {
     pub bucket: String,
     pub region: String,
     pub credentials_file: PathBuf,
+    /// Read-only service tabs (#59); none unless configured.
+    #[serde(default)]
+    pub services: Vec<crate::services::Service>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -309,6 +312,7 @@ impl Config {
         {
             return Err("page origin".into());
         }
+        crate::services::validate(&c.services)?;
         Ok(c)
     }
     pub fn store(&self) -> Result<homepool_adapter_s3::Client> {

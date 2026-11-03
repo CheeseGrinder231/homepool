@@ -2,16 +2,16 @@ use crate::{peer::Peer, settings, state::*};
 use homepool_protocol::{Mode, Session, wire};
 use serde_json::json;
 use std::{fs, path::PathBuf};
-struct Fixture {
-    settlements: crate::settlement::Settlements,
-    dir: PathBuf,
-    c: Config,
-    s: State,
-    identity: Identity,
-    invitation: String,
+pub(crate) struct Fixture {
+    pub(crate) settlements: crate::settlement::Settlements,
+    pub(crate) dir: PathBuf,
+    pub(crate) c: Config,
+    pub(crate) s: State,
+    pub(crate) identity: Identity,
+    pub(crate) invitation: String,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let dir = std::env::temp_dir().join(format!("homepool-bridge-{}", random(16).unwrap()));
         init(&dir).unwrap();
         let c = Config {
@@ -24,6 +24,7 @@ impl Fixture {
             bucket: String::new(),
             region: String::new(),
             credentials_file: dir.join("credentials"),
+            services: vec![],
         };
         let mut s = State::load(&dir).unwrap();
         let invitation = random(16).unwrap();
@@ -50,7 +51,7 @@ impl Fixture {
             invitation,
         }
     }
-    fn enroll(&mut self) -> (Peer, Session, String) {
+    pub(crate) fn enroll(&mut self) -> (Peer, Session, String) {
         let i = &self.s.invitations[&self.invitation];
         let private = unhex(&random(32).unwrap()).unwrap();
         let public = unhex(&self.identity.public).unwrap();

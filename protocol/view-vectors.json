@@ -1,0 +1,1508 @@
+{
+  "accept": [
+    {
+      "name": "spec example",
+      "input": {
+        "version": 1,
+        "title": "Work",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "ok",
+        "notes": [
+          "note"
+        ],
+        "sections": [
+          {
+            "title": "Queue",
+            "state": "warn",
+            "summary": "2 waiting",
+            "items": [
+              {
+                "title": "Build",
+                "state": "stuck",
+                "detail": "since noon",
+                "meta": [
+                  "a",
+                  "b"
+                ],
+                "link": "<https>example.org/x",
+                "updated": "2026-01-01T00:00:00Z",
+                "progress": {
+                  "value": 3,
+                  "target": 5
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "Work",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "ok",
+        "notes": [
+          "note"
+        ],
+        "sections": [
+          {
+            "title": "Queue",
+            "state": "warn",
+            "summary": "2 waiting",
+            "items": [
+              {
+                "title": "Build",
+                "state": "stuck",
+                "detail": "since noon",
+                "meta": [
+                  "a",
+                  "b"
+                ],
+                "link": "<https>example.org/x",
+                "updated": "2026-01-01T00:00:00Z",
+                "progress": {
+                  "value": 3,
+                  "target": 5
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "minimal",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z"
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
+      "name": "unknown fields ignored",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "extra": {
+          "deep": [
+            1
+          ]
+        },
+        "sections": [
+          {
+            "title": "S",
+            "junk": 1,
+            "items": [
+              {
+                "title": "I",
+                "html": "<b>x</b>"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "offset and fraction normalised",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T02:00:00.123456+02:00",
+        "valid_until": "2025-12-31T19:30:59.9-05:00"
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:30:59Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
+      "name": "unknown state",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "state": "green"
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
+      "name": "section state from items",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "state": "ok"
+              },
+              {
+                "state": "warn"
+              },
+              {
+                "state": "bogus"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "warn",
+            "summary": "",
+            "items": [
+              {
+                "title": "",
+                "state": "ok",
+                "detail": "",
+                "meta": []
+              },
+              {
+                "title": "",
+                "state": "warn",
+                "detail": "",
+                "meta": []
+              },
+              {
+                "title": "",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "section without items",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {}
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "",
+            "state": "unknown",
+            "summary": "",
+            "items": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "refresh clamped low",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 1
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 30,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
+      "name": "refresh clamped high",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 99999
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 3600,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
+      "name": "refresh rounded",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 90.5
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 91,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
+      "name": "hostile strings stay text",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "<script>alert(1)</script>",
+                "detail": "<img src=x onerror=alert(1)>",
+                "meta": [
+                  "\"><svg onload=alert(1)>"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "<script>alert(1)</script>",
+                "state": "unknown",
+                "detail": "<img src=x onerror=alert(1)>",
+                "meta": [
+                  "\"><svg onload=alert(1)>"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "control characters",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "a\u0000b\tc\r\ndef"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "a b c \nd e f",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "javascript link dropped",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "javascript:alert(1)"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "http link dropped",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "<http>example.org/"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "data link dropped",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "data:text/html,<script>alert(1)</script>"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "upper-case scheme dropped",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "<HTTPS>example.org/"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "credentials link dropped",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "<https>user:pass@192.0.2.1/"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "non-string link dropped",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": 5
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "link normalised",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "<https>Example.ORG:443/a/../b?q=1#f"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": [],
+                "link": "<https>example.org/b?q=1#f"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "progress decimals",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "progress": {
+                  "value": 2.5,
+                  "target": 10
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": [],
+                "progress": {
+                  "value": 2.5,
+                  "target": 10
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "valid until equals as of",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:00:00Z"
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:00:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
+      "name": "max text",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+                "state": "unknown",
+                "detail": "",
+                "meta": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "leap day",
+      "input": {
+        "version": 1,
+        "as_of": "2024-02-29T23:59:59Z",
+        "valid_until": "2024-03-01T00:00:00Z"
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2024-02-29T23:59:59Z",
+        "valid_until": "2024-03-01T00:00:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    }
+  ],
+  "refuse": [
+    {
+      "name": "not an object",
+      "input": [
+        1
+      ]
+    },
+    {
+      "name": "null",
+      "input": null
+    },
+    {
+      "name": "version 2",
+      "input": {
+        "version": 2,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "version string",
+      "input": {
+        "version": "1",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "missing as_of",
+      "input": {
+        "version": 1,
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "missing valid_until",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z"
+      }
+    },
+    {
+      "name": "valid until before as of",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2025-12-31T23:59:59Z"
+      }
+    },
+    {
+      "name": "lower-case t",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01t00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "no zone",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00",
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "bad day",
+      "input": {
+        "version": 1,
+        "as_of": "2026-02-29T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "leap second",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T23:59:60Z",
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "bad offset",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00+24:00",
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "year out of range",
+      "input": {
+        "version": 1,
+        "as_of": "0000-01-01T00:00:00+00:01",
+        "valid_until": "2026-01-01T00:01:00Z"
+      }
+    },
+    {
+      "name": "title number",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "title": 5
+      }
+    },
+    {
+      "name": "state number",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "state": 1
+      }
+    },
+    {
+      "name": "refresh string",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": "60"
+      }
+    },
+    {
+      "name": "text too long",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "notes not list",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "notes": "x"
+      }
+    },
+    {
+      "name": "note number",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "notes": [
+          1
+        ]
+      }
+    },
+    {
+      "name": "too many notes",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "notes": [
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n",
+          "n"
+        ]
+      }
+    },
+    {
+      "name": "too many sections",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    {
+      "name": "too many items",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "items": [
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {}
+            ]
+          },
+          {
+            "items": [
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {},
+              {}
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "section not object",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          "x"
+        ]
+      }
+    },
+    {
+      "name": "item not object",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "items": [
+              null
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "too many meta",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "meta": [
+                  "m",
+                  "m",
+                  "m",
+                  "m",
+                  "m",
+                  "m",
+                  "m",
+                  "m",
+                  "m"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "meta not text",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "meta": [
+                  {}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "updated bad",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "updated": "yesterday"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "progress negative",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "progress": {
+                  "value": -1,
+                  "target": 5
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "progress zero target",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "progress": {
+                  "value": 1,
+                  "target": 0
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "progress text",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "progress": {
+                  "value": "1",
+                  "target": 2
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "progress not object",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "progress": 3
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "link too long",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "<https>example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "refuseRaw": [
+    {
+      "name": "not json",
+      "raw": "<html><body>Status</body></html>"
+    },
+    {
+      "name": "trailing garbage",
+      "raw": "{\"version\":1,\"as_of\":\"2026-01-01T00:00:00Z\",\"valid_until\":\"2026-01-01T00:01:00Z\"}x"
+    },
+    {
+      "name": "lone surrogate",
+      "raw": "{\"version\":1,\"as_of\":\"2026-01-01T00:00:00Z\",\"valid_until\":\"2026-01-01T00:01:00Z\",\"title\":\"\\ud800\"}"
+    },
+    {
+      "name": "empty",
+      "raw": ""
+    }
+  ]
+}

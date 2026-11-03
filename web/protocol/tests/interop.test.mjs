@@ -162,6 +162,9 @@ test("shared schema and all field vectors, refusals, envelopes and admission", a
     token: "cd".repeat(32),
     code: "refused",
     credit: 4,
+    services: [{ id: "status", title: "Status" }],
+    service: "status",
+    reason: "unavailable",
   };
   for (const [type, fields] of schema) {
     const m = { type };
@@ -349,5 +352,29 @@ test("shared relay control and Unicode vectors", async (t) => {
   for (const hex of cases.invalid) {
     assert.throws(() => unwrap(unhex(hex)));
     await assert.rejects(rpc({ op: "envelope", data: hex }));
+  }
+});
+
+test("shared service tab operation vectors", async (t) => {
+  const rpc = endpoint(t);
+  const cases = JSON.parse(
+    await readFile(
+      new URL("../../../protocol/service-vectors.json", import.meta.url),
+    ),
+  );
+  assert.ok(cases.messages.length >= 4);
+  for (const { message, hex: expected } of cases.messages) {
+    assert.equal(hex(encode(message)), expected);
+    assert.deepEqual(decode(unhex(expected)), message);
+    assert.equal(await rpc({ op: "encode", message }), expected);
+    assert.deepEqual(await rpc({ op: "decode", data: expected }), message);
+  }
+  for (const m of cases.refuse) {
+    assert.throws(() => encode(m), JSON.stringify(m));
+    await assert.rejects(rpc({ op: "encode", message: m }), JSON.stringify(m));
+  }
+  for (const b of cases.decodeRefuse) {
+    assert.throws(() => decode(unhex(b)), b);
+    await assert.rejects(rpc({ op: "decode", data: b }), b);
   }
 });

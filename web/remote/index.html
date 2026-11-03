@@ -14,11 +14,14 @@
 </head>
 <body>
 <header class="top">
-  <h1>Homepool photos</h1>
+  <h1 id="heading">Homepool photos</h1>
   <div class="top-side">
     <span id="status" class="status" hidden></span>
     <button id="refresh" type="button" class="quiet" hidden>Refresh</button>
   </div>
+  <nav id="tabs" class="tabs" role="tablist" aria-label="What to show" hidden>
+    <button id="tab-photos" type="button" role="tab" class="tab" aria-selected="true" aria-controls="photos">Photos</button>
+  </nav>
 </header>
 
 <main>
@@ -96,6 +99,7 @@
   </section>
 
   <section id="library" hidden>
+    <div id="photos" class="photos" role="tabpanel" aria-labelledby="tab-photos">
     <div class="actions">
       <label class="primary button">
         Add photos
@@ -109,6 +113,29 @@
     <p id="summary" class="summary" aria-live="polite"></p>
     <p id="empty" class="empty" hidden>No photos yet. Tap <strong>Add photos</strong>, and they show up here on every paired phone.</p>
     <ul id="grid" class="grid"></ul>
+    </div>
+    <section id="service" class="service" role="tabpanel" hidden>
+      <div id="service-problem" class="service-problem" role="status" hidden>
+        <p id="service-problem-text"></p>
+        <button id="service-retry" type="button" class="quiet">Try again</button>
+      </div>
+      <div id="service-loading" class="service-loading" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="service-loading-text">Asking home…</p>
+      </div>
+      <div id="service-view" class="service-view" hidden>
+        <div id="service-head" class="service-head">
+          <span id="service-state" class="badge"></span>
+          <h2 id="service-title"></h2>
+          <p id="service-age" class="service-age"></p>
+          <p id="service-counts" class="service-counts"></p>
+        </div>
+        <p id="service-stale" class="service-stale" hidden></p>
+        <ul id="service-notes" class="service-notes"></ul>
+        <div id="service-sections" class="service-sections"></div>
+        <p id="service-nothing" class="empty" hidden>Nothing to report right now.</p>
+      </div>
+    </section>
     <p class="footer"><button id="forget" type="button" class="quiet">Forget this phone</button></p>
   </section>
 </main>

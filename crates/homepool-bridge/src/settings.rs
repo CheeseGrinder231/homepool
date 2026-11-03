@@ -19,3 +19,20 @@ pub const MAX_JOURNAL: usize = 10000;
 pub const STATE_BYTES: u64 = 16 * 1024 * 1024;
 pub const TOKEN_INTERVAL: Duration = Duration::from_millis(75);
 pub const SETTLEMENT_RETRY: Duration = Duration::from_secs(1);
+// Read-only service tabs (#59). One deadline covers connect, request and
+// response; bodies stop at the service's max_bytes.
+pub const SERVICE_DEADLINE: Duration = Duration::from_secs(15);
+pub const SERVICE_DEFAULT_BYTES: u64 = 256 * 1024;
+pub const SERVICE_MAX_BYTES: u64 = 1024 * 1024;
+pub const SERVICE_HEADER_BYTES: usize = 16 * 1024;
+pub const SERVICE_CHUNK_LINE: usize = 1024;
+pub const SERVICE_TITLE_CHARS: usize = 40;
+// View document v1 bounds; web/remote/view.mjs applies the same.
+pub const VIEW_SECTIONS: usize = 20;
+pub const VIEW_ITEMS: usize = 200;
+pub const VIEW_NOTES: usize = 20;
+pub const VIEW_META: usize = 8;
+pub const VIEW_TEXT: usize = 500;
+pub const VIEW_REFRESH_MIN: f64 = 30.0;
+pub const VIEW_REFRESH_MAX: f64 = 3600.0;
+pub const VIEW_REFRESH_DEFAULT: u64 = 60;
