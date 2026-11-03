@@ -425,6 +425,7 @@ dependencies = [
  "getrandom 0.3.4",
  "homepool-adapter-s3",
  "homepool-protocol",
+ "httparse",
  "rustix",
  "serde",
  "serde_json",

@@ -13,9 +13,27 @@ fn bound(k: &str) -> Option<u64> {
         _ => None,
     }
 }
+/// Service tabs: at most this many catalog entries in one `services-list`.
+pub const MAX_SERVICES: usize = 16;
+/// Fixed `refused` reasons for `service-get`.
+pub const REASONS: [&str; 5] = [
+    "unknown",
+    "not-allowed",
+    "unavailable",
+    "too-large",
+    "invalid",
+];
+/// A service catalog ID: 1-32 lowercase ASCII letters, digits or hyphens.
+pub fn valid_service(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
 fn limit(k: &str) -> usize {
     match k {
-        "id" | "code" => 32,
+        "id" | "code" | "service" | "reason" => 32,
+        "title" => 160,
         "hash" | "token" => 64,
         "key" => 512,
         "name" => 255,
@@ -55,6 +73,21 @@ fn valid(k: &str, v: &Value) -> Result<(), String> {
         }
         return Ok(());
     }
+    if k == "services" {
+        let a = v.as_array().ok_or("services")?;
+        if a.len() > MAX_SERVICES {
+            return Err("services".into());
+        }
+        for item in a {
+            let o = item.as_object().ok_or("service")?;
+            if o.len() != 2 {
+                return Err("service fields".into());
+            }
+            valid("service", o.get("id").ok_or("service field")?)?;
+            valid("title", o.get("title").ok_or("service field")?)?;
+        }
+        return Ok(());
+    }
     let s = v.as_str().ok_or("string")?;
     if s.len() > limit(k) || s.chars().any(|c| c < ' ' || c == '\u{7f}') {
         return Err("string".into());
@@ -78,6 +111,15 @@ fn valid(k: &str, v: &Value) -> Result<(), String> {
     }
     if k == "key" && !valid_key(s) {
         return Err("key".into());
+    }
+    if k == "service" && !valid_service(s) {
+        return Err("service".into());
+    }
+    if k == "title" && (s.is_empty() || s.chars().count() > 40) {
+        return Err("title".into());
+    }
+    if k == "reason" && !REASONS.contains(&s) {
+        return Err("reason".into());
     }
     Ok(())
 }
@@ -115,6 +157,13 @@ fn put(k: &str, v: &Value, out: &mut Vec<u8>) -> Result<(), String> {
             put("key", &i["key"], out)?;
             put("length", &i["length"], out)?;
             put("mime", &i["type"], out)?;
+        }
+    } else if k == "services" {
+        let a = v.as_array().ok_or("services")?;
+        out.extend_from_slice(&(a.len() as u16).to_be_bytes());
+        for i in a {
+            put("service", &i["id"], out)?;
+            put("title", &i["title"], out)?;
         }
     } else {
         let b = if k == "data" {
@@ -175,6 +224,16 @@ fn read(k: &str, b: &mut &[u8]) -> Result<Value, String> {
         let mut a = Vec::new();
         for _ in 0..n {
             a.push(json!({"key":read("key",b)?,"length":read("length",b)?,"type":read("mime",b)?}));
+        }
+        json!(a)
+    } else if k == "services" {
+        let n = num(b, 2)?;
+        if n > MAX_SERVICES as u64 {
+            return Err("services".into());
+        }
+        let mut a = Vec::new();
+        for _ in 0..n {
+            a.push(json!({"id":read("service",b)?,"title":read("title",b)?}));
         }
         json!(a)
     } else {

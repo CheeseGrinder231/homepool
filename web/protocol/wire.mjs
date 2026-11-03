@@ -17,7 +17,19 @@ const sizes = {
   mime: 127,
   cursor: 1024,
   code: 32,
+  service: 32,
+  title: 160,
+  reason: 32,
 };
+// Service tabs: catalog IDs, display titles and fixed refusal reasons.
+export const MAX_SERVICES = 16;
+export const REASONS = Object.freeze([
+  "unknown",
+  "not-allowed",
+  "unavailable",
+  "too-large",
+  "invalid",
+]);
 export function valid(kind, value) {
   if (kind in bounds) {
     if (
@@ -48,6 +60,17 @@ export function valid(kind, value) {
     }
     return;
   }
+  if (kind === "services") {
+    if (!Array.isArray(value) || value.length > MAX_SERVICES)
+      throw Error("services");
+    for (const item of value) {
+      if (Object.keys(item).sort().join(",") !== "id,title")
+        throw Error("service fields");
+      valid("service", item.id);
+      valid("title", item.title);
+    }
+    return;
+  }
   if (
     typeof value !== "string" ||
     enc.encode(value).length > sizes[kind] ||
@@ -63,6 +86,11 @@ export function valid(kind, value) {
   if (kind === "mime" && !/^[\x20-\x7e]*$/.test(value)) throw Error("mime");
   if (kind === "code" && !/^[a-z-]{1,32}$/.test(value))
     throw Error("error code");
+  if (kind === "service" && !/^[a-z0-9-]{1,32}$/.test(value))
+    throw Error("service");
+  if (kind === "title" && (!value.length || [...value].length > 40))
+    throw Error("title");
+  if (kind === "reason" && !REASONS.includes(value)) throw Error("reason");
   if (
     kind === "key" &&
     !/^\d{4}-\d{2}-\d{2}\/\d{6}-[a-z2-7]{25}[aeimquy4]-[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,71}[A-Za-z0-9_])?$/.test(
@@ -90,6 +118,11 @@ function field(kind, value) {
         field("length", i.length),
         field("mime", i.type),
       ]),
+    );
+  if (kind === "services")
+    return concat(
+      number(value.length, 2),
+      ...value.flatMap((i) => [field("service", i.id), field("title", i.title)]),
     );
   const b = kind === "data" ? value : enc.encode(value);
   return concat(number(b.length, 2), b);
@@ -144,6 +177,13 @@ export function decode(b) {
         key: read("key"),
         length: read("length"),
         type: read("mime"),
+      }));
+    } else if (k === "services") {
+      const n = num(2);
+      if (n > MAX_SERVICES) throw Error("services");
+      v = Array.from({ length: n }, () => ({
+        id: read("service"),
+        title: read("title"),
       }));
     } else {
       const x = take(num(2));

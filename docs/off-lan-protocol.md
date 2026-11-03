@@ -78,6 +78,12 @@ Names are metadata, never paths or chosen object-store targets. MIME metadata
 never permits executing HTML or SVG. File size, quotas and spool limits must be
 lower deployment bounds; 2^53−1 is only the interoperable integer ceiling.
 
+Types 20–23 (`services`, `services-list`, `service-get`, `refused`) carry the
+read-only service tabs of #59; see [service tabs](services.md). Their field
+kinds are `services` (u16 count, at most 16 entries of `service` then `title`),
+`service` (1–32 lowercase letters, digits or hyphens), `title` (1–40 characters)
+and `reason` (one of five fixed words). Vectors: `protocol/service-vectors.json`.
+
 The discriminant is `type` in the JS API; MIME fields are called `mime`.
 List items use `type` for their MIME (they have no message discriminant).
 The Rust codec takes/returns `serde_json::Value` but validates the entire closed

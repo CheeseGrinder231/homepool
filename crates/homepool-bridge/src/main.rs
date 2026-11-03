@@ -2,9 +2,11 @@ mod limits;
 mod operations;
 mod peer;
 mod runtime;
+mod services;
 mod settings;
 mod settlement;
 mod state;
+mod view;
 fn execute() -> state::Result<()> {
     let a = std::env::args().skip(1).collect::<Vec<_>>();
     if a.len() == 2 && a[0] == "init" {
@@ -27,5 +29,7 @@ fn main() {
         std::process::exit(1);
     }
 }
+#[cfg(test)]
+mod service_tests;
 #[cfg(test)]
 mod tests;

@@ -4,6 +4,7 @@
 import { Session } from "../protocol/noise.mjs";
 import { Transfer, ack, admission, decode, encode, envelope, unwrap } from "../protocol/wire.mjs";
 import { CancelledError, PRIORITY, WorkQueue, fromHex, randomId, uploadName, uploadType } from "./model.mjs";
+import { LIMITS, clock, readView } from "./view.mjs";
 
 // Relay close codes for a refused phone admission (relay/route.mjs).
 export const CLOSE = Object.freeze({ notAccepted: 4001, homeOffline: 4002, busy: 4003 });
@@ -342,45 +343,95 @@ export async function get(link, key, { onProgress = () => {} } = {}) {
     await link.send({ type: "get", id, key });
     const head = await x.next(TIMES.response);
     if (head.type !== "get-head") refusal(head);
-    const transfer = new Transfer(id, head.length);
-    let granted = 0;
-    let count = 0;
-    let parts = [];
-    let blob = new Blob([]);
-    let pending = 0;
-    const grant = async (n) => {
-      link.flush();
-      granted += n;
-      await link.send({ type: "credit", id, chunks: n });
-    };
-    if (head.length > 0) await grant(WINDOW);
-    for (;;) {
-      const m = await x.next(TIMES.progress);
-      if (m.type === "chunk") {
-        try {
-          transfer.accept(m);
-        } catch (error) {
-          fail("interrupted", error);
-        }
-        count++;
-        parts.push(m.data);
-        pending += m.data.length;
-        // Hand large downloads to the Blob store in steps, not as one array.
-        if (pending >= 4 * 1024 * 1024) {
-          blob = new Blob([blob, ...parts]);
-          parts = [];
-          pending = 0;
-        }
-        onProgress(transfer.received / head.length);
-        if (granted - count <= TOP_UP && transfer.received < head.length) await grant(TOP_UP);
-      } else if (m.type === "get-end") {
-        try {
-          transfer.accept(m);
-        } catch (error) {
-          fail("interrupted", error);
-        }
-        return { blob: new Blob([blob, ...parts]), mime: head.mime, length: head.length };
-      } else refusal(m);
+    return await receive(link, x, id, head, onProgress);
+  } finally {
+    x.close();
+  }
+}
+
+// Chunks after a get-head, granting credits; same framing for files and
+// service documents.
+async function receive(link, x, id, head, onProgress = () => {}) {
+  const transfer = new Transfer(id, head.length);
+  let granted = 0;
+  let count = 0;
+  let parts = [];
+  let blob = new Blob([]);
+  let pending = 0;
+  const grant = async (n) => {
+    link.flush();
+    granted += n;
+    await link.send({ type: "credit", id, chunks: n });
+  };
+  if (head.length > 0) await grant(WINDOW);
+  for (;;) {
+    const m = await x.next(TIMES.progress);
+    if (m.type === "chunk") {
+      try {
+        transfer.accept(m);
+      } catch (error) {
+        fail("interrupted", error);
+      }
+      count++;
+      parts.push(m.data);
+      pending += m.data.length;
+      // Hand large downloads to the Blob store in steps, not as one array.
+      if (pending >= 4 * 1024 * 1024) {
+        blob = new Blob([blob, ...parts]);
+        parts = [];
+        pending = 0;
+      }
+      onProgress(transfer.received / head.length);
+      if (granted - count <= TOP_UP && transfer.received < head.length) await grant(TOP_UP);
+    } else if (m.type === "get-end") {
+      try {
+        transfer.accept(m);
+      } catch (error) {
+        fail("interrupted", error);
+      }
+      return { blob: new Blob([blob, ...parts]), mime: head.mime, length: head.length };
+    } else refusal(m);
+  }
+}
+
+// ---- read-only service tabs (#59) ----------------------------------------------
+
+// The services this phone may see: [{ id, title }].
+export async function services(link) {
+  const id = randomId();
+  const x = link.exchange(id);
+  try {
+    await link.send({ type: "services", id });
+    const m = await x.next(TIMES.response);
+    if (m.type !== "services-list") refusal(m);
+    return m.services;
+  } finally {
+    x.close();
+  }
+}
+
+// One service's view document, checked again here. A refusal from home
+// becomes "service-<reason>"; a document this page can't read, "service-invalid".
+export async function serviceGet(link, service) {
+  const id = randomId();
+  const x = link.exchange(id);
+  // Freshness counts from here, not from arrival: a slow delivery ages it.
+  const started = clock();
+  try {
+    await link.send({ type: "service-get", id, service });
+    const head = await x.next(TIMES.response);
+    if (head.type === "refused") fail(`service-${head.reason}`);
+    if (head.type !== "get-head") refusal(head);
+    if (head.length > LIMITS.bytes) {
+      // Larger than home ever sends: stop rather than take it in.
+      link.close("interrupted");
+      fail("service-too-large");
+    }
+    const { blob } = await receive(link, x, id, head);
+    try {
+      return readView(new Uint8Array(await blob.arrayBuffer()), started);
+    } catch (error) {
+      fail("service-invalid", error);
     }
   } finally {
     x.close();

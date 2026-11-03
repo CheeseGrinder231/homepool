@@ -1,7 +1,7 @@
 use crate::settlement::Settlements;
 use crate::{
     operations::{self, Download, Job, JobResult, Upload},
-    settings,
+    services, settings,
     state::{self, Config, Identity, Result, State},
 };
 use homepool_protocol::{Mode, Session, wire};
@@ -19,6 +19,7 @@ pub struct Peer {
     pub upload: Option<Upload>,
     pub download: Option<Download>,
     pub job: Option<Job>,
+    pub service: Option<(services::Pending, Instant)>,
     pub request: String,
     pub journal: Option<String>,
     pub received: u64,
@@ -73,6 +74,7 @@ impl Peer {
             upload: None,
             download: None,
             job: None,
+            service: None,
             request: String::new(),
             journal: None,
             received: 0,
@@ -179,12 +181,35 @@ impl Peer {
                     None => json!({"type":"unknown","id":id}),
                 }])
             }
+            "services" => Ok(vec![json!({"type":"services-list","id":id,"services":c
+                .services
+                .iter()
+                .filter(|s| s.allows(device))
+                .map(|s| json!({"id":s.id,"title":s.title}))
+                .collect::<Vec<_>>()})]),
+            "service-get" => {
+                let name = m["service"].as_str().ok_or("service")?;
+                let refused = |reason: services::Refusal| {
+                    Ok(vec![
+                        json!({"type":"refused","id":id,"reason":reason.code()}),
+                    ])
+                };
+                let Some(service) = c.services.iter().find(|s| s.id == name) else {
+                    return refused(services::Refusal::Unknown);
+                };
+                if !service.allows(device) {
+                    return refused(services::Refusal::NotAllowed);
+                }
+                if self.busy() {
+                    return Err("busy".into());
+                }
+                self.request = id.into();
+                self.journal = None;
+                self.service = Some((services::request(service), Instant::now()));
+                Ok(vec![])
+            }
             "put-begin" | "get" | "list" => {
-                if self.upload.is_some()
-                    || self.download.is_some()
-                    || self.job.is_some()
-                    || self.put_wait.is_some()
-                {
+                if self.busy() {
                     return Err("busy".into());
                 }
                 self.request = id.into();
@@ -243,6 +268,13 @@ impl Peer {
             _ => Err("operation".into()),
         }
     }
+    fn busy(&self) -> bool {
+        self.upload.is_some()
+            || self.download.is_some()
+            || self.job.is_some()
+            || self.put_wait.is_some()
+            || self.service.is_some()
+    }
     pub fn abandon(
         mut self,
         c: &Config,
@@ -279,6 +311,10 @@ impl Peer {
                 .job
                 .as_ref()
                 .is_some_and(|j| j.started.elapsed() > settings::PROGRESS)
+            || self
+                .service
+                .as_ref()
+                .is_some_and(|(_, started)| started.elapsed() > settings::PROGRESS)
         {
             return Err("deadline".into());
         }
@@ -302,8 +338,8 @@ impl Peer {
             match result {
                 Ok(JobResult::Get(file, length, mime, reservation)) => {
                     self.download = Some(Download {
-                        _reservation: reservation,
-                        file,
+                        _reservation: Some(reservation),
+                        source: Box::new(file),
                         length,
                         sent: 0,
                         count: 0,
@@ -317,6 +353,26 @@ impl Peer {
                 Ok(JobResult::List(m)) => messages.push(m),
                 Err(_) => messages.push(json!({"type":"error","id":self.request,"code":"store"})),
                 _ => return Err("unexpected store job".into()),
+            }
+        }
+        if let Some(outcome) = self.service.as_ref().and_then(|(p, _)| p.poll()) {
+            self.service = None;
+            match outcome {
+                Ok(bytes) => {
+                    let length = bytes.len() as u64;
+                    self.download = Some(Download {
+                        _reservation: None,
+                        source: Box::new(std::io::Cursor::new(bytes)),
+                        length,
+                        sent: 0,
+                        count: 0,
+                        credits: 0,
+                        progress: Instant::now(),
+                    });
+                    messages.push(json!({"type":"get-head","id":self.request,"length":length,"mime":"application/json"}));
+                }
+                Err(reason) => messages
+                    .push(json!({"type":"refused","id":self.request,"reason":reason.code()})),
             }
         }
         if let Some(download) = &mut self.download

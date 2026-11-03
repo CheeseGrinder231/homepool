@@ -53,7 +53,9 @@ const RELAY_MODULES = [
   "web/protocol/noise.mjs",
 ];
 
-export async function startStack({ log = () => {} } = {}) {
+// `services` is the bridge's service catalog (#59); `configure` replaces it
+// and takes effect when the bridge next starts.
+export async function startStack({ log = () => {}, services = [] } = {}) {
   const garage = process.env.HOMEPOOL_TEST_GARAGE;
   const binary = resolve(process.env.CARGO_TARGET_DIR, "debug/homepool-bridge");
   const scratch = await mkdtemp(join(process.env.TMPDIR, "remote-page-"));
@@ -184,22 +186,27 @@ root_domain = ".s3.garage.localhost"
   const bridgeConfig = join(scratch, "bridge.json");
   await privateFile(credentials, { version: 1, bucket, aws_access_key_id: access, aws_secret_access_key: secret });
   await privateFile(tokenFile, bridgeToken);
-  await privateFile(bridgeConfig, {
-    state_dir: stateDir,
-    relay_url: url("ws", `${loopback}:${relayPort}/example`),
-    route: "example",
-    bridge_token_file: tokenFile,
-    page_origin: url("https", "192.0.2.1/"),
-    s3_endpoint: url("http", `${loopback}:${proxyPort}`),
-    bucket,
-    region: "garage",
-    credentials_file: credentials,
-  });
+  const writeConfig = (list) =>
+    privateFile(bridgeConfig, {
+      state_dir: stateDir,
+      relay_url: url("ws", `${loopback}:${relayPort}/example`),
+      route: "example",
+      bridge_token_file: tokenFile,
+      page_origin: url("https", "192.0.2.1/"),
+      s3_endpoint: url("http", `${loopback}:${proxyPort}`),
+      bucket,
+      region: "garage",
+      credentials_file: credentials,
+      ...(list.length ? { services: list } : {}),
+    });
+  await writeConfig(services);
   const command = async (...args) =>
     (await execute(binary, [args[0], bridgeConfig, ...args.slice(1)])).stdout;
   let bridge = null;
   const stack = {
     origin,
+    loopback,
+    configure: writeConfig,
     scratch,
     stateDir,
     hold,

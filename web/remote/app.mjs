@@ -4,6 +4,7 @@
 import { formatBytes } from "../images/model.mjs";
 import { MAX_FILE, Remote, get, list, put, status } from "./client.mjs";
 import { deviceKeys, openStore, supported } from "./keys.mjs";
+import { createServiceTabs } from "./tabs.mjs";
 import {
   BlobCache,
   CancelledError,
@@ -56,6 +57,10 @@ const ui = Object.fromEntries(
     "summary", "empty", "grid", "forget", "viewer", "viewer-close", "viewer-download", "viewer-image",
     "viewer-loading", "viewer-loading-text", "viewer-progress", "viewer-fallback", "viewer-kind",
     "viewer-fallback-text", "viewer-name", "viewer-meta", "tile-template", "upload-template",
+    "heading", "tabs", "tab-photos", "photos", "service", "service-problem", "service-problem-text",
+    "service-retry", "service-loading", "service-loading-text", "service-view", "service-state",
+    "service-title", "service-age", "service-counts", "service-stale", "service-notes", "service-sections",
+    "service-nothing",
   ].map((id) => [id.replace(/-(.)/g, (_, c) => c.toUpperCase()), byId(id)]),
 );
 
@@ -118,6 +123,18 @@ const remote = new Remote({
   onRemoved: (reason) => removed(reason),
 });
 
+// Service tabs beside Photos; the photo list loads only when Photos is shown.
+const tabs = createServiceTabs({
+  remote,
+  ui,
+  store,
+  say: (reason) => say(reason),
+  isLibrary: () => !ui.library.hidden && !state.removed,
+  onPhotos: () => {
+    if (!state.listed) refresh();
+  },
+});
+
 // ---- small UI helpers -------------------------------------------------------
 
 let alertAction = null;
@@ -146,7 +163,13 @@ ui.alertAction.addEventListener("click", () => {
 function showStatus(value, reason) {
   // A connection problem clears itself once the page is connected again.
   if (value === "connected" && alertConnection) clearAlert();
-  if (value === "offline" && !["removed", "unrecognized", "forgotten"].includes(reason) && !ui.library.hidden)
+  // A service tab says it in its own panel, with its own retry.
+  if (
+    value === "offline" &&
+    !["removed", "unrecognized", "forgotten"].includes(reason) &&
+    !ui.library.hidden &&
+    tabs.active === "photos"
+  )
     showAlert(say(reason), {
       connection: true,
       action: {
@@ -297,6 +320,7 @@ function removed(reason) {
 // ---- library and grid ---------------------------------------------------------
 
 function resetLibrary() {
+  tabs.reset();
   remote.queue.clear();
   for (const tile of state.tiles.values()) visible.unobserve(tile.li);
   state.tiles.clear();
@@ -314,7 +338,7 @@ function resetLibrary() {
 function openLibrary() {
   showPanel("library");
   showStatus(remote.link && !remote.link.closed ? "connected" : "idle");
-  if (!state.listed) refresh();
+  tabs.start();
   restoreUploads();
 }
 
@@ -352,7 +376,8 @@ function refresh() {
 }
 ui.refresh.addEventListener("click", () => {
   clearAlert();
-  refresh();
+  if (tabs.active === "photos") refresh();
+  else tabs.refresh();
 });
 
 function renderSummary() {
@@ -905,10 +930,14 @@ ui.forget.addEventListener("click", async () => {
 // Coming back to the library reconnects once, so it is live without a tap;
 // there are still no idle pings, and the idle close applies as usual.
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) return remote.hidden();
+  if (document.hidden) {
+    tabs.hidden();
+    return remote.hidden();
+  }
   const library = !ui.library.hidden && !state.removed;
   remote.visible({ reconnect: library });
-  if (library && !state.listed) refresh();
+  if (library && tabs.active === "photos" && !state.listed) refresh();
+  if (library) tabs.visible();
 });
 
 // ---- start ---------------------------------------------------------------------

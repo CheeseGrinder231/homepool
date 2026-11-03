@@ -6,7 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { test } from "node:test";
 import { Session, keyPair, publicBytes } from "../../protocol/noise.mjs";
 import { decode, encode, envelope, readAdmission, unwrap } from "../../protocol/wire.mjs";
-import { CHUNK, CLOSE, Remote, TIMES, get, list, put, status } from "../client.mjs";
+import { CHUNK, CLOSE, Remote, TIMES, get, list, put, serviceGet, services, status } from "../client.mjs";
 import { deviceKeys } from "../keys.mjs";
 import { toHex } from "../model.mjs";
 
@@ -44,6 +44,12 @@ async function home({ objects = new Map() } = {}) {
     sockets: [],
     maxUnacked: 0,
     maxCredit: 0,
+    // Service tabs: the catalog this phone sees, and per service either the
+    // document bytes home would send or a refusal reason.
+    services: [],
+    documents: new Map(),
+    serviceGets: 0,
+    serviceDelay: 0, // ms before home answers a service-get
   };
   let nextSession = 1;
   class FakeSocket {
@@ -164,6 +170,17 @@ async function home({ objects = new Map() } = {}) {
         return this.reply({ type: "list-page", id: m.id, cursor: "", items });
       }
       if (m.type === "ping") return this.reply({ type: "pong", id: m.id });
+      if (m.type === "services") return this.reply({ type: "services-list", id: m.id, services: h.services });
+      if (m.type === "service-get") {
+        h.serviceGets++;
+        if (h.serviceDelay) await new Promise((r) => setTimeout(r, h.serviceDelay));
+        const doc = h.documents.get(m.service);
+        if (doc === undefined) return this.reply({ type: "refused", id: m.id, reason: "unknown" });
+        if (typeof doc === "string") return this.reply({ type: "refused", id: m.id, reason: doc });
+        const length = doc.claim ?? doc.length;
+        this.download = { id: m.id, data: doc, at: 0, index: 0, credits: 0 };
+        return this.reply({ type: "get-head", id: m.id, length, mime: "application/json" });
+      }
       if (m.type === "put-status") {
         const known = h.statuses.get(m.id) ?? "unknown";
         return this.reply(typeof known === "string" ? { type: known, id: m.id } : { ...known, id: m.id });
@@ -478,5 +495,58 @@ test("returning to the page reconnects once, without idle pings", async () => {
   h.refuse = null;
   await p.remote.visible({ reconnect: true });
   assert.equal(await waiting.done, "later");
+  p.remote.disconnect();
+});
+
+test("service tabs: the list, a document, refusals and documents the page refuses", async () => {
+  const h = await home();
+  const p = phone(h);
+  await p.remote.pair(h.invite());
+  const link = await p.remote.ensure();
+  const json = (v) => new Uint8Array(Buffer.from(JSON.stringify(v)));
+  h.services = [{ id: "status", title: "Status" }];
+  assert.deepEqual(await services(link), h.services);
+  const fetched = Math.floor(Date.now() / 1000) - 600;
+  const scheme = ["javascript", "alert(1)"].join(":");
+  h.documents.set(
+    "status",
+    json({
+      version: 1,
+      title: "<img src=x onerror=alert(1)>",
+      as_of: "2026-01-01T00:00:00Z",
+      valid_until: "2026-01-01T00:01:00Z",
+      fetched_at: new Date(fetched * 1000).toISOString().replace(/\.\d+Z$/, "Z"),
+      sections: [{ title: "Q", items: [{ title: "<script>x</script>", state: "stuck", link: scheme }] }],
+    }),
+  );
+  const got = await serviceGet(link, "status");
+  assert.equal(got.view.title, "<img src=x onerror=alert(1)>");
+  assert.equal(got.view.sections[0].items[0].title, "<script>x</script>");
+  assert.equal(got.view.sections[0].items[0].link, undefined, "javascript: link dropped");
+  assert.equal(got.fetchedAt, fetched);
+  // Freshness counts from the request, before home answered, not from arrival.
+  h.serviceDelay = 300;
+  const asked = performance.now();
+  const slow = await serviceGet(link, "status");
+  h.serviceDelay = 0;
+  assert.ok(slow.started.mono >= asked && slow.started.mono < asked + 100, "started when asked");
+  assert.ok(performance.now() - slow.started.mono >= 300, "the delay counts");
+  for (const reason of ["unavailable", "too-large", "invalid", "not-allowed"]) {
+    h.documents.set("status", reason);
+    await assert.rejects(serviceGet(link, "status"), (e) => e.reason === `service-${reason}`);
+  }
+  await assert.rejects(serviceGet(link, "gone"), (e) => e.reason === "service-unknown");
+  // Home should never pass these on; the page refuses them anyway.
+  for (const bad of [json({ version: 2 }), new Uint8Array([0xff, 0xfe]), json([1])]) {
+    h.documents.set("status", bad);
+    await assert.rejects(serviceGet(link, "status"), (e) => e.reason === "service-invalid");
+  }
+  assert.ok(!link.closed, "refusals keep the session");
+  // A head larger than any document home sends ends the session at once.
+  const huge = json({ version: 1 });
+  huge.claim = 2 * 1024 * 1024;
+  h.documents.set("status", huge);
+  await assert.rejects(serviceGet(link, "status"), (e) => e.reason === "service-too-large");
+  assert.ok(link.closed);
   p.remote.disconnect();
 });

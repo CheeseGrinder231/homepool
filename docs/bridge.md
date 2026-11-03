@@ -27,6 +27,9 @@ The private JSON configuration has exactly these fields (replace placeholders):
 }
 ```
 
+An optional `services` list adds read-only service tabs to the page; see
+[service tabs](services.md). Without it nothing changes.
+
 Keep config, token and credentials files owned by the running user with mode
 0600. State directory mode is 0700. Paths must be absolute. Credentials use the
 [existing version-1 consumer format](garage.md#credentials-file-format-version-1);

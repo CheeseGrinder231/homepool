@@ -60,6 +60,14 @@ again, and keeps its current pairing unless the new one completes.
 The page never shows protocol words, hex (outside the optional check) or raw
 errors. Each failure says what happened and what to do.
 
+## Service tabs
+
+When home's bridge has a service catalog, tabs for the services this phone may
+see appear after Photos, with read-only status documents fetched over the same
+session. See [service tabs](services.md) for what is fetched when, how stale
+data is shown and the browser runner, `web/remote/tests/services-e2e.mjs`.
+The last tab used is kept in IndexedDB as `tab`.
+
 ## What the phone stores
 
 IndexedDB `homepool-remote` holds:
