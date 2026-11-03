@@ -715,6 +715,50 @@
       }
     },
     {
+      "name": "link that grows to the bound",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "<https>example.org/éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": [
+          {
+            "title": "S",
+            "state": "unknown",
+            "summary": "",
+            "items": [
+              {
+                "title": "I",
+                "state": "unknown",
+                "detail": "",
+                "meta": [],
+                "link": "<https>example.org/%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9%C3%A9"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "progress decimals",
       "input": {
         "version": 1,
@@ -1480,6 +1524,44 @@
               {
                 "title": "I",
                 "link": "<https>example.org/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "link that grows past the bound",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "<https>example.org/ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "link that grows far past the bound",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "sections": [
+          {
+            "title": "S",
+            "items": [
+              {
+                "title": "I",
+                "link": "<https>example.org/éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
               }
             ]
           }

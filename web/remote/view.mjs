@@ -12,7 +12,9 @@ export const LIMITS = Object.freeze({
   refreshMin: 30,
   refreshMax: 3600,
   refreshDefault: 60,
-  bytes: 1024 * 1024 + 1024, // the bridge caps documents at 1 MiB, plus its fetched_at
+  // An independent bound, shared with the bridge, on the normalised document
+  // it sends; normalising can grow a document, so the bridge checks this too.
+  bytes: 1024 * 1024 + 1024,
 });
 
 // Worst first. An unrecognised state is "unknown".
@@ -123,6 +125,9 @@ function link(value) {
     return undefined;
   }
   if (url.protocol !== "https:" || !url.hostname || url.username || url.password) return undefined;
+  // The bound holds for the written-out form too, so home's output passes
+  // here again: non-ASCII characters can grow sixfold when percent-encoded.
+  if (url.href.length > LIMITS.text) invalid("link");
   return url.href;
 }
 
@@ -190,10 +195,15 @@ export function normalize(doc) {
   };
 }
 
-// The bytes from home: strict UTF-8 JSON, normalised again here. The bridge
-// adds `fetched_at`, its own clock when it read the document, so freshness
-// does not depend on this phone's clock.
-export function readView(bytes, receivedAt = Date.now()) {
+// Both of this phone's clocks: `mono` (performance.now(), ms) never steps
+// with clock changes but may pause while the phone sleeps; `wall` (ms) keeps
+// counting through sleep but can be set forwards or back.
+export const clock = () => ({ mono: performance.now(), wall: Date.now() });
+
+// The bytes from home: strict UTF-8 JSON, normalised again here. `started` is
+// the clock when the page asked for it. The bridge adds `fetched_at`, its own
+// clock when it read the document, so this phone's clock setting is not used.
+export function readView(bytes, started = clock()) {
   if (!(bytes instanceof Uint8Array) || bytes.length > LIMITS.bytes) invalid("size");
   let doc;
   try {
@@ -203,22 +213,34 @@ export function readView(bytes, receivedAt = Date.now()) {
   }
   const view = normalize(doc);
   const fetched = parseTime(doc.fetched_at);
-  return { view, fetchedAt: fetched, receivedAt };
+  return { view, fetchedAt: fetched, started, elapsed: 0 };
 }
 
 // ---- presentation -----------------------------------------------------------
 
-// Home's clock now, estimated from when the bridge read the document.
-export function homeNow({ fetchedAt, receivedAt }, now = Date.now()) {
-  const phone = now / 1000;
-  return fetchedAt === null || fetchedAt === undefined ? phone : fetchedAt + Math.max(0, phone - receivedAt / 1000);
+// Seconds since the page asked, counted conservatively: from the request's
+// start rather than the document's arrival, by whichever clock has moved
+// further, and never backwards, so a slow delivery, a sleeping phone or a
+// clock set back cannot make the document younger.
+export function elapsed(loaded, now = clock()) {
+  const { mono, wall } = loaded.started;
+  loaded.elapsed = Math.max(loaded.elapsed ?? 0, (now.mono - mono) / 1000, (now.wall - wall) / 1000);
+  return loaded.elapsed;
 }
 
-export function freshness(loaded, now = Date.now()) {
+// Home's clock now: when the bridge read the document plus the time since the
+// page asked for it. Without `fetched_at`, this phone's clock at the request.
+export function homeNow(loaded, now = clock()) {
+  const base = loaded.fetchedAt ?? loaded.started.wall / 1000;
+  return base + elapsed(loaded, now);
+}
+
+// `age` is how old `as_of` is; `expired`, how long ago `valid_until` passed.
+export function freshness(loaded, now = clock()) {
   const at = homeNow(loaded, now);
   const age = Math.max(0, at - parseTime(loaded.view.as_of));
-  const stale = at > parseTime(loaded.view.valid_until);
-  return { age, stale };
+  const expired = at - parseTime(loaded.view.valid_until);
+  return { age, stale: expired > 0, expired: Math.max(0, expired) };
 }
 
 export function ageText(seconds) {

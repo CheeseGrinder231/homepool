@@ -172,15 +172,20 @@ fn link(v: Option<&Value>) -> Result<Option<String>> {
     if !s.starts_with("https:") || !s[6..].starts_with("//") {
         return Ok(None);
     }
-    Ok(url::Url::parse(s)
-        .ok()
-        .filter(|u| {
-            u.scheme() == "https"
-                && u.host_str().is_some_and(|h| !h.is_empty())
-                && u.username().is_empty()
-                && u.password().is_none()
-        })
-        .map(|u| u.as_str().to_owned()))
+    let Some(u) = url::Url::parse(s).ok().filter(|u| {
+        u.scheme() == "https"
+            && u.host_str().is_some_and(|h| !h.is_empty())
+            && u.username().is_empty()
+            && u.password().is_none()
+    }) else {
+        return Ok(None);
+    };
+    // The bound holds for the written-out form too, so this output passes the
+    // page's check: non-ASCII characters can grow sixfold when percent-encoded.
+    if u.as_str().chars().count() > settings::VIEW_TEXT {
+        return Err("link bounds");
+    }
+    Ok(Some(u.as_str().to_owned()))
 }
 fn progress(v: Option<&Value>) -> Result<Option<Value>> {
     let Some(v) = v else {
@@ -304,6 +309,8 @@ mod tests {
             let out =
                 normalize(&sub(&case["input"])).unwrap_or_else(|e| panic!("{}: {e}", case["name"]));
             assert_eq!(out, sub(&case["output"]), "{}", case["name"]);
+            // Normalising twice changes nothing: this output passes the page.
+            assert_eq!(normalize(&out), Ok(out.clone()), "{}", case["name"]);
         }
         for case in v["refuse"].as_array().unwrap() {
             assert!(normalize(&sub(&case["input"])).is_err(), "{}", case["name"]);

@@ -49,6 +49,7 @@ async function home({ objects = new Map() } = {}) {
     services: [],
     documents: new Map(),
     serviceGets: 0,
+    serviceDelay: 0, // ms before home answers a service-get
   };
   let nextSession = 1;
   class FakeSocket {
@@ -172,6 +173,7 @@ async function home({ objects = new Map() } = {}) {
       if (m.type === "services") return this.reply({ type: "services-list", id: m.id, services: h.services });
       if (m.type === "service-get") {
         h.serviceGets++;
+        if (h.serviceDelay) await new Promise((r) => setTimeout(r, h.serviceDelay));
         const doc = h.documents.get(m.service);
         if (doc === undefined) return this.reply({ type: "refused", id: m.id, reason: "unknown" });
         if (typeof doc === "string") return this.reply({ type: "refused", id: m.id, reason: doc });
@@ -522,6 +524,13 @@ test("service tabs: the list, a document, refusals and documents the page refuse
   assert.equal(got.view.sections[0].items[0].title, "<script>x</script>");
   assert.equal(got.view.sections[0].items[0].link, undefined, "javascript: link dropped");
   assert.equal(got.fetchedAt, fetched);
+  // Freshness counts from the request, before home answered, not from arrival.
+  h.serviceDelay = 300;
+  const asked = performance.now();
+  const slow = await serviceGet(link, "status");
+  h.serviceDelay = 0;
+  assert.ok(slow.started.mono >= asked && slow.started.mono < asked + 100, "started when asked");
+  assert.ok(performance.now() - slow.started.mono >= 300, "the delay counts");
   for (const reason of ["unavailable", "too-large", "invalid", "not-allowed"]) {
     h.documents.set("status", reason);
     await assert.rejects(serviceGet(link, "status"), (e) => e.reason === `service-${reason}`);

@@ -207,21 +207,30 @@ fn capped(r: &mut impl Read, max: u64, out: &mut Vec<u8>) -> Result<(), Refusal>
     }
     Ok(())
 }
+// One CRLF-terminated line of at most `SERVICE_CHUNK_LINE` bytes, without the CRLF.
+fn line(r: &mut impl BufRead) -> Result<Vec<u8>, Refusal> {
+    let mut line = Vec::new();
+    r.take(settings::SERVICE_CHUNK_LINE as u64)
+        .read_until(b'\n', &mut line)
+        .map_err(|_| Refusal::Unavailable)?;
+    if !line.ends_with(b"\r\n") {
+        return Err(Refusal::Unavailable);
+    }
+    line.truncate(line.len() - 2);
+    Ok(line)
+}
 fn chunked(r: &mut impl BufRead, max: u64) -> Result<Vec<u8>, Refusal> {
     let mut out = Vec::new();
     loop {
-        let mut line = Vec::new();
-        r.take(settings::SERVICE_CHUNK_LINE as u64)
-            .read_until(b'\n', &mut line)
-            .map_err(|_| Refusal::Unavailable)?;
-        let line = std::str::from_utf8(&line).map_err(|_| Refusal::Unavailable)?;
-        let line = line.strip_suffix("\r\n").ok_or(Refusal::Unavailable)?;
-        let size = line.split(';').next().unwrap_or("").trim();
+        let size = line(r)?;
+        let size = std::str::from_utf8(&size).map_err(|_| Refusal::Unavailable)?;
+        let size = size.split(';').next().unwrap_or("").trim();
         let size = u64::from_str_radix(size, 16).map_err(|_| Refusal::Unavailable)?;
         if size == 0 {
-            return Ok(out);
+            break;
         }
-        if out.len() as u64 + size > max {
+        // Against what is left, so a huge size cannot wrap past the cap.
+        if size > max.saturating_sub(out.len() as u64) {
             return Err(Refusal::TooLarge);
         }
         let start = out.len();
@@ -233,6 +242,16 @@ fn chunked(r: &mut impl BufRead, max: u64) -> Result<Vec<u8>, Refusal> {
         {
             return Err(Refusal::Unavailable);
         }
+    }
+    // Trailer lines, ignored, up to the empty line that ends the body; no more
+    // in total than a header block.
+    let mut left = settings::SERVICE_HEADER_BYTES;
+    loop {
+        let l = line(r)?;
+        if l.is_empty() {
+            return Ok(out);
+        }
+        left = left.checked_sub(l.len() + 2).ok_or(Refusal::Unavailable)?;
     }
 }
 
@@ -257,10 +276,14 @@ pub fn fetch(s: &Service, deadline: Duration) -> Result<Vec<u8>, Refusal> {
         if let Some(i) = head.windows(4).position(|w| w == b"\r\n\r\n") {
             break i + 4;
         }
-        if head.len() > settings::SERVICE_HEADER_BYTES {
+        // Never read past the cap: the blank line must arrive within it.
+        let room = (settings::SERVICE_HEADER_BYTES - head.len()).min(buf.len());
+        if room == 0 {
             return Err(Refusal::Unavailable);
         }
-        let n = io.read(&mut buf).map_err(|_| Refusal::Unavailable)?;
+        let n = io
+            .read(&mut buf[..room])
+            .map_err(|_| Refusal::Unavailable)?;
         if n == 0 {
             return Err(Refusal::Unavailable);
         }
@@ -344,6 +367,29 @@ pub fn request(s: &Service) -> Pending {
     request_with(s, settings::SERVICE_DEADLINE)
 }
 pub fn request_with(s: &Service, deadline: Duration) -> Pending {
+    start(s, move |s| fetch(s, deadline))
+}
+// Publishes `Unavailable` if the worker ends without an outcome, by a panic or
+// because it never started, so waiters always finish and the next request
+// starts a new fetch.
+struct Publish(Pending);
+impl Publish {
+    fn set(&self, outcome: Outcome) {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+    }
+}
+impl Drop for Publish {
+    fn drop(&mut self) {
+        let mut slot = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(Err(Refusal::Unavailable));
+        }
+    }
+}
+pub(crate) fn start(
+    s: &Service,
+    work: impl FnOnce(&Service) -> Result<Vec<u8>, Refusal> + Send + 'static,
+) -> Pending {
     let mut fetches = FETCHES.lock().unwrap_or_else(|e| e.into_inner());
     let key = format!("{}\n{}", s.id, s.url);
     if let Some(p) = fetches.get(&key)
@@ -353,10 +399,10 @@ pub fn request_with(s: &Service, deadline: Duration) -> Pending {
     }
     let pending = Pending::default();
     fetches.insert(key, pending.clone());
-    let (service, slot) = (s.clone(), pending.clone());
-    std::thread::spawn(move || {
-        let outcome = fetch(&service, deadline).map(Arc::from);
-        *slot.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+    let (service, publish) = (s.clone(), Publish(pending.clone()));
+    // If the thread cannot start, the closure and `publish` drop here.
+    let _ = std::thread::Builder::new().spawn(move || {
+        publish.set(work(&service).map(Arc::from));
     });
     pending
 }

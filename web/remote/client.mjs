@@ -4,7 +4,7 @@
 import { Session } from "../protocol/noise.mjs";
 import { Transfer, ack, admission, decode, encode, envelope, unwrap } from "../protocol/wire.mjs";
 import { CancelledError, PRIORITY, WorkQueue, fromHex, randomId, uploadName, uploadType } from "./model.mjs";
-import { LIMITS, readView } from "./view.mjs";
+import { LIMITS, clock, readView } from "./view.mjs";
 
 // Relay close codes for a refused phone admission (relay/route.mjs).
 export const CLOSE = Object.freeze({ notAccepted: 4001, homeOffline: 4002, busy: 4003 });
@@ -415,6 +415,8 @@ export async function services(link) {
 export async function serviceGet(link, service) {
   const id = randomId();
   const x = link.exchange(id);
+  // Freshness counts from here, not from arrival: a slow delivery ages it.
+  const started = clock();
   try {
     await link.send({ type: "service-get", id, service });
     const head = await x.next(TIMES.response);
@@ -427,7 +429,7 @@ export async function serviceGet(link, service) {
     }
     const { blob } = await receive(link, x, id, head);
     try {
-      return readView(new Uint8Array(await blob.arrayBuffer()));
+      return readView(new Uint8Array(await blob.arrayBuffer()), started);
     } catch (error) {
       fail("service-invalid", error);
     }

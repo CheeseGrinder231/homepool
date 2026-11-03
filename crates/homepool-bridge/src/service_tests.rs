@@ -220,6 +220,13 @@ fn chunked_and_close_delimited_bodies_are_read() {
     chunked.extend(b"0\r\n\r\n");
     let f = serve(move |_| Some(chunked.clone()));
     assert_eq!(fetch(&f, 4096).unwrap()["title"], "Work");
+    // Trailer fields are read and ignored up to the blank line.
+    let mut trailer = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    trailer.extend(format!("{:x}\r\n", body.len()).bytes());
+    trailer.extend(&body);
+    trailer.extend(b"\r\n0\r\nX-Checked: yes\r\n\r\n");
+    let f = serve(move |_| Some(trailer.clone()));
+    assert_eq!(fetch(&f, 4096).unwrap()["title"], "Work");
     let mut close = b"HTTP/1.0 200 OK\r\n\r\n".to_vec();
     close.extend(&body);
     let f = serve(move |_| Some(close.clone()));
@@ -322,6 +329,147 @@ fn every_refusal_case() {
         services::fetch(&down, Duration::from_secs(3)).map(|_| ()),
         Err(Refusal::Unavailable)
     );
+}
+
+// Review of #60: a chunk size near u64::MAX wrapped the cap check, and the
+// body framing was not checked to its end.
+#[test]
+fn chunk_sizes_and_framing_are_checked_to_the_end() {
+    let body = serde_json::to_vec(&doc()).unwrap();
+    let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    let one = [
+        head.clone(),
+        format!("{:x}\r\n", body.len()).into_bytes(),
+        body.clone(),
+        b"\r\n".to_vec(),
+    ]
+    .concat();
+    let cases: Vec<(&str, Vec<u8>, Refusal)> = vec![
+        (
+            "a byte, then the largest size",
+            [
+                head.clone(),
+                b"1\r\nx\r\nffffffffffffffff\r\n".to_vec(),
+                vec![b' '; 8192],
+            ]
+            .concat(),
+            Refusal::TooLarge,
+        ),
+        (
+            "the largest size first",
+            [
+                head.clone(),
+                b"ffffffffffffffff\r\n".to_vec(),
+                vec![b' '; 8192],
+            ]
+            .concat(),
+            Refusal::TooLarge,
+        ),
+        (
+            "a size past u64",
+            [head.clone(), b"10000000000000000\r\n".to_vec()].concat(),
+            Refusal::Unavailable,
+        ),
+        (
+            "exactly one byte over",
+            [
+                head.clone(),
+                b"1\r\nx\r\n1000\r\n".to_vec(),
+                vec![b' '; 4096],
+                b"\r\n0\r\n\r\n".to_vec(),
+            ]
+            .concat(),
+            Refusal::TooLarge,
+        ),
+        ("no last chunk", one.clone(), Refusal::Unavailable),
+        (
+            "no blank line after the last chunk",
+            [one.clone(), b"0\r\n".to_vec()].concat(),
+            Refusal::Unavailable,
+        ),
+        (
+            "a bare LF ends the body",
+            [one.clone(), b"0\r\n\n".to_vec()].concat(),
+            Refusal::Unavailable,
+        ),
+        (
+            "a trailer that never ends",
+            [one.clone(), b"0\r\n".to_vec(), b"X-Pad: 1\r\n".repeat(2000)].concat(),
+            Refusal::Unavailable,
+        ),
+    ];
+    for (name, response, expected) in cases {
+        let f = serve(move |_| Some(response.clone()));
+        assert_eq!(fetch(&f, 4096).map(|_| ()), Err(expected), "{name}");
+    }
+    let exact = [
+        head,
+        b"1000\r\n".to_vec(),
+        vec![b' '; 4096 - body.len()],
+        body,
+        b"\r\n0\r\n\r\n".to_vec(),
+    ]
+    .concat();
+    let f = serve(move |_| Some(exact.clone()));
+    assert_eq!(fetch(&f, 4096).unwrap()["title"], "Work", "exactly the cap");
+}
+
+// The header block must end within its cap, however the reads fall.
+#[test]
+fn headers_end_within_their_cap() {
+    let body = serde_json::to_vec(&doc()).unwrap();
+    let cap = crate::settings::SERVICE_HEADER_BYTES;
+    let response = |size: usize| {
+        let start = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Pad: ",
+            body.len()
+        );
+        let pad = size - start.len() - 4;
+        [
+            start.into_bytes(),
+            vec![b'a'; pad],
+            b"\r\n\r\n".to_vec(),
+            body.clone(),
+        ]
+        .concat()
+    };
+    let (at, over) = (response(cap), response(cap + 1));
+    let f = serve(move |_| Some(at.clone()));
+    assert_eq!(fetch(&f, 4096).unwrap()["title"], "Work", "exactly the cap");
+    let f = serve(move |_| Some(over.clone()));
+    assert_eq!(
+        fetch(&f, 4096).map(|_| ()),
+        Err(Refusal::Unavailable),
+        "one byte over"
+    );
+}
+
+// A worker that ends without an outcome still answers everyone waiting on it,
+// and the next request starts a new fetch.
+#[test]
+fn waiters_recover_when_a_worker_fails() {
+    let body = serde_json::to_vec(&doc()).unwrap();
+    let f = serve(move |_| Some(ok(&body)));
+    let s = service("recover", f.port, 4096, all());
+    let a = services::start(&s, |_| {
+        std::thread::sleep(Duration::from_millis(200));
+        panic!("a deliberate panic in a test worker");
+    });
+    let b = services::start(&s, |_| unreachable!("joins the running fetch"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while a.poll().is_none() || b.poll().is_none() {
+        assert!(Instant::now() < deadline, "waiters must not hang");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(a.poll().unwrap().map(|_| ()), Err(Refusal::Unavailable));
+    assert_eq!(b.poll().unwrap().map(|_| ()), Err(Refusal::Unavailable));
+    let c = services::request(&s);
+    while c.poll().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(c.poll().unwrap().is_ok());
+    assert_eq!(f.hits.load(Ordering::SeqCst), 1);
 }
 
 #[test]

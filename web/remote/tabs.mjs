@@ -200,13 +200,17 @@ export function createServiceTabs({ remote, ui, store, say, isLibrary, onPhotos 
 
   function draw(loaded, name, checking) {
     const { view } = loaded;
-    const { age, stale } = freshness(loaded);
+    const { age, stale, expired } = freshness(loaded);
     ui.service.classList.toggle("is-stale", stale);
     const overall = stale ? "stale" : view.state;
     ui.serviceState.className = `badge s-${overall}`;
     ui.serviceState.textContent = stale ? "Out of date" : label(view.state, false);
     ui.serviceTitle.textContent = view.title || name;
-    ui.serviceAge.textContent = `Updated ${ageText(age)}${checking ? " · checking…" : ""}`;
+    // Out of date, the age is of an old snapshot, not of an update.
+    const when = stale
+      ? `Snapshot from ${until(view.as_of)} · Expired ${ageText(expired)}`
+      : `Updated ${ageText(age)}`;
+    ui.serviceAge.textContent = `${when}${checking ? " · checking…" : ""}`;
     const tally = counts(view);
     const attention = tally.filter(([s]) => ["error", "stuck", "warn"].includes(s));
     const line = tally.map(([s, n]) => plural(n, ...WORDS[s])).join(" · ");

@@ -58,23 +58,55 @@ test("hostile strings stay strings and links are https only", () => {
   assert.throws(() => readView(new Uint8Array(LIMITS.bytes + 1)), { reason: "invalid" });
 });
 
+// A phone clock reading: `mono` in ms since an arbitrary start, `wall` in ms.
+const phone = (monoS, wallIso, plusS = 0) => ({ mono: monoS * 1000, wall: at(wallIso) + plusS * 1000 });
+
 test("stale past valid_until by home's clock, even when the phone's clock is wrong", () => {
-  const loaded = readView(bytes({ ...base, state: "ok", fetched_at: "2026-01-01T00:00:30Z" }), at("2030-01-01T00:00:00Z"));
-  // The phone's clock reads 2030, but only 20 s have passed since home read it.
-  const now = at("2030-01-01T00:00:20Z");
-  assert.deepEqual(freshness(loaded, now), { age: 50, stale: false });
-  assert.deepEqual(freshness(loaded, now + 11000), { age: 61, stale: true });
+  const started = phone(0, "2030-01-01T00:00:00Z");
+  const loaded = readView(bytes({ ...base, state: "ok", fetched_at: "2026-01-01T00:00:30Z" }), started);
+  // The phone's clock reads 2030, but only 20 s have passed since the page asked.
+  assert.deepEqual(freshness(loaded, phone(20, "2030-01-01T00:00:20Z")), { age: 50, stale: false, expired: 0 });
+  assert.deepEqual(freshness(loaded, phone(31, "2030-01-01T00:00:31Z")), { age: 61, stale: true, expired: 1 });
   // A phone clock running behind cannot make old data look fresh either.
-  const behind = readView(bytes({ ...base, fetched_at: "2026-01-01T00:05:00Z" }), at("2025-06-01T00:00:00Z"));
-  assert.equal(freshness(behind, at("2025-06-01T00:00:00Z")).stale, true);
-  // Without home's clock, the phone's is the only one there is.
-  const plain = readView(bytes(base), 0);
-  assert.equal(freshness(plain, at("2026-01-01T00:00:59Z")).stale, false);
-  assert.equal(freshness(plain, at("2026-01-01T00:01:01Z")).stale, true);
+  const behind = readView(bytes({ ...base, fetched_at: "2026-01-01T00:05:00Z" }), phone(0, "2025-06-01T00:00:00Z"));
+  assert.equal(freshness(behind, phone(0, "2025-06-01T00:00:00Z")).stale, true);
+  // Without home's clock, the phone's at the request is the only one there is.
+  const plain = readView(bytes(base), phone(0, "2026-01-01T00:00:00Z"));
+  assert.equal(freshness(plain, phone(59, "2026-01-01T00:00:59Z")).stale, false);
+  assert.equal(freshness(plain, phone(61, "2026-01-01T00:01:01Z")).stale, true);
   assert.equal(label("ok", true), "Was OK");
   assert.equal(label("ok", false), "OK");
   assert.equal(label("stuck", true), "Stuck");
   assert.equal(label("purple", false), "Unknown");
+});
+
+// Review of #60: time spent delivering the document counts against it.
+test("a slow delivery ages the document from when the page asked", () => {
+  const doc = bytes({ ...base, fetched_at: "2026-01-01T00:00:30Z" });
+  // Asked at 0 s, delivered 120 s later: 30 + 120 is past valid_until (60).
+  const loaded = readView(doc, phone(0, "2030-01-01T00:00:00Z"));
+  assert.deepEqual(freshness(loaded, phone(120, "2030-01-01T00:02:00Z")), { age: 150, stale: true, expired: 90 });
+  // Asked and delivered at once: fresh for the 30 s left.
+  const quick = readView(doc, phone(0, "2030-01-01T00:00:00Z"));
+  assert.equal(freshness(quick, phone(29, "2030-01-01T00:00:29Z")).stale, false);
+  assert.equal(freshness(quick, phone(31, "2030-01-01T00:00:31Z")).stale, true);
+});
+
+test("changing the phone's clock after receipt never makes a document younger", () => {
+  const doc = bytes({ ...base, fetched_at: "2026-01-01T00:00:30Z" });
+  // Set back an hour after receipt: the steady clock still counts.
+  const back = readView(doc, phone(0, "2030-01-01T00:00:00Z"));
+  assert.equal(freshness(back, phone(20, "2029-12-31T23:00:20Z")).age, 50);
+  assert.equal(freshness(back, phone(31, "2029-12-31T23:00:31Z")).stale, true);
+  // Moved 40 s ahead, the document goes stale; correcting the clock back
+  // does not make it fresh again.
+  const ahead = readView(doc, phone(0, "2030-01-01T00:00:00Z"));
+  assert.equal(freshness(ahead, phone(5, "2030-01-01T00:00:45Z")).stale, true);
+  assert.equal(freshness(ahead, phone(6, "2030-01-01T00:00:06Z")).stale, true);
+  assert.equal(freshness(ahead, phone(7, "2030-01-01T00:00:07Z")).age, 75);
+  // A sleeping phone whose steady clock paused: the wall clock still counts.
+  const slept = readView(doc, phone(0, "2030-01-01T00:00:00Z"));
+  assert.equal(freshness(slept, phone(2, "2030-01-01T00:10:00Z")).stale, true);
 });
 
 test("what needs attention comes first; equal states keep their order", () => {

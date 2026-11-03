@@ -305,6 +305,9 @@ try {
   await see(A, /Out of date/, 20000);
   assert.equal(fixture.count("/status.json"), fetched, "turned stale by the clock, not a fetch");
   assert.equal(await A.page.locator("#service-state").innerText(), "Out of date");
+  // The age names an old snapshot, never an update.
+  assert.match(await A.page.locator("#service-age").innerText(), /^Snapshot from \d.* · Expired (just now|\d+ min ago)/);
+  assert.match(await A.page.locator("#service-age").innerText(), /^(?!.*Updated)/);
   assert.match(await A.page.locator("#service-stale").innerText(), /said this was good until \d/);
   assert.match(await A.page.locator("#service-counts").innerText(), /^When last sent: 4 OK$/);
   assert.equal(await A.page.locator(".badge.s-ok", { hasText: /^OK$/ }).count(), 0, "no OK badge on stale data");
