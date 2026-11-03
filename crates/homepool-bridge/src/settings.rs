@@ -24,6 +24,8 @@ pub const SETTLEMENT_RETRY: Duration = Duration::from_secs(1);
 pub const SERVICE_DEADLINE: Duration = Duration::from_secs(15);
 pub const SERVICE_DEFAULT_BYTES: u64 = 256 * 1024;
 pub const SERVICE_MAX_BYTES: u64 = 1024 * 1024;
+// What the page accepts after normalisation (web/remote/view.mjs LIMITS.bytes).
+pub const SERVICE_SENT_BYTES: usize = 1024 * 1024 + 1024;
 pub const SERVICE_HEADER_BYTES: usize = 16 * 1024;
 pub const SERVICE_CHUNK_LINE: usize = 1024;
 pub const SERVICE_TITLE_CHARS: usize = 40;

@@ -319,7 +319,12 @@ pub fn fetch(s: &Service, deadline: Duration) -> Result<Vec<u8>, Refusal> {
         .map_err(|_| Refusal::Unavailable)?
         .as_secs();
     doc["fetched_at"] = view::format_time(now as i64).into();
-    serde_json::to_vec(&doc).map_err(|_| Refusal::Invalid)
+    let out = serde_json::to_vec(&doc).map_err(|_| Refusal::Invalid)?;
+    // Percent-encoded links can grow a document; never send more than the page takes.
+    if out.len() > settings::SERVICE_SENT_BYTES {
+        return Err(Refusal::TooLarge);
+    }
+    Ok(out)
 }
 
 type Outcome = Result<Arc<[u8]>, Refusal>;
