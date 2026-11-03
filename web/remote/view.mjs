@@ -213,19 +213,42 @@ export function readView(bytes, started = clock()) {
   }
   const view = normalize(doc);
   const fetched = parseTime(doc.fetched_at);
-  return { view, fetchedAt: fetched, started, elapsed: 0 };
+  return { view, fetchedAt: fetched, started, last: started, elapsed: 0, uncertain: false };
 }
 
 // ---- presentation -----------------------------------------------------------
 
+// How far the two clocks may disagree between readings, in seconds, before
+// the page stops trusting its count. They tick together while the phone is
+// awake; a gap means sleep or a clock change.
+export const CLOCK_TOLERANCE = 2;
+
 // Seconds since the page asked, counted conservatively: from the request's
-// start rather than the document's arrival, by whichever clock has moved
-// further, and never backwards, so a slow delivery, a sleeping phone or a
-// clock set back cannot make the document younger.
+// start rather than the document's arrival, and never backwards. Each reading
+// adds the steady clock's increase to the highest count so far, and the count
+// is at least what either clock says since the start, so it keeps moving after
+// a clock is set forward and back. When the clocks disagree between readings,
+// the count can't be trusted any more and the document becomes `uncertain`
+// until a new one arrives: a sleeping phone whose clock was set back can
+// otherwise look as if no time passed.
 export function elapsed(loaded, now = clock()) {
-  const { mono, wall } = loaded.started;
-  loaded.elapsed = Math.max(loaded.elapsed ?? 0, (now.mono - mono) / 1000, (now.wall - wall) / 1000);
+  const { started, last } = loaded;
+  const steady = Math.max(0, now.mono - last.mono) / 1000;
+  const wall = (now.wall - last.wall) / 1000;
+  if (Math.abs(wall - steady) > CLOCK_TOLERANCE) loaded.uncertain = true;
+  loaded.elapsed = Math.max(
+    loaded.elapsed + steady,
+    (now.mono - started.mono) / 1000,
+    (now.wall - started.wall) / 1000,
+  );
+  loaded.last = now;
   return loaded.elapsed;
+}
+
+// The page was hidden, so the phone may have slept: how old the document is
+// can't be known until home answers again.
+export function doubt(loaded) {
+  if (loaded) loaded.uncertain = true;
 }
 
 // Home's clock now: when the bridge read the document plus the time since the
@@ -235,12 +258,14 @@ export function homeNow(loaded, now = clock()) {
   return base + elapsed(loaded, now);
 }
 
-// `age` is how old `as_of` is; `expired`, how long ago `valid_until` passed.
+// `age` is how old `as_of` is; `expired`, how long ago `valid_until` passed;
+// `uncertain`, that neither can be trusted. Only a document neither stale nor
+// uncertain may be shown as current.
 export function freshness(loaded, now = clock()) {
   const at = homeNow(loaded, now);
   const age = Math.max(0, at - parseTime(loaded.view.as_of));
   const expired = at - parseTime(loaded.view.valid_until);
-  return { age, stale: expired > 0, expired: Math.max(0, expired) };
+  return { age, stale: expired > 0, expired: Math.max(0, expired), uncertain: loaded.uncertain };
 }
 
 export function ageText(seconds) {

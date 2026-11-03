@@ -380,6 +380,32 @@ try {
   assert.equal(A.sockets.opened, socketsBefore + 1, "refresh reuses the session");
   log("hidden: no fetch; return: one fetch and one session; then one per refresh_s");
 
+  // ---- after hiding, kept data is never current until home answers -----------------------------
+  // The phone may have slept while hidden; if the refresh on return fails,
+  // the kept document stays "Last known" with no age and no green.
+  await settled(A);
+  await see(A, /Updated just now/);
+  await setHidden(A, true);
+  fixture.mode = "redirect";
+  await setHidden(A, false);
+  await see(A, /Last known/);
+  await settled(A);
+  await see(A, /Status isn't answering at home right now\. .* Below is the last thing it sent; this phone can't tell how long ago\./);
+  assert.equal(await A.page.locator("#service-state").innerText(), "Last known");
+  assert.match(await A.page.locator("#service-age").innerText(), /^Snapshot from \d.* · Age not known$/);
+  assert.match(await A.page.locator("#service-stale").innerText(), /can't tell how old this is/);
+  assert.equal(await A.page.locator(".badge.s-ok", { hasText: /^OK$/ }).count(), 0, "no OK badge on doubted data");
+  const doubted = await A.page.locator(".badge.s-ok").first().evaluate((e) => getComputedStyle(e).color);
+  assert.equal(doubted, await A.page.locator("#service-age").evaluate((e) => getComputedStyle(e).color), "grey, not green");
+  assert.equal(await A.page.locator("#tabs [role=tab]", { hasText: "Status" }).getAttribute("data-state"), "stale");
+  await shot(A, "11-last-known");
+  fixture.mode = "healthy";
+  await A.page.click("#service-retry");
+  await settled(A);
+  await see(A, /Updated just now/);
+  assert.equal(await A.page.locator("#service-state").innerText(), "OK");
+  log("after hiding with a failed refresh: last known, no age, never green; current again once home answers");
+
   // ---- a phone without the Work grant ---------------------------------------------------------
   const B = await phone(wanted.includes("firefox") ? "firefox" : wanted[0], "B");
   await pair(B);

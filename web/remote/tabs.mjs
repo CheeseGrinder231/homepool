@@ -6,7 +6,7 @@
 // page becomes visible again on that tab, and every refresh_s while visible.
 // Nothing is fetched while the page is hidden, and nothing pings while idle.
 import { PRIORITY, serviceGet, services } from "./client.mjs";
-import { STATES, ageText, counts, freshness, homeNow, label, ordered, parseTime, progressText } from "./view.mjs";
+import { STATES, ageText, counts, doubt, freshness, homeNow, label, ordered, parseTime, progressText } from "./view.mjs";
 
 const SERVICE_REASONS = {
   "service-unavailable": (t) => `${t} isn't answering at home right now. Check that it's running on the home computer, then try again.`,
@@ -55,6 +55,7 @@ export function createServiceTabs({ remote, ui, store, say, isLibrary, onPhotos 
     timer: null,
     ticker: null,
     generation: 0,
+    hides: 0, // times the page was hidden; a fetch that spans one is doubted
     listing: null,
     listed: false,
   };
@@ -117,6 +118,7 @@ export function createServiceTabs({ remote, ui, store, say, isLibrary, onPhotos 
     }
     clearTimeout(state.timer);
     const generation = state.generation;
+    const hides = state.hides;
     remote.queue.resume();
     const job = remote.run(priority, (link) => serviceGet(link, id));
     entry.loading = job;
@@ -124,6 +126,8 @@ export function createServiceTabs({ remote, ui, store, say, isLibrary, onPhotos 
     job.done
       .then((loaded) => {
         if (generation !== state.generation) return;
+        // Hidden while it travelled: the phone may have slept in between.
+        if (hides !== state.hides) doubt(loaded);
         entry.loaded = loaded;
         entry.error = null;
       })
@@ -164,8 +168,8 @@ export function createServiceTabs({ remote, ui, store, say, isLibrary, onPhotos 
     const b = state.buttons.get(id);
     const loaded = state.docs.get(id)?.loaded;
     if (!b || !loaded) return;
-    const { stale } = freshness(loaded);
-    const worst = stale ? "stale" : worstOf(loaded.view);
+    const { stale, uncertain } = freshness(loaded);
+    const worst = stale || uncertain ? "stale" : worstOf(loaded.view);
     const attention = ["error", "stuck", "warn", "stale"].includes(worst);
     b.dataset.state = attention ? worst : "";
     b.setAttribute("aria-label", attention ? `${title(id)}, ${label(worst, false).toLowerCase()}` : title(id));
@@ -191,40 +195,50 @@ export function createServiceTabs({ remote, ui, store, say, isLibrary, onPhotos 
     ui.serviceRetry.hidden = Boolean(loading);
     if (error) {
       const fresh = loaded && freshness(loaded);
-      ui.serviceProblemText.textContent = loaded
-        ? `${message(error, id)} Below is what it sent ${ageText(fresh.age)}.`
-        : message(error, id);
+      ui.serviceProblemText.textContent = !loaded
+        ? message(error, id)
+        : fresh.uncertain
+          ? `${message(error, id)} Below is the last thing it sent; this phone can't tell how long ago.`
+          : `${message(error, id)} Below is what it sent ${ageText(fresh.age)}.`;
     }
     if (loaded) draw(loaded, name, Boolean(loading));
   }
 
   function draw(loaded, name, checking) {
     const { view } = loaded;
-    const { age, stale, expired } = freshness(loaded);
-    ui.service.classList.toggle("is-stale", stale);
-    const overall = stale ? "stale" : view.state;
+    const { age, stale, expired, uncertain } = freshness(loaded);
+    // Shown as current only when neither out of date nor in doubt.
+    const old = stale || uncertain;
+    ui.service.classList.toggle("is-stale", old);
+    const overall = old ? "stale" : view.state;
     ui.serviceState.className = `badge s-${overall}`;
-    ui.serviceState.textContent = stale ? "Out of date" : label(view.state, false);
+    ui.serviceState.textContent = stale ? "Out of date" : uncertain ? "Last known" : label(view.state, false);
     ui.serviceTitle.textContent = view.title || name;
-    // Out of date, the age is of an old snapshot, not of an update.
-    const when = stale
-      ? `Snapshot from ${until(view.as_of)} · Expired ${ageText(expired)}`
-      : `Updated ${ageText(age)}`;
+    // Out of date or in doubt, the age is of an old snapshot, not of an update.
+    const snapshot = `Snapshot from ${until(view.as_of)}`;
+    const when = uncertain
+      ? `${snapshot} · ${stale ? "Expired" : "Age not known"}`
+      : stale
+        ? `${snapshot} · Expired ${ageText(expired)}`
+        : `Updated ${ageText(age)}`;
     ui.serviceAge.textContent = `${when}${checking ? " · checking…" : ""}`;
     const tally = counts(view);
     const attention = tally.filter(([s]) => ["error", "stuck", "warn"].includes(s));
     const line = tally.map(([s, n]) => plural(n, ...WORDS[s])).join(" · ");
-    ui.serviceCounts.textContent = stale ? `When last sent: ${line}` : line;
+    ui.serviceCounts.textContent = old ? `When last sent: ${line}` : line;
     ui.serviceCounts.hidden = tally.length === 0;
-    ui.serviceStale.hidden = !stale;
+    ui.serviceStale.hidden = !old;
     ui.serviceStale.textContent = stale
       ? `Out of date. ${name} said this was good until ${until(loaded.view.valid_until)} and hasn't sent anything newer, so it may have changed.`
-      : "";
+      : uncertain
+        ? `Last known. This page was in the background or the phone's clock changed, so it can't tell how old this is. It shows as current again once home answers.`
+        : "";
     ui.serviceNotes.replaceChildren(...view.notes.map((n) => el("li", "", n)));
     ui.serviceNotes.hidden = view.notes.length === 0;
     const sections = ordered(view);
-    const now = homeNow(loaded);
-    ui.serviceSections.replaceChildren(...sections.map((s) => section(s, stale, attention.length > 0, now)));
+    // In doubt, item times are shown as clock times rather than ages.
+    const now = uncertain ? null : homeNow(loaded);
+    ui.serviceSections.replaceChildren(...sections.map((s) => section(s, old, attention.length > 0, now)));
     ui.serviceNothing.hidden = sections.length > 0 || view.notes.length > 0;
   }
 
@@ -267,7 +281,8 @@ export function createServiceTabs({ remote, ui, store, say, isLibrary, onPhotos 
     }
     if (i.updated || i.link) {
       const foot = el("p", "svc-foot");
-      if (i.updated) foot.append(el("span", "", `Changed ${ageText(now - parseTime(i.updated))}`));
+      if (i.updated)
+        foot.append(el("span", "", now === null ? `Changed ${until(i.updated)}` : `Changed ${ageText(now - parseTime(i.updated))}`));
       if (i.link) {
         // Already checked: https only. Opens outside the page, with no opener
         // or referrer.
@@ -327,9 +342,13 @@ export function createServiceTabs({ remote, ui, store, say, isLibrary, onPhotos 
     refresh() {
       if (state.active !== "photos") load(state.active, PRIORITY.open);
     },
-    // Page hidden: stop every timer; nothing is fetched until it returns.
+    // Page hidden: stop every timer; nothing is fetched until it returns. The
+    // phone may sleep, so no document kept now is shown as current again
+    // until a new one arrives.
     hidden() {
       stopTimers();
+      state.hides++;
+      for (const entry of state.docs.values()) doubt(entry.loaded);
     },
     // Page visible again on a service tab: one fetch, then the schedule.
     visible() {

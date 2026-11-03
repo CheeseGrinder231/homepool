@@ -160,6 +160,9 @@ it. The photo list is fetched only when Photos is shown.
   and its items'. All-OK sections are folded when something else needs
   attention. The tab itself gets a coloured mark, with words for screen
   readers, when its service needs attention or is out of date.
+- **In doubt:** after the page was hidden, or a clock jump, kept data reads
+  "Last known" and is never green until a new document arrives
+  ([Freshness](#freshness)).
 - **Stale:** past `valid_until` ([Freshness](#freshness)), the page says
   "Out of date" and when the data was good until, the header reads
   "Snapshot from 14:02 · Expired 3 min ago" rather than an update time, and
@@ -175,22 +178,40 @@ it. The photo list is fetched only when Photos is shown.
 
 The page judges staleness by home's clock: `fetched_at` plus the time since
 the page asked for the document. Counting starts when the request is sent, not
-when the document arrives, so a slow delivery counts against it. That time is
-the larger of two phone clocks: the steady clock (`performance.now()`), which
-setting the clock does not move but which may pause while the phone sleeps,
-and the wall clock, which keeps counting through sleep. The count never goes
-backwards, so a document that has gone stale stays stale.
+when the document arrives, so a slow delivery counts against it. The count
+never goes backwards. Each reading adds the steady clock's increase to the
+highest count so far, and the count is at least what either phone clock says
+since the request. The steady clock (`performance.now()`) is not moved by
+setting the clock, but may pause while the phone sleeps. The wall clock keeps
+counting through sleep, but can be set forwards or back.
 
-So a slow delivery, a sleeping phone, or a phone clock that is wrong or is
-changed after receipt cannot make old data look fresh; at worst a clock moved
-forward makes it look out of date early. A refresh starts the count again from
-the new document.
+Neither clock alone can always tell how much time passed: a phone that sleeps
+while its clock is set back shows almost none on both. So the page doesn't try
+to measure across such a gap. A document it keeps is in doubt, and is never
+shown as current, once:
 
-What this does not fix is a wrong clock at home. The service's times and
-`fetched_at` both come from the home computer, so they agree with each other
-if that clock is off, but a service that copies times from another machine
-needs both clocks right. If `fetched_at` were missing, the page would fall back
-to its own wall clock at the request; the bridge always adds it.
+- the page has been hidden since the document was asked for (the phone may
+  have slept), or
+- the two clocks disagree between readings by more than 2 seconds (sleep or a
+  clock change).
+
+A document in doubt reads "Last known", with "Snapshot from 14:02 · Age not
+known", grey badges ("Was OK") and a grey mark on its tab. If the refresh on
+return fails, it stays that way, and the problem message says the phone can't
+tell how long ago it was sent. Only a new document is shown as current again.
+
+What holds: while the page stays visible and both clocks run together, the
+age is at least the time since the request, so a slow delivery or a phone
+clock that is simply wrong cannot make old data look fresh. Anything that
+might break that count puts the document in doubt instead. A clock moved
+forward can make a document look out of date early.
+
+What does not: a wrong clock at home. The service's times and `fetched_at`
+both come from the home computer, so they agree with each other if that clock
+is off, but a service that copies times from another machine needs both clocks
+right. A browser that sleeps without hiding the page and pauses both clocks
+the same way is not detected. If `fetched_at` were missing, the page would fall
+back to its own wall clock at the request; the bridge always adds it.
 
 ### Cost
 
@@ -233,13 +254,17 @@ the relay's budget, not measured billing.
   (including links that percent-encoding grows to and past the bound, and
   normalising twice), hostile strings, links, staleness with a wrong phone
   clock, a slow delivery, the clock set back or forward after receipt, a
-  sleeping phone, ordering, and the client operations against the scripted
+  sleeping phone, sleep with the clock set back (in doubt, still after a
+  failed refresh), a hidden page, the age moving on after a jump and its
+  correction, ordering, and the client operations against the scripted
   bridge (counting from the request, not the arrival).
 - `web/remote/tests/services-e2e.mjs`: the explicit browser runner, with the
   same environment as `e2e.mjs` ([remote page](remote-page.md#tests)). It adds
   a loopback fixture service and covers the empty catalog, tabs, a healthy
   document, stuck and warn items first, a document going stale by the clock
-  ("Snapshot from … · Expired …"),
+  ("Snapshot from … · Expired …"), kept data after hiding with a failed
+  refresh ("Last known", no age, never green, current again once home
+  answers),
   the service stopping and coming back, oversize, invalid, redirecting and
   hostile documents, hide and return (no fetch while hidden, one on return,
   then one per `refresh_s` on the same session), a phone without a grant,
