@@ -1,9 +1,10 @@
 // Fixed, non-authoritative liveness frames; never tokens or Noise messages.
 export const BRIDGE_PING = "homepool/1/bridge-ping";
 export const BRIDGE_PONG = "homepool/1/bridge-pong";
-export const AUTO_REQUESTS_PER_ROUTE = 5760 / 20;
+// Auto-responses bypass JavaScript and add no billed work.
+export const AUTO_REQUESTS_PER_ROUTE = 0;
 // Gate and route upgrade calls, alarms and closes; see relay/README.md.
-export const AUXILIARY_REQUESTS = 6000;
+export const AUXILIARY_REQUESTS = 14000;
 export const RELAY_WINDOW = 1024 * 1024;
 export const ACK_INTERVAL = 64 * 1024;
 // Includes envelope/schema/AEAD overhead, not just plaintext file bytes.
@@ -17,10 +18,11 @@ export const defaults = Object.freeze({
   controlsPerSecond: 32,
   controlBytesPerSecond: 4096,
   dailyBytes: 3 * 1024 ** 3,
-  dailyMessages: 800000,
-  dailyWrites: 10000,
+  dailyMessages: 570000,
+  dailyWrites: 8000,
   dailyDurationMs: 16000000,
   dailyUpgrades: 1000,
+  bridgeUpgrades: 8,
   dailyFailures: 100,
   upgradesPerSecond: 20,
   tokens: 128,
@@ -76,13 +78,19 @@ export function routeLimits(env) {
         "dailyDurationMs",
       ].map((k) => [k, Math.floor(defaults[k] / count)]),
     ),
-    // Include scheduled auto-response traffic and auxiliary invocations in the
-    // half-Free request allowance, even though auto-responses bypass JS budgets.
-    dailyMessages: Math.floor(
-      Math.min(
-        defaults.dailyMessages,
-        (50000 - AUXILIARY_REQUESTS - count * AUTO_REQUESTS_PER_ROUTE) * 20,
-      ) / count,
-    ),
+  };
+}
+
+// Shared independently from phone work; 128 registrations per reconnect and
+// eight reconnects per configured route fit these bounded control allowances.
+export function bridgeLimits(env) {
+  const count = Math.max(1, JSON.parse(env.ROUTES || "[]").length);
+  return {
+    ...defaults,
+    dailyMessages: Math.floor(130000 / count),
+    dailyWrites: Math.floor(30000 / count),
+    dailyDurationMs: Math.floor(2000000 / count),
+    dailyBytes: 1024 * 1024,
+    dailyFailures: 8,
   };
 }

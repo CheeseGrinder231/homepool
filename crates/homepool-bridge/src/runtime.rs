@@ -67,9 +67,25 @@ fn connect(c: &Config) -> Result<Socket> {
         .map_err(|_| "relay timeout")?;
     tcp.set_write_timeout(Some(settings::PONG))
         .map_err(|_| "relay timeout")?;
-    let (mut ws, _) =
-        tungstenite::client_tls_with_config(c.relay_url.as_str(), tcp, Some(config), None)
-            .map_err(|_| "relay handshake")?;
+    use tungstenite::client::IntoClientRequest;
+    let mut request = c
+        .relay_url
+        .as_str()
+        .into_client_request()
+        .map_err(|_| "relay request")?;
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", state::hex(&c.token()?))
+            .parse()
+            .map_err(|_| "relay authorization")?,
+    );
+    let (mut ws, _) = tungstenite::client_tls_with_config(request, tcp, Some(config), None)
+        .map_err(|e| {
+            if let tungstenite::HandshakeError::Failure(tungstenite::Error::Http(response)) = e {
+                eprintln!("relay refused HTTP {}", response.status().as_u16());
+            }
+            "relay handshake"
+        })?;
     let tcp = match ws.get_mut() {
         MaybeTlsStream::Plain(tcp) => tcp,
         MaybeTlsStream::Rustls(tls) => &mut tls.sock,
@@ -104,7 +120,7 @@ pub fn run(c: &Config) -> Result<()> {
     std::env::set_current_dir(&c.state_dir).map_err(|_| "state directory")?;
     let listener = UnixListener::bind("control.sock").map_err(|_| "control")?;
     listener.set_nonblocking(true).map_err(|_| "control")?;
-    let mut backoff = 1u64;
+    let mut backoff = crate::reconnect::Backoff::new();
     let mut settlements = Settlements::default();
     loop {
         let config = c.clone();
@@ -131,14 +147,22 @@ pub fn run(c: &Config) -> Result<()> {
                 Err(_) => break Err("relay connector".into()),
             }
         };
-        if let Ok(mut ws) = result
-            && register(&mut ws, &s).is_ok()
-        {
-            backoff = 1;
-            let _ = connected(c, &identity, &mut s, &listener, &mut ws, &mut settlements);
+        if let Ok(mut ws) = result {
+            if register(&mut ws, &s).is_ok() {
+                let up = Instant::now();
+                eprintln!("relay connection up; registration sent");
+                let _ = connected(c, &identity, &mut s, &listener, &mut ws, &mut settlements);
+                backoff.disconnected(up.elapsed());
+                eprintln!("relay connection down");
+            } else {
+                eprintln!("relay registration failed");
+            }
+        } else {
+            eprintln!("relay connection failed");
         }
-        let jitter = u64::from(state::unhex(&state::random(1)?)?[0]);
-        let until = Instant::now() + std::time::Duration::from_millis(backoff * 1000 + jitter);
+        let delay = backoff.next(state::unhex(&state::random(1)?)?[0]);
+        eprintln!("relay back-off {} ms", delay.as_millis());
+        let until = Instant::now() + delay;
         while Instant::now() < until {
             settlements.tick(c, &mut s)?;
             control(
@@ -152,7 +176,6 @@ pub fn run(c: &Config) -> Result<()> {
             )?;
             std::thread::sleep(settings::TICK);
         }
-        backoff = (backoff * 2).min(60);
     }
 }
 fn retire(
@@ -268,6 +291,14 @@ fn connected(
                         }
                         _ => return Err("relay control".into()),
                     }
+                }
+                Ok(Message::Close(frame)) => {
+                    if let Some(frame) = frame {
+                        eprintln!("relay closed code {}", u16::from(frame.code));
+                    } else {
+                        eprintln!("relay closed without code");
+                    }
+                    return Err("relay disconnected".into());
                 }
                 Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
                 Err(tungstenite::Error::Io(e))

@@ -1,5 +1,5 @@
 import { Relay } from "./route.mjs";
-import { defaults } from "./limits.mjs";
+import { defaults, constantTimeToken } from "./limits.mjs";
 export { Relay };
 // The remote image page, served from the Worker's static assets (`web/`) on
 // the relay's own origin. Only these exact paths are served; everything else
@@ -47,7 +47,10 @@ async function page(request, env, path) {
   const tag = request.headers.get("If-None-Match");
   if (tag) headers.set("If-None-Match", tag);
   const asset = await env.ASSETS.fetch(
-    new Request(new URL(path, request.url), { method: request.method, headers }),
+    new Request(new URL(path, request.url), {
+      method: request.method,
+      headers,
+    }),
   );
   if (asset.status !== 200 && asset.status !== 304)
     return new Response(null, { status: 404 });
@@ -66,7 +69,7 @@ export class UpgradeGate {
     this.ctx = ctx;
     this.env = env;
   }
-  fetch() {
+  fetch(request) {
     return this.ctx.blockConcurrencyWhile(async () => {
       const second = Math.floor(Date.now() / 1000);
       const day = Math.floor(Date.now() / 86400000);
@@ -76,7 +79,12 @@ export class UpgradeGate {
         a.second = second;
         a.count = 0;
       }
-      if (a.daily >= defaults.dailyUpgrades)
+      if (
+        a.daily >=
+        (request?.headers.get("X-Homepool-Bridge") === "1"
+          ? defaults.bridgeUpgrades
+          : defaults.dailyUpgrades)
+      )
         return new Response(null, { status: 429 });
       if (a.count >= defaults.upgradesPerSecond)
         return new Response(null, { status: 429 });
@@ -119,7 +127,34 @@ export default {
       return new Response(null, { status: 404 });
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket")
       return new Response(null, { status: 426 });
-    const gate = env.UPGRADES.get(env.UPGRADES.idFromName("global"));
+    const incoming = new Headers(request.headers);
+    incoming.delete("X-Homepool-Bridge");
+    const authorization = incoming.get("Authorization");
+    let bridge = false;
+    if (authorization) {
+      let secret;
+      try {
+        secret = JSON.parse(env.BRIDGE_TOKENS)[route];
+      } catch {}
+      const offered = authorization.replace(/^Bearer /, "");
+      if (
+        !authorization.startsWith("Bearer ") ||
+        !/^[0-9a-f]{64}$/.test(secret ?? "") ||
+        !/^[0-9a-f]{64}$/.test(offered) ||
+        !(await constantTimeToken(
+          new TextEncoder().encode(offered),
+          new TextEncoder().encode(secret),
+        ))
+      )
+        return new Response(null, { status: 403 });
+      bridge = true;
+      incoming.set("X-Homepool-Bridge", "1");
+    }
+    incoming.delete("Authorization");
+    request = new Request(request, { headers: incoming });
+    const gate = env.UPGRADES.get(
+      env.UPGRADES.idFromName(bridge ? `bridge:${route}` : "global"),
+    );
     const permit = await gate.fetch(request);
     if (permit.status !== 204) return new Response(null, { status: 429 });
     return env.ROUTES_DO.get(env.ROUTES_DO.idFromName(route)).fetch(request);

@@ -39,6 +39,7 @@ export function harness(overrides = {}) {
   const stats = { reads: 0, writes: 0, alarms: 0, wakeups: 0 };
   let tail = Promise.resolve();
   const ctx = {
+    finishClock: async () => {},
     storage: {
       get: async (k) => {
         stats.reads++;

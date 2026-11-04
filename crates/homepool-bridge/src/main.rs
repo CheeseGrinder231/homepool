@@ -1,6 +1,7 @@
 mod limits;
 mod operations;
 mod peer;
+mod reconnect;
 mod runtime;
 mod services;
 mod settings;

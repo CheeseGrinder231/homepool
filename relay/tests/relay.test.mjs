@@ -171,7 +171,7 @@ test("daily counters persist through reconstruction and reset at UTC day boundar
       if (limits.dailyFailures) {
         const wrong = h.pending();
         await h.send(wrong, admission("bridge", "00".repeat(32)));
-      } else await h.send(b, envelope("token-remove", 0, bindingBytes(999)));
+      } else await h.relay.budget(50);
       h.restart();
       const saved = structuredClone(h.values.get("budget"));
       assert.ok(saved);
@@ -341,7 +341,7 @@ test("daily byte and message caps reject data before forwarding and reset after 
     const now = Date.now;
     Date.now = () => now() + 86400000;
     try {
-      assert.equal((await upgrade(h)).status, 101);
+      assert.equal(await h.relay.budget(), true);
     } finally {
       Date.now = now;
     }
@@ -465,26 +465,31 @@ test("global daily upgrade cap survives reconstruction and resets at UTC midnigh
   }
 });
 
-test("storage-write budget reserves token mutations before sending and resets daily", async () => {
-  const h = harness({ dailyWrites: 3 }),
+test("bridge token write budget refuses mutation while preserving its connection", async () => {
+  const h = harness(),
     b = await bridge(h);
-  await register(h, b); // admission budget row + token budget/mutation rows = 3
-  assert.equal(b.readyState, 1);
-  assert.equal(h.values.get("budget").writes, 3);
-  h.restart();
+  await register(h, b);
+  h.relay.bridgeLedger.limits.dailyWrites = h.relay.bridgeLedger.used.writes;
   await h.send(b, envelope("token-remove", 0, bindingBytes(42)));
-  assert.equal(b.readyState, 3);
+  assert.equal(b.readyState, 1);
   assert.equal(Object.keys(h.values.get("tokens")).length, 1);
   const now = Date.now;
   Date.now = () => now() + 86400000;
   try {
-    assert.equal(await h.relay.budget(0, false, 2), true);
+    await h.send(b, envelope("token-remove", 0, bindingBytes(42)));
+    assert.equal(Object.keys(h.values.get("tokens")).length, 0);
   } finally {
     Date.now = now;
   }
 });
 
-import { routeLimits, defaults, AUXILIARY_REQUESTS } from "../limits.mjs";
+import { EVENT_MS } from "../budget.mjs";
+import {
+  bridgeLimits,
+  routeLimits,
+  defaults,
+  AUXILIARY_REQUESTS,
+} from "../limits.mjs";
 test("configured routes share Free-plan admitted-work budgets", () => {
   const one = routeLimits({ ROUTES: '["a"]' }),
     two = routeLimits({ ROUTES: '["a","b"]' });
@@ -496,48 +501,161 @@ test("configured routes share Free-plan admitted-work budgets", () => {
     "dailyDurationMs",
   ])
     assert.equal(two[k] * 2, one[k]);
-  assert.equal(one.dailyMessages, 800000);
+  assert.equal(one.dailyMessages, 570000);
   assert.equal(defaults.dailyUpgrades, 1000);
   assert.equal(defaults.dailyFailures, 100);
   assert.equal(defaults.maxRoutes, 100);
 });
 
-test("Free plan billed-request allowance includes every configured bridge auto-response", () => {
+test("Free plan model includes independent bridge controls and auxiliary calls", () => {
   for (const count of [1, 2, 16, 100]) {
-    const limits = routeLimits({
+    const env = {
       ROUTES: JSON.stringify(
         Array.from({ length: count }, (_, n) => String(n)),
       ),
-    });
+    };
+    const phone = routeLimits(env),
+      bridge = bridgeLimits(env);
     assert.ok(
-      (limits.dailyMessages * count) / 20 +
-        (count * 5760) / 20 +
+      (count * (phone.dailyMessages + bridge.dailyMessages)) / 20 +
         AUXILIARY_REQUESTS <=
         50000,
     );
+    const upgrades = defaults.dailyUpgrades + count * defaults.bridgeUpgrades;
+    assert.ok(
+      (((phone.dailyDurationMs + bridge.dailyDurationMs) * count) / 1000) *
+        0.128 +
+        ((AUXILIARY_REQUESTS * EVENT_MS) / 1000) * 0.128 +
+        ((count * EVENT_MS) / 1000) * 0.128 <=
+        6500,
+    );
+    assert.ok(
+      (phone.dailyWrites + bridge.dailyWrites) * count + upgrades + 10000 <=
+        50000,
+    );
+    assert.ok(
+      (phone.dailyMessages + bridge.dailyMessages) * count * 2 +
+        2 * AUXILIARY_REQUESTS <=
+        2500000,
+    );
+    assert.ok(upgrades + 1000 * 14 <= 50000);
   }
-  // Every grant costs a gate call and a route upgrade; each admitted or
-  // carried socket fires at most one alarm and one close.
-  const carried = 100 + 5 * defaults.maxRoutes;
-  assert.ok(
-    2 * defaults.dailyUpgrades +
-      (carried + defaults.dailyUpgrades) +
-      (5 * defaults.maxRoutes + defaults.dailyUpgrades) <=
-      AUXILIARY_REQUESTS,
+});
+
+test("HTTP upgrades charge a full request, while one binary message charges a twentieth", async () => {
+  const h = harness();
+  assert.equal((await upgrade(h)).status, 101);
+  assert.equal(h.relay.ledger.used.messages, 20);
+  await h.send(h.sockets.at(-1), admission("bridge", "ab".repeat(32)));
+  assert.equal(h.relay.ledger.used.messages, 21);
+});
+
+test("full retired receipts release slots after both guards are exhausted", async () => {
+  const h = harness(),
+    b = await bridge(h);
+  await register(h, b);
+  const p = await phone(h);
+  await h.send(p, data(p.data.id));
+  const received = p.data.up.sent;
+  h.relay.limits.dailyDurationMs = 0;
+  await h.relay.run(async () => assert.fail("spent guard ran"));
+  assert.ok(b.data.retired[p.data.id]);
+  h.relay.bridgeLedger.limits.dailyDurationMs = 0;
+  await h.send(b, ack(p.data.id, BigInt(received)));
+  assert.deepEqual(b.data.retired, {});
+  assert.equal(b.readyState, 1);
+});
+
+test("only an authenticated header selects reserved bridge grants", async () => {
+  const ids = [],
+    requests = [];
+  const env = {
+    KILL_SWITCH: "false",
+    ROUTES: '["example"]',
+    BRIDGE_TOKENS: JSON.stringify({ example: "ab".repeat(32) }),
+    UPGRADES: {
+      idFromName(name) {
+        ids.push(name);
+        return name;
+      },
+      get() {
+        return {
+          fetch: async (r) => {
+            requests.push(r);
+            return new Response(null, { status: 204 });
+          },
+        };
+      },
+    },
+    ROUTES_DO: {
+      idFromName: (n) => n,
+      get: () => ({ fetch: async () => new Response(null, { status: 200 }) }),
+    },
+  };
+  const request = (headers) =>
+    new Request(new URL("/example", import.meta.url), {
+      headers: { Upgrade: "websocket", ...headers },
+    });
+  await worker.fetch(request({ "X-Homepool-Bridge": "1" }), env);
+  assert.equal(ids.at(-1), "global");
+  assert.equal(requests.at(-1).headers.get("X-Homepool-Bridge"), null);
+  await worker.fetch(
+    request({ Authorization: "Bearer " + "ab".repeat(32) }),
+    env,
   );
-  assert.ok(defaults.dailyBytes > 2 * 1024 ** 3);
-  // Budget/token rows, one gate row per grant, alarm/connection metadata.
-  assert.ok(
-    defaults.dailyWrites + defaults.dailyUpgrades + AUXILIARY_REQUESTS <= 50000,
+  assert.equal(ids.at(-1), "bridge:example");
+  assert.equal(requests.at(-1).headers.get("Authorization"), null);
+  assert.equal(
+    (
+      await worker.fetch(
+        request({ Authorization: "Bearer " + "00".repeat(32) }),
+        env,
+      )
+    ).status,
+    403,
   );
-  assert.ok(
-    defaults.dailyMessages * 2 + 2 * AUXILIARY_REQUESTS <= 2500000,
+  assert.equal(ids.length, 2);
+});
+
+test("exhausted guards cannot leave a closed bridge claiming its slot", async () => {
+  const h = harness(),
+    b = await bridge(h);
+  h.relay.limits.dailyDurationMs = 0;
+  await h.relay.webSocketClose(b);
+  assert.equal(h.relay.bridge(), undefined);
+  assert.equal(b.data.closed, true);
+});
+
+test("eight bridge reconnects with 128 registrations survive lost attachments at 100 routes", async () => {
+  const h = harness();
+  h.env.ROUTES = JSON.stringify(
+    Array.from({ length: 100 }, (_, n) => String(n)),
   );
-  // Route guard plus a 31-second gate callback per grant, with rollover skew.
-  assert.ok(
-    (defaults.dailyDurationMs / 1000) * 0.128 +
-      defaults.dailyUpgrades * 31 * 0.128 +
-      defaults.maxRoutes * 31 * 0.128 <=
-      6500,
-  );
+  h.restart();
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  try {
+    for (let reconnect = 0; reconnect < 8; reconnect++) {
+      await h.relay.run(async () => {
+        assert.equal(await h.relay.ledger.charge({ messages: 20 }), true);
+      }, true);
+      const b = h.pending();
+      b.data.bridgeUpgrade = true;
+      await h.send(b, admission("bridge", "ab".repeat(32)));
+      assert.equal(b.data.role, "bridge");
+      for (let n = 0; n < 128; n++) {
+        const digest = new Uint8Array(32);
+        new DataView(digest.buffer).setUint32(0, n);
+        clock += 75; // Production bridge's registration cadence.
+        await h.send(b, tokenSet(digest, 1, n));
+        assert.equal(b.readyState, 1);
+      }
+      assert.equal(Object.keys(h.values.get("tokens")).length, 128);
+      h.sockets.length = 0;
+      h.restart();
+    }
+  } finally {
+    Date.now = realNow;
+  }
 });

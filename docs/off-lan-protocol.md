@@ -148,6 +148,14 @@ PSK, key or content appears here. Route is connection context; token is never a
 URL parameter or logged. The relay forwards nothing until admission succeeds.
 Tokens admit relay use only. Token hashes and invitation/device binding are
 bridge/relay policy. Every reconnect sends admission again.
+The bridge also sends `Authorization: Bearer <bridge-token>` on the HTTP upgrade.
+The token is the same 64 lowercase hex digits from its existing token file.
+The Worker validates it before granting a separate bridge upgrade allowance;
+phone failures or allowances cannot consume that reservation. It strips this
+header before forwarding to the route object. Binary admission remains required
+and unchanged. A client-supplied internal bridge marker grants no privilege.
+Legacy bridges without the header still use the public admission path and its
+shared phone allowances; update the bridge to gain isolation.
 A refused phone admission closes the socket with code 4002 when the route's
 bridge is not connected, 4001 when the token is unknown or expired, and 4003
 when the route's sessions are full, checked in that order; other failures use
