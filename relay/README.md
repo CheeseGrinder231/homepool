@@ -99,18 +99,21 @@ back-off and recovers after the UTC reset; phones cannot spend this allowance.
 ### Active duration and local reservation evidence
 
 The old meter settled the previous callback at the **next event**, charging
-idle gaps as active time. The new meter reserves 1,000 ms, then settles the
+idle gaps as active time. The new meter reserves 2,000 ms, then settles the
 callback before returning to hibernation eligibility. A one-millisecond timer
 completion supplies a fresh I/O clock timestamp because Date.now is frozen
 between I/O in workerd. Its wait is included in charged duration; no later idle
 gap is included. Matching bridge text auto-responses invoke no JS and incur no
-additional duration or request reservation. The fixed pair is liveness only;
+additional duration. Outgoing responses are free. The model conservatively
+retains the incoming text messages at 20:1, as in the previous budget. The fixed pair is liveness only;
 it bypasses admission, rates and kill-switch checks and grants no authority.
 
 In local workerd 1.20261101.1, a profiled run of the existing encrypted,
 interleaved 10 MiB transfer / hibernation / slow-receiver runner observed **543
 callbacks, 1,646 ms total and 29 ms maximum**, including completion checkpoints.
-The 1,000 ms reservation is more than 34 times that observed maximum. This is
+A second final-candidate run under concurrent local verification measured 543
+callbacks, 3,378 ms total and a 365 ms maximum. The 2,000 ms reservation is more
+than five times the larger observed maximum. This is
 an empirical local bound, not a Cloudflare storage-latency SLA: the platform
 provides CPU limits but no general HTTP/DO wall-time limit. Runtime pauses or
 storage stalls can exceed it. The guard is an admitted-work bound under this
@@ -134,8 +137,8 @@ the auxiliary allowance overstates actual budget/token reads.
 | Worst modeled day, all routes | Maximum | Free allowance | Free fraction |
 | --- | ---: | ---: | ---: |
 | Worker requests, U + 1,000 page loads at 14 requests | 15,800 | 100,000/day | 15.8% |
-| DO requests, (570,000 + 130,000)/20 + 14,000 | 49,000 | 100,000/day | 49% |
-| DO active duration: (18,000 + 14,000 + N) seconds x 0.128 | 4,108.8 GB-s | 13,000 GB-s/day | 31.61% |
+| DO requests, route units/20 + 6,500 bridge + 14,000 auxiliary + 288N keepalive | 50,000 | 100,000/day | 50% |
+| DO active duration: (18,000 + 2 x 14,000 + 2N) seconds x 0.128 | 5,913.6 GB-s | 13,000 GB-s/day | 45.49% |
 | SQLite row writes: 8,000 + 30,000 + U + 10,000 | 49,800 | 100,000/day | 49.8% |
 | SQLite row reads: 2 x 700,000 + 2 x 14,000 | 1,428,000 | 5,000,000/day | 28.56% |
 
@@ -148,7 +151,11 @@ Rows include reservation rows themselves, token mutations, gate rows and alarm
 scheduling/deletes. Retained state is two budget rows, a bounded token registry
 (128 hashes per route) and bounded gate rows; far below 2.5 GB of the Free 5 GB
 storage allowance. No payload is retained. No KV namespace, R2 or D1 is used.
-The request, duration and row arithmetic is checked for N=1,2,16,100.
+Phone units are the smaller of 570,000 and
+`20 x (50,000 - 14,000 - 6,500 - 288N)`, divided among routes. This preserves
+room for every configured bridge's incoming keepalive; its outgoing auto-response
+and duration stay free. The request, duration and row arithmetic is checked
+for N=1,2,16,100.
 
 A normal bridge-connected 24-hour day has 5,760 incoming fixed text keepalives
 and zero JS keepalive callbacks, rows or duration. The photo harness measured

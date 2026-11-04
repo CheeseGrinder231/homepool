@@ -1,7 +1,7 @@
 // Reserve batches durably before admitting work. Attachments retain exact live
 // usage across hibernation; losing all sockets forfeits unused reservations.
 // Local workerd bound includes the completion clock checkpoint. See README.
-export const EVENT_MS = 1000;
+export const EVENT_MS = 2000;
 export const batches = Object.freeze({
   messages: 128,
   bytes: 8 * 1024 * 1024,

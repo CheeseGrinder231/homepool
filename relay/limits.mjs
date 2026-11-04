@@ -1,8 +1,9 @@
 // Fixed, non-authoritative liveness frames; never tokens or Noise messages.
 export const BRIDGE_PING = "homepool/1/bridge-ping";
 export const BRIDGE_PONG = "homepool/1/bridge-pong";
-// Auto-responses bypass JavaScript and add no billed work.
-export const AUTO_REQUESTS_PER_ROUTE = 0;
+// Auto-response adds no duration; conservatively retain incoming 20:1 units.
+export const AUTO_REQUESTS_PER_ROUTE = 5760 / 20;
+export const BRIDGE_MESSAGE_UNITS = 130000;
 // Gate and route upgrade calls, alarms and closes; see relay/README.md.
 export const AUXILIARY_REQUESTS = 14000;
 export const RELAY_WINDOW = 1024 * 1024;
@@ -78,6 +79,16 @@ export function routeLimits(env) {
         "dailyDurationMs",
       ].map((k) => [k, Math.floor(defaults[k] / count)]),
     ),
+    dailyMessages: Math.floor(
+      Math.min(
+        defaults.dailyMessages,
+        (50000 -
+          AUXILIARY_REQUESTS -
+          BRIDGE_MESSAGE_UNITS / 20 -
+          count * AUTO_REQUESTS_PER_ROUTE) *
+          20,
+      ) / count,
+    ),
   };
 }
 
@@ -87,7 +98,7 @@ export function bridgeLimits(env) {
   const count = Math.max(1, JSON.parse(env.ROUTES || "[]").length);
   return {
     ...defaults,
-    dailyMessages: Math.floor(130000 / count),
+    dailyMessages: Math.floor(BRIDGE_MESSAGE_UNITS / count),
     dailyWrites: Math.floor(30000 / count),
     dailyDurationMs: Math.floor(2000000 / count),
     dailyBytes: 1024 * 1024,
