@@ -486,7 +486,6 @@ test("bridge token write budget refuses mutation while preserving its connection
 import { EVENT_MS } from "../budget.mjs";
 import {
   bridgeLimits,
-  AUTO_REQUESTS_PER_ROUTE,
   routeLimits,
   defaults,
   AUXILIARY_REQUESTS,
@@ -519,7 +518,7 @@ test("Free plan model includes independent bridge controls and auxiliary calls",
       bridge = bridgeLimits(env);
     assert.ok(
       (count * (phone.dailyMessages + bridge.dailyMessages)) / 20 +
-        count * AUTO_REQUESTS_PER_ROUTE +
+        (count * 5760) / 20 +
         AUXILIARY_REQUESTS <=
         50000,
     );
