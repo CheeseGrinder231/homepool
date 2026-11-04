@@ -20,7 +20,7 @@ export const defaults = Object.freeze({
   controlBytesPerSecond: 4096,
   dailyBytes: 3 * 1024 ** 3,
   dailyMessages: 570000,
-  dailyWrites: 8000,
+  dailyWrites: 7000,
   dailyDurationMs: 16000000,
   dailyUpgrades: 1000,
   bridgeUpgrades: 8,

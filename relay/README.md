@@ -58,7 +58,7 @@ There is no application payload queue. Endpoints must retain Noise authenticatio
 and credits; relay ACKs are delivery claims, not authentication.
 
 Phone budgets are shared across routes (integer division): 3 GiB incoming wire
-bytes, 570,000 message-equivalent units, 8,000 budget/token row writes,
+bytes, 570,000 message-equivalent units, 7,000 budget/token row writes,
 16,000,000 active milliseconds and 100 failed admissions daily. An incoming
 WebSocket binary message costs one unit; an upgrade costs 20. HTTP upgrades,
 alarms and closes also have the separate auxiliary allowance below. A singleton
@@ -138,13 +138,16 @@ the auxiliary allowance overstates actual budget/token reads.
 | --- | ---: | ---: | ---: |
 | Worker requests, U + 1,000 page loads at 14 requests | 15,800 | 100,000/day | 15.8% |
 | DO requests, route units/20 + 6,500 bridge + 14,000 auxiliary + 288N keepalive | 50,000 | 100,000/day | 50% |
-| DO active duration: (18,000 + 2 x 14,000 + 2N) seconds x 0.128 | 5,913.6 GB-s | 13,000 GB-s/day | 45.49% |
-| SQLite row writes: 8,000 + 30,000 + U + 10,000 | 49,800 | 100,000/day | 49.8% |
-| SQLite row reads: 2 x 700,000 + 2 x 14,000 | 1,428,000 | 5,000,000/day | 28.56% |
+| DO active duration: (18,000 + 2 x 14,000 + 2 x (2N+1)) seconds x 0.128 | 5,939.456 GB-s | 13,000 GB-s/day | 45.69% |
+| SQLite row writes: 7,000 + 30,000 + U + 11,000 | 49,800 | 100,000/day | 49.8% |
+| SQLite row reads: 2 x 700,000 + 2 x 14,000 + 1,000 | 1,429,000 | 5,000,000/day | 28.58% |
 
 Duration includes 18,000 guarded route/bridge seconds, one measured reservation
 for every auxiliary invocation (including gates, alarms, closes and retired
-receipts), and one reservation of rollover skew per route. Lifecycle cleanup
+receipts), and one reservation of rollover skew per object: N route objects,
+N bridge gates and the public gate. Row figures also reserve 1,000 reads and
+writes for callbacks spanning UTC midnight. A route callback has at most five
+row writes and a gate callback at most one, below this reserve even at N=100. Lifecycle cleanup
 runs even when forwarding guards are spent; otherwise a closed bridge attachment
 could prevent every replacement bridge from being admitted.
 Rows include reservation rows themselves, token mutations, gate rows and alarm

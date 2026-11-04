@@ -527,16 +527,17 @@ test("Free plan model includes independent bridge controls and auxiliary calls",
       (((phone.dailyDurationMs + bridge.dailyDurationMs) * count) / 1000) *
         0.128 +
         ((AUXILIARY_REQUESTS * EVENT_MS) / 1000) * 0.128 +
-        ((count * EVENT_MS) / 1000) * 0.128 <=
+        (((2 * count + 1) * EVENT_MS) / 1000) * 0.128 <=
         6500,
     );
     assert.ok(
-      (phone.dailyWrites + bridge.dailyWrites) * count + upgrades + 10000 <=
+      (phone.dailyWrites + bridge.dailyWrites) * count + upgrades + 11000 <=
         50000,
     );
     assert.ok(
       (phone.dailyMessages + bridge.dailyMessages) * count * 2 +
-        2 * AUXILIARY_REQUESTS <=
+        2 * AUXILIARY_REQUESTS +
+        1000 <=
         2500000,
     );
     assert.ok(upgrades + 1000 * 14 <= 50000);
