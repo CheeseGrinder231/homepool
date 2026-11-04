@@ -7,18 +7,15 @@ import {
 } from "../web/protocol/wire.mjs";
 import {
   routeLimits,
+  bridgeLimits,
   hex,
   hash,
-  constantTimeToken,
+  verifyBridgeToken,
   rate,
   RELAY_WINDOW,
   BRIDGE_PING,
   BRIDGE_PONG,
 } from "./limits.mjs";
-const tokenBytes = (s) =>
-  /^[0-9a-f]{64}$/.test(s ?? "")
-    ? Uint8Array.from(s.match(/../g), (x) => parseInt(x, 16))
-    : null;
 const view = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
 // Close codes for a refused phone admission, so the page can tell the owner
 // what happened. Nothing else about the route or its tokens is disclosed.
@@ -38,7 +35,15 @@ export class Relay {
     this.ctx = ctx;
     this.env = env;
     this.limits = routeLimits(env);
-    this.ledger = new Budget(ctx, this.limits);
+    this.phoneLedger = new Budget(ctx, this.limits);
+    this.bridgeLedger = new Budget(
+      ctx,
+      bridgeLimits(env),
+      "bridge-budget",
+      "bridgeAccount",
+      { messages: 16, bytes: 4096, failures: 1, writes: 8, durationMs: 100 },
+    );
+    this.ledger = this.phoneLedger;
     if (env.KILL_SWITCH === "false")
       ctx.setWebSocketAutoResponse(
         new WebSocketRequestResponsePair(BRIDGE_PING, BRIDGE_PONG),
@@ -63,11 +68,14 @@ export class Relay {
   save(s, a) {
     s.serializeAttachment({
       ...a,
-      ...(this.ledger.used ? { account: this.ledger.used } : {}),
+      ...(this.phoneLedger.used ? { account: this.phoneLedger.used } : {}),
+      ...(this.bridgeLedger.used
+        ? { bridgeAccount: this.bridgeLedger.used }
+        : {}),
     });
   }
   async budget(bytes = 0, failure = false, extraWrites = 0) {
-    this.ledger.limits = this.limits;
+    if (this.ledger === this.phoneLedger) this.ledger.limits = this.limits;
     return this.ledger.charge({
       bytes,
       messages: 1,
@@ -75,31 +83,41 @@ export class Relay {
       writes: extraWrites,
     });
   }
-  run(f) {
+  run(f, bridgeWork = false) {
     return this.ctx.blockConcurrencyWhile(async () => {
+      this.ledger = bridgeWork ? this.bridgeLedger : this.phoneLedger;
       const started = Date.now();
       this.ledger.eventDay = Math.floor(started / 86400000);
-      this.ledger.limits = this.limits;
+      if (this.ledger === this.phoneLedger) this.ledger.limits = this.limits;
+      let charged = false;
       try {
         await this.ledger.load();
-        this.ledger.finishPrevious(started);
+
         if (
           !(await this.ledger.charge({
             durationMs: EVENT_MS,
-            pendingSince: started,
           }))
         ) {
-          for (const s of this.sockets()) this.drop(s, true);
+          for (const s of this.phones()) this.drop(s, true);
           return new Response(null, { status: 429 });
         }
+        charged = true;
         return await f();
       } finally {
+        // Date.now is frozen between I/O. Finish with a real timer event,
+        // including its short wait in the active duration, before going idle.
+        if (charged) {
+          if (this.ctx.finishClock) await this.ctx.finishClock();
+          else await new Promise((resolve) => setTimeout(resolve, 1));
+          this.ledger.finish(started, Date.now());
+        }
         delete this.ledger.eventDay;
+        this.ledger = this.phoneLedger;
       }
     });
   }
   async failAdmission(s, code) {
-    await this.budget(0, true);
+    await this.budget(0, !s.deserializeAttachment()?.headerFailure);
     this.drop(s, false, code);
   }
   drop(s, error = false, code) {
@@ -133,24 +151,38 @@ export class Relay {
     } catch {}
   }
   fetch(request) {
+    const bridgeUpgrade = request.headers.get("X-Homepool-Bridge") === "1";
+    const headerFailure =
+      !bridgeUpgrade && request.headers.get("X-Homepool-Auth-Failed") === "1";
     return this.run(async () => {
       if (this.env.KILL_SWITCH !== "false") {
         for (const s of this.sockets()) this.drop(s);
         return new Response(null, { status: 503 });
       }
+      if (
+        bridgeUpgrade &&
+        (this.bridge() ||
+          this.sockets().some((s) => s.deserializeAttachment()?.bridgeUpgrade))
+      )
+        return new Response(null, { status: 409 });
       const b = this.ledger.used;
       if (
         b?.day === Math.floor(Date.now() / 86400000) &&
+        !bridgeUpgrade &&
         b.failures >= this.limits.dailyFailures
       )
         return new Response(null, { status: 429 });
-      if (!(await this.budget())) return new Response(null, { status: 429 });
+      if (headerFailure && !(await this.budget(0, true)))
+        return new Response(null, { status: 429 });
+      if (!(await this.ledger.charge({ messages: 20 })))
+        return new Response(null, { status: 429 });
       if (
+        !bridgeUpgrade &&
         this.sockets().filter(
           (s) => s.deserializeAttachment().role === "pending",
         ).length >= this.limits.pending
       ) {
-        await this.budget(0, true);
+        await this.budget(0, !headerFailure);
         return new Response(null, { status: 429 });
       }
       const [client, server] = Object.values(new WebSocketPair());
@@ -160,10 +192,12 @@ export class Relay {
         role: "pending",
         deadline: Date.now() + this.limits.admissionMs,
         route: new URL(request.url).pathname.slice(1),
+        bridgeUpgrade,
+        headerFailure,
       });
       await this.schedule();
       return new Response(null, { status: 101, webSocket: client });
-    });
+    }, bridgeUpgrade);
   }
   async schedule() {
     let next = Infinity;
@@ -181,7 +215,9 @@ export class Relay {
     else await this.ctx.storage.deleteAlarm();
   }
   alarm() {
-    return this.run(async () => {
+    // Lifecycle cleanup must run even when forwarding budgets are spent.
+    // Its finite socket/grant bound is included in the auxiliary allowance.
+    return this.ctx.blockConcurrencyWhile(async () => {
       for (const s of this.sockets()) {
         const a = s.deserializeAttachment();
         if (this.env.KILL_SWITCH !== "false") this.drop(s);
@@ -198,7 +234,7 @@ export class Relay {
     });
   }
   webSocketClose(s) {
-    return this.run(async () => {
+    return this.ctx.blockConcurrencyWhile(async () => {
       this.drop(s);
       await this.schedule();
     });
@@ -207,6 +243,34 @@ export class Relay {
     return this.webSocketClose(s);
   }
   webSocketMessage(s, message) {
+    const attached = s.deserializeAttachment();
+    const bridgeWork =
+      attached?.bridgeUpgrade ||
+      (attached?.role === "bridge" &&
+        message instanceof ArrayBuffer &&
+        message.byteLength >= 6 &&
+        new DataView(message).getUint32(2) === 0);
+    // A full receipt for an already retired session releases existing state
+    // once. Permit this bounded cleanup even after either daily guard stops
+    // forwarding, so lost ACKs cannot permanently occupy next day's slots.
+    if (
+      attached?.role === "bridge" &&
+      message instanceof ArrayBuffer &&
+      message.byteLength === 14
+    ) {
+      const frame = new Uint8Array(message);
+      const id = new DataView(message).getUint32(2);
+      if (frame[0] === 1 && frame[1] === 8 && attached.retired?.[id]) {
+        return this.ctx.blockConcurrencyWhile(async () => {
+          const a = s.deserializeAttachment();
+          const f = a.retired?.[id];
+          if (f && new DataView(message).getBigUint64(6) === BigInt(f.sent)) {
+            delete a.retired[id];
+            this.save(s, a);
+          }
+        });
+      }
+    }
     return this.run(async () => {
       const a = s.deserializeAttachment();
       if (!a || a.closed) return;
@@ -218,11 +282,8 @@ export class Relay {
         if (!(message instanceof ArrayBuffer) || message.byteLength > 65541)
           throw Error("frame");
         const b = new Uint8Array(message);
-        // Hash registration/removal writes one additional storage row.
-        const writes =
-          a.role === "bridge" && b[0] === 1 && [4, 5].includes(b[1]) ? 1 : 0;
-        if (!(await this.budget(b.length, false, writes)))
-          throw Error("budget");
+        // Control writes are charged only when token metadata actually changes.
+        if (!(await this.budget(b.length))) throw Error("budget");
         if (a.role === "pending") {
           await this.admit(s, a, b);
           await this.schedule();
@@ -305,21 +366,21 @@ export class Relay {
         target.send(b);
       } catch (e) {
         if (a.role === "pending") await this.failAdmission(s, e?.code);
-        else this.drop(s, true);
+        else if (
+          a.role === "bridge" &&
+          (!bridgeWork || e?.message === "budget")
+        ) {
+          for (const p of this.phones()) this.drop(p, true);
+        } else this.drop(s, true);
       }
-    });
+    }, bridgeWork);
   }
   async admit(s, a, b) {
     if (Date.now() >= a.deadline) throw Error("deadline");
     const m = readAdmission(b);
     if (m.role === "bridge") {
-      let secret;
-      try {
-        secret = tokenBytes(JSON.parse(this.env.BRIDGE_TOKENS)[a.route]);
-      } catch {}
       if (
-        !secret ||
-        !(await constantTimeToken(b.slice(2), secret)) ||
+        !(await verifyBridgeToken(this.env, a.route, b.slice(2))) ||
         this.bridge()
       )
         throw Error("bridge");
@@ -362,6 +423,7 @@ export class Relay {
   }
   async control(s, e) {
     const tokens = (await this.ctx.storage.get("tokens")) ?? {};
+    const before = JSON.stringify(tokens);
     if (e.kind === "token-set") {
       const binding = view(e.data).getUint32(33),
         key = hex(e.data.slice(0, 32));
@@ -399,6 +461,8 @@ export class Relay {
       for (const p of this.phones())
         if (p.deserializeAttachment().binding === binding) this.drop(p, true);
     } else throw Error("control");
+    if (JSON.stringify(tokens) === before) return;
+    if (!(await this.ledger.charge({ writes: 1 }))) throw Error("budget");
     await this.ctx.storage.put("tokens", tokens);
   }
 }

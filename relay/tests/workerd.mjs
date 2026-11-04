@@ -63,6 +63,44 @@ try {
     ).status,
     404,
   );
+  // Headerless legacy admission and bad headers share the same refusal path.
+  // None of these synthetic failures may claim a bridge-reserved grant.
+  for (const authorization of [
+    undefined,
+    "Bearer " + "00".repeat(32),
+    "Bearer garbled",
+  ]) {
+    const response = await mf.dispatchFetch(
+      new URL("/example", process.env.RELAY_TEST_ORIGIN),
+      {
+        headers: {
+          Upgrade: "websocket",
+          ...(authorization ? { Authorization: authorization } : {}),
+        },
+      },
+    );
+    assert.equal(response.status, 101);
+    const ws = response.webSocket;
+    sockets.push(ws);
+    ws.accept();
+    const closed = new Promise((resolve, reject) => {
+      const deadline = setTimeout(
+        () => reject(Error("refusal deadline")),
+        10000,
+      );
+      ws.addEventListener(
+        "close",
+        (event) => {
+          clearTimeout(deadline);
+          resolve(event.code);
+        },
+        { once: true },
+      );
+    });
+    ws.send(admission("bridge", "00".repeat(32)));
+    assert.equal(await closed, 1000);
+  }
+  sockets.length = 0;
   const result = await transfer({
     async connect(role, token) {
       for (let attempt = 0; attempt < 5; attempt++) {

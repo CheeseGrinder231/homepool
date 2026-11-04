@@ -40,3 +40,6 @@ pub const VIEW_TEXT: usize = 500;
 pub const VIEW_REFRESH_MIN: f64 = 30.0;
 pub const VIEW_REFRESH_MAX: f64 = 3600.0;
 pub const VIEW_REFRESH_DEFAULT: u64 = 60;
+
+// Four successful keepalive intervals distinguish recovery from a short flap.
+pub const RELAY_HEALTHY: Duration = Duration::from_secs(60);

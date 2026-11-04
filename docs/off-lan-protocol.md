@@ -148,6 +148,32 @@ PSK, key or content appears here. Route is connection context; token is never a
 URL parameter or logged. The relay forwards nothing until admission succeeds.
 Tokens admit relay use only. Token hashes and invitation/device binding are
 bridge/relay policy. Every reconnect sends admission again.
+### Pre-upgrade bridge authentication (amendment to #50)
+
+The updated bridge additionally sends `Authorization: Bearer <bridge-token>`
+on its HTTP upgrade. The token is the same 64 lowercase hex digits from the
+existing private token file; no configuration or binary-message layout changes.
+The relay derives and caches the configured token's SHA-256 hash and compares
+the offered token's hash with it over the full fixed digest length. It never
+uses an early mismatch return. Neither the header value nor configuration parse
+errors are logged, returned in errors, or used as analytics labels. The Worker
+strips Authorization and any untrusted internal marker before forwarding; only
+a verified header selects the separately limited bridge admission path.
+
+A missing, incorrect or malformed header follows the same public upgrade and
+binary-admission path. Such traffic spends public/hostile allowances, never the
+bridge's allowance. A wrong or malformed header is charged once to the public
+failure budget at upgrade time, even if the client immediately disconnects;
+a later admission failure or timeout does not double-charge it. Headerless
+admission failures and timeouts retain their existing public failure charge. A client-supplied internal marker grants no privilege. Binary
+admission remains required on every connection, including verified headers.
+
+Deploy the relay first: a legacy bridge without the header still upgrades and
+admits with today's binary token message. Then update the bridge to gain the
+reserved allowance. During that interval, the legacy bridge still uses public
+allowances; updating it is required to recover from an already-exhausted public
+guard. Existing spent counters remain until UTC reset.
+
 A refused phone admission closes the socket with code 4002 when the route's
 bridge is not connected, 4001 when the token is unknown or expired, and 4003
 when the route's sessions are full, checked in that order; other failures use
