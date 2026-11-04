@@ -1,3 +1,4 @@
+import { admission, unwrap } from "../../web/protocol/wire.mjs";
 import { readFile, writeFile, mkdtemp } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -115,7 +116,38 @@ try {
     );
   });
   // Workerd access logs expose upgrade/refusal cadence without bridge secrets.
-  if (mode === "lockout" || mode === "guard") {
+  if (mode === "legacy") {
+    await new Promise((r) => setTimeout(r, 1000));
+    const result = spawnSync(binary, ["invite", config], { encoding: "utf8" });
+    assert.equal(result.status, 0);
+    const link = new URL(JSON.parse(result.stdout).link);
+    const token = new URLSearchParams(link.hash.slice(1)).get("token");
+    const response = await mf.dispatchFetch(origin + "/example", {
+      headers: { Upgrade: "websocket" },
+    });
+    assert.equal(response.status, 101);
+    const ws = response.webSocket;
+    ws.accept();
+    const opened = new Promise((resolve, reject) => {
+      const deadline = setTimeout(
+        () => reject(Error("legacy admission deadline")),
+        10000,
+      );
+      ws.addEventListener(
+        "message",
+        (event) => {
+          clearTimeout(deadline);
+          resolve(event.data);
+        },
+        { once: true },
+      );
+    });
+    ws.send(admission("phone", token));
+    assert.equal(unwrap(new Uint8Array(await opened)).kind, "open");
+    assert.equal(bridge.exitCode, null);
+    ws.close();
+    console.log("legacy headerless bridge admitted a phone");
+  } else if (mode === "lockout" || mode === "guard") {
     await new Promise((r) => setTimeout(r, mode === "guard" ? 1000 : 32000));
     const response = await mf.dispatchFetch(origin + "/example", {
       headers: { Upgrade: "websocket" },

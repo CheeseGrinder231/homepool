@@ -10,8 +10,9 @@ The wire contract is in [off-lan-protocol.md](../docs/off-lan-protocol.md).
 no domain/account/route/secret values. An operator supplies private configuration
 separately. `BRIDGE_TOKENS` is a Worker secret containing a JSON map from allowed
 route IDs to independent 32-byte tokens encoded as 64 lowercase hex digits.
-Only the route is in the URL path; queries are rejected. Tokens are binary first
-messages. The relay emits no logs and observability is disabled. The platform
+Only the route is in the URL path; queries are rejected. Admission tokens stay
+in binary first messages; the updated bridge also authenticates its upgrade as
+described below. The relay emits no logs and observability is disabled. The platform
 still sees request URLs/IPs and connection metadata; this is not anonymity.
 
 Unknown routes are rejected before either namespace is accessed. A separate
@@ -68,8 +69,14 @@ The bridge supplies its existing token in an **Authorization: Bearer** header
 as well as its unchanged binary admission. This handshake addition is necessary:
 the old first-message-only credential arrives after the shared HTTP upgrade
 allowance has already refused the connection. There is no configuration change.
-The Worker validates the header, strips it, strips any caller-supplied internal
-bridge marker, and sets its own marker before forwarding. Phones cannot request
+The Worker verifies against a cached configured-token hash in constant time,
+strips the header and any caller-supplied internal marker, and sets its own marker
+before forwarding. Missing, wrong and malformed headers follow the identical
+public upgrade/binary-admission path and spend public/hostile allowances only;
+A wrong or malformed header charges the public failure budget at upgrade time,
+including immediate client disconnects; a later binary refusal/timeout does not
+charge that same failure twice. Header
+values never appear in logs, errors or analytics labels. Phones cannot request
 the reserved lane. Each route has eight separately gated bridge upgrades daily;
 a connected bridge or pending authenticated claimant returns 409. Bridge
 admission bypasses phone failures, pending slots and daily guards.
@@ -121,6 +128,14 @@ stated measurement assumption; it is not an invoice hard cap. Revalidate the
 reservation on workerd changes and production latency before relying on paid
 plan cost protection. No Cloudflare login or deployment was used for evidence.
 
+Deploy the **relay first, then the bridge**. The relay remains compatible with
+headerless bridges using the existing binary admission. The bridge update then
+enables reserved admission without changing configuration. Until that update,
+a legacy bridge still depends on public allowances, including any already-spent
+guard. This is the [pre-upgrade amendment to #50](../docs/off-lan-protocol.md#pre-upgrade-bridge-authentication-amendment-to-50).
+After deployment, compare the guard's settled duration with billed `activeTime`;
+no deployment or account access is part of this change.
+
 ### Free-plan arithmetic
 
 For N routes, 1 <= N <= 100, global granted upgrades U <= 1,000 + 8N <= 1,800.
@@ -159,6 +174,28 @@ Phone units are the smaller of 570,000 and
 room for every configured bridge's incoming keepalive; its outgoing auto-response
 and duration stay free. The request, duration and row arithmetic is checked
 for N=1,2,16,100.
+
+### Tenfold measured-time sensitivity
+
+At the assumed two-second event reservation, every modeled Free dimension above
+is at or below **50%**. The two-second reservation retains more than five
+times the measured 365 ms maximum while preserving the Free-plan bar.
+
+For sensitivity, multiply the largest measured callback time by ten:
+`365 ms x 10 = 3,650 ms`, then round up to **four seconds** per callback.
+Each admitted callback reserves at least two seconds before work. If a
+four-second completion exceeds the stored reservation before a cold restore,
+that still retains at least half its duration. Conservatively allow twice the
+18,000 guarded seconds, plus a final two-second overshoot for
+each of the two ledgers per route. Also allow four seconds for each of 14,000
+auxiliary invocations and for each object spanning midnight (2N+1 objects).
+At N=100 this is:
+
+`(2 x 18,000 + 2 x 100 x (4-2) + 14,000 x 4 + (2 x 100+1) x 4) x 0.128`
+`= 11,930.112 GB-s`, or **91.77% of the 13,000 GB-s Free daily allowance**.
+The same check passes for N=1,2,16,100. Requests and row caps do not grow with
+callback latency. This is a sensitivity bound under the stated timing model,
+not a platform SLA; arbitrary longer stalls remain outside the assumption.
 
 A normal bridge-connected 24-hour day has 5,760 incoming fixed text keepalives
 and zero JS keepalive callbacks, rows or duration. The photo harness measured
@@ -226,3 +263,10 @@ off 1/2/4/8 seconds plus jitter. Fixtures are injected into an in-memory
 manifest, never deployed. Existing encrypted transfer and browser runners remain
 separate. Existing stored counters are retained until UTC reset on upgrade;
 this change does not erase already-spent daily allowances.
+
+For relay-first compatibility, point `BRIDGE_TEST_BINARY` at a bridge built from
+the previous main revision and run `node relay/tests/lockout-workerd.mjs legacy`.
+It starts that unmodified headerless Rust bridge against the new relay, creates
+a synthetic invitation and verifies that a phone receives its admitted session.
+The workerd transfer runner also checks that missing, wrong and garbled headers
+all upgrade on the public path and receive the same binary refusal code.

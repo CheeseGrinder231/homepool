@@ -33,12 +33,39 @@ export const hex = (b) =>
   Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 export const hash = async (b) =>
   hex(new Uint8Array(await crypto.subtle.digest("SHA-256", b)));
-// Fixed-size digests avoid a token-length dependent comparison loop.
-export async function constantTimeToken(a, b) {
-  const [x, y] = await Promise.all([hash(a), hash(b)]);
+// Digests have a fixed length; compare every position without an early mismatch.
+function sameHash(x, y) {
   let diff = 0;
   for (let i = 0; i < 64; i++) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
   return diff === 0;
+}
+export const tokenBytes = (s) =>
+  typeof s === "string" && /^[0-9a-f]{64}$/.test(s)
+    ? Uint8Array.from(s.match(/../g), (x) => parseInt(x, 16))
+    : null;
+// Bindings are immutable within a deployment. Retain only the derived hash in
+// this cache; keep the existing private BRIDGE_TOKENS configuration format.
+const bridgeHashes = new WeakMap();
+export async function verifyBridgeToken(env, route, token) {
+  let hashes = bridgeHashes.get(env);
+  if (!hashes) bridgeHashes.set(env, (hashes = new Map()));
+  if (!hashes.has(route)) {
+    hashes.set(
+      route,
+      (async () => {
+        let configured;
+        try {
+          configured = tokenBytes(JSON.parse(env.BRIDGE_TOKENS)[route]);
+        } catch {
+          return null;
+        } // Never expose a private configuration parse error.
+        return configured ? hash(configured) : null;
+      })(),
+    );
+  }
+  const expected = await hashes.get(route);
+  const actual = await hash(token);
+  return sameHash(actual, expected ?? "0".repeat(64)) && expected !== null;
 }
 export function rate(a, now, bytes, control, limits) {
   const second = Math.floor(now / 1000);

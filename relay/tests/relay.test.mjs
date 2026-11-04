@@ -272,7 +272,7 @@ test("stale IDs allocate nothing and decreasing ACK closes only the session", as
 });
 
 // Exercise real fetch logic with only the platform's upgrade objects substituted.
-async function upgrade(h) {
+async function upgrade(h, headers = {}) {
   const ResponseOriginal = globalThis.Response,
     PairOriginal = globalThis.WebSocketPair;
   globalThis.WebSocketPair = class {
@@ -293,7 +293,7 @@ async function upgrade(h) {
   };
   try {
     return await h.relay.fetch(
-      new Request(new URL("/example", import.meta.url)),
+      new Request(new URL("/example", import.meta.url), { headers }),
     );
   } finally {
     globalThis.Response = ResponseOriginal;
@@ -568,23 +568,24 @@ test("full retired receipts release slots after both guards are exhausted", asyn
   assert.equal(b.readyState, 1);
 });
 
-test("only an authenticated header selects reserved bridge grants", async () => {
-  const ids = [],
+test("bad headers share unauthenticated admission and never spend bridge grants", async () => {
+  const gates = new Map(),
     requests = [];
   const env = {
     KILL_SWITCH: "false",
     ROUTES: '["example"]',
     BRIDGE_TOKENS: JSON.stringify({ example: "ab".repeat(32) }),
     UPGRADES: {
-      idFromName(name) {
-        ids.push(name);
-        return name;
-      },
-      get() {
+      idFromName: (name) => name,
+      get(name) {
+        if (!gates.has(name)) {
+          const h = harness();
+          gates.set(name, { h, gate: new UpgradeGate(h.ctx, env) });
+        }
         return {
-          fetch: async (r) => {
-            requests.push(r);
-            return new Response(null, { status: 204 });
+          fetch: (r) => {
+            requests.push({ name, request: r });
+            return gates.get(name).gate.fetch(r);
           },
         };
       },
@@ -594,29 +595,67 @@ test("only an authenticated header selects reserved bridge grants", async () => 
       get: () => ({ fetch: async () => new Response(null, { status: 200 }) }),
     },
   };
-  const request = (headers) =>
+  const request = (headers = {}) =>
     new Request(new URL("/example", import.meta.url), {
-      headers: { Upgrade: "websocket", ...headers },
+      headers: {
+        Upgrade: "websocket",
+        "X-Homepool-Bridge": "1",
+        "X-Homepool-Auth-Failed": "1",
+        ...headers,
+      },
     });
-  await worker.fetch(request({ "X-Homepool-Bridge": "1" }), env);
-  assert.equal(ids.at(-1), "global");
-  assert.equal(requests.at(-1).headers.get("X-Homepool-Bridge"), null);
-  await worker.fetch(
-    request({ Authorization: "Bearer " + "ab".repeat(32) }),
-    env,
-  );
-  assert.equal(ids.at(-1), "bridge:example");
-  assert.equal(requests.at(-1).headers.get("Authorization"), null);
+  for (const headers of [
+    {},
+    { Authorization: "Bearer " + "00".repeat(32) },
+    { Authorization: "Bearer garbled" },
+    { Authorization: "" },
+    { Authorization: "Basic " + "ab".repeat(32) },
+  ]) {
+    assert.equal((await worker.fetch(request(headers), env)).status, 200);
+    assert.equal(requests.at(-1).name, "global");
+    assert.equal(
+      requests.at(-1).request.headers.get("X-Homepool-Bridge"),
+      null,
+    );
+    assert.equal(requests.at(-1).request.headers.get("Authorization"), null);
+    assert.equal(
+      requests.at(-1).request.headers.get("X-Homepool-Auth-Failed"),
+      headers.Authorization === undefined ? null : "1",
+    );
+  }
+  assert.equal(gates.size, 1);
+  assert.equal(gates.get("global").h.values.get("rate").daily, 5);
+  const global = gates.get("global").h;
+  const rate = global.values.get("rate");
+  rate.daily = defaults.dailyUpgrades;
+  global.values.set("rate", rate);
+  for (const headers of [{}, { Authorization: "Bearer garbled" }])
+    assert.equal((await worker.fetch(request(headers), env)).status, 429);
   assert.equal(
     (
       await worker.fetch(
-        request({ Authorization: "Bearer " + "00".repeat(32) }),
+        request({ Authorization: "Bearer " + "ab".repeat(32) }),
         env,
       )
     ).status,
-    403,
+    200,
   );
-  assert.equal(ids.length, 2);
+  assert.equal(requests.at(-1).name, "bridge:example");
+  assert.equal(requests.at(-1).request.headers.get("Authorization"), null);
+  assert.equal(gates.get("bridge:example").h.values.get("rate").daily, 1);
+  assert.equal(
+    requests.at(-1).request.headers.get("X-Homepool-Auth-Failed"),
+    null,
+  );
+});
+
+test("a headerless upgrade still admits a legacy bridge with binary admission", async () => {
+  const h = harness();
+  assert.equal((await upgrade(h)).status, 101);
+  const b = h.sockets.at(-1);
+  assert.equal(b.data.bridgeUpgrade, false);
+  await h.send(b, admission("bridge", "ab".repeat(32)));
+  assert.equal(h.relay.bridge(), b);
 });
 
 test("exhausted guards cannot leave a closed bridge claiming its slot", async () => {
@@ -660,4 +699,83 @@ test("eight bridge reconnects with 128 registrations survive lost attachments at
   } finally {
     Date.now = realNow;
   }
+});
+
+test("ten times the largest measured event remains within Free duration", () => {
+  // Independent measured maximum, rounded up after applying 10x stress.
+  const stressSeconds = Math.ceil((10 * 365) / 1000);
+  for (const count of [1, 2, 16, 100]) {
+    const guardedSeconds =
+      18000 * Math.max(1, stressSeconds / (EVENT_MS / 1000));
+    const lastEventOvershoot =
+      2 * count * Math.max(0, stressSeconds - EVENT_MS / 1000);
+    const seconds =
+      guardedSeconds +
+      14000 * stressSeconds +
+      (2 * count + 1) * stressSeconds +
+      lastEventOvershoot;
+    assert.ok(seconds * 0.128 <= 13000);
+  }
+});
+
+test("bridge admission compares against a cached configured hash without logging credentials", async () => {
+  const { verifyBridgeToken } = await import("../limits.mjs");
+  let reads = 0;
+  const env = {
+    get BRIDGE_TOKENS() {
+      reads++;
+      return JSON.stringify({ example: "ab".repeat(32) });
+    },
+  };
+  assert.equal(
+    await verifyBridgeToken(env, "example", unhex("ab".repeat(32))),
+    true,
+  );
+  assert.equal(
+    await verifyBridgeToken(env, "example", unhex("ac".repeat(32))),
+    false,
+  );
+  assert.equal(
+    await verifyBridgeToken(env, "example", unhex("ab".repeat(32))),
+    true,
+  );
+  assert.equal(reads, 1);
+  const original = {},
+    logged = [];
+  for (const level of ["log", "info", "warn", "error"]) {
+    original[level] = console[level];
+    console[level] = (...args) => logged.push(args);
+  }
+  try {
+    assert.equal(
+      await verifyBridgeToken(
+        { BRIDGE_TOKENS: "synthetic malformed private binding" },
+        "example",
+        new Uint8Array(32),
+      ),
+      false,
+    );
+  } finally {
+    Object.assign(console, original);
+  }
+  assert.deepEqual(logged, []);
+});
+
+test("invalid headers charge public failures once, even when the client closes immediately", async () => {
+  const h = harness({ dailyFailures: 2 });
+  assert.equal(
+    (await upgrade(h, { "X-Homepool-Auth-Failed": "1" })).status,
+    101,
+  );
+  assert.equal(h.relay.ledger.used.failures, 1);
+  await h.relay.webSocketClose(h.sockets.at(-1));
+  assert.equal(h.relay.ledger.used.failures, 1);
+  assert.equal(
+    (await upgrade(h, { "X-Homepool-Auth-Failed": "1" })).status,
+    101,
+  );
+  await h.send(h.sockets.at(-1), admission("bridge", "00".repeat(32)));
+  assert.equal(h.relay.ledger.used.failures, 2);
+  assert.equal((await upgrade(h)).status, 429);
+  assert.equal(h.relay.bridgeLedger.used, null);
 });

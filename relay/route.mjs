@@ -10,16 +10,12 @@ import {
   bridgeLimits,
   hex,
   hash,
-  constantTimeToken,
+  verifyBridgeToken,
   rate,
   RELAY_WINDOW,
   BRIDGE_PING,
   BRIDGE_PONG,
 } from "./limits.mjs";
-const tokenBytes = (s) =>
-  /^[0-9a-f]{64}$/.test(s ?? "")
-    ? Uint8Array.from(s.match(/../g), (x) => parseInt(x, 16))
-    : null;
 const view = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
 // Close codes for a refused phone admission, so the page can tell the owner
 // what happened. Nothing else about the route or its tokens is disclosed.
@@ -121,7 +117,7 @@ export class Relay {
     });
   }
   async failAdmission(s, code) {
-    await this.budget(0, true);
+    await this.budget(0, !s.deserializeAttachment()?.headerFailure);
     this.drop(s, false, code);
   }
   drop(s, error = false, code) {
@@ -156,6 +152,8 @@ export class Relay {
   }
   fetch(request) {
     const bridgeUpgrade = request.headers.get("X-Homepool-Bridge") === "1";
+    const headerFailure =
+      !bridgeUpgrade && request.headers.get("X-Homepool-Auth-Failed") === "1";
     return this.run(async () => {
       if (this.env.KILL_SWITCH !== "false") {
         for (const s of this.sockets()) this.drop(s);
@@ -174,6 +172,8 @@ export class Relay {
         b.failures >= this.limits.dailyFailures
       )
         return new Response(null, { status: 429 });
+      if (headerFailure && !(await this.budget(0, true)))
+        return new Response(null, { status: 429 });
       if (!(await this.ledger.charge({ messages: 20 })))
         return new Response(null, { status: 429 });
       if (
@@ -182,7 +182,7 @@ export class Relay {
           (s) => s.deserializeAttachment().role === "pending",
         ).length >= this.limits.pending
       ) {
-        await this.budget(0, true);
+        await this.budget(0, !headerFailure);
         return new Response(null, { status: 429 });
       }
       const [client, server] = Object.values(new WebSocketPair());
@@ -193,6 +193,7 @@ export class Relay {
         deadline: Date.now() + this.limits.admissionMs,
         route: new URL(request.url).pathname.slice(1),
         bridgeUpgrade,
+        headerFailure,
       });
       await this.schedule();
       return new Response(null, { status: 101, webSocket: client });
@@ -378,13 +379,8 @@ export class Relay {
     if (Date.now() >= a.deadline) throw Error("deadline");
     const m = readAdmission(b);
     if (m.role === "bridge") {
-      let secret;
-      try {
-        secret = tokenBytes(JSON.parse(this.env.BRIDGE_TOKENS)[a.route]);
-      } catch {}
       if (
-        !secret ||
-        !(await constantTimeToken(b.slice(2), secret)) ||
+        !(await verifyBridgeToken(this.env, a.route, b.slice(2))) ||
         this.bridge()
       )
         throw Error("bridge");

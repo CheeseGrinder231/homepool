@@ -1,5 +1,5 @@
 import { Relay } from "./route.mjs";
-import { defaults, constantTimeToken } from "./limits.mjs";
+import { defaults, tokenBytes, verifyBridgeToken } from "./limits.mjs";
 export { Relay };
 // The remote image page, served from the Worker's static assets (`web/`) on
 // the relay's own origin. Only these exact paths are served; everything else
@@ -129,26 +129,22 @@ export default {
       return new Response(null, { status: 426 });
     const incoming = new Headers(request.headers);
     incoming.delete("X-Homepool-Bridge");
+    incoming.delete("X-Homepool-Auth-Failed");
     const authorization = incoming.get("Authorization");
     let bridge = false;
-    if (authorization) {
-      let secret;
-      try {
-        secret = JSON.parse(env.BRIDGE_TOKENS)[route];
-      } catch {}
-      const offered = authorization.replace(/^Bearer /, "");
-      if (
-        !authorization.startsWith("Bearer ") ||
-        !/^[0-9a-f]{64}$/.test(secret ?? "") ||
-        !/^[0-9a-f]{64}$/.test(offered) ||
-        !(await constantTimeToken(
-          new TextEncoder().encode(offered),
-          new TextEncoder().encode(secret),
-        ))
-      )
-        return new Response(null, { status: 403 });
-      bridge = true;
-      incoming.set("X-Homepool-Bridge", "1");
+    if (authorization !== null) {
+      const match = /^Bearer ([0-9a-f]{64})$/.exec(authorization);
+      const token = tokenBytes(match?.[1]);
+      const matches = await verifyBridgeToken(
+        env,
+        route,
+        token ?? new Uint8Array(32),
+      );
+      bridge = matches && token !== null;
+      if (bridge) incoming.set("X-Homepool-Bridge", "1");
+      else incoming.set("X-Homepool-Auth-Failed", "1");
+      // Wrong/garbled headers use exactly the unauthenticated public path:
+      // public grant/failure budgets, then the unchanged binary admission.
     }
     incoming.delete("Authorization");
     request = new Request(request, { headers: incoming });
