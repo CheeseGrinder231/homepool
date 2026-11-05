@@ -1,6 +1,7 @@
 import { admission, unwrap } from "../../web/protocol/wire.mjs";
 import { readFile, writeFile, mkdtemp } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
+import net from "node:net";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 const root = process.cwd(),
@@ -22,7 +23,12 @@ const files = [
 ];
 const modules = {};
 for (const file of files) {
-  let contents = await readFile(join(root, file), "utf8");
+  let contents = process.env.RELAY_TEST_REF
+    ? spawnSync("git", ["show", `${process.env.RELAY_TEST_REF}:${file}`], {
+        cwd: root,
+        encoding: "utf8",
+      }).stdout
+    : await readFile(join(root, file), "utf8");
   if (mode === "hostile" && file === "relay/limits.mjs")
     contents = contents
       .replace("dailyUpgrades: 1000", "dailyUpgrades: 5")
@@ -31,7 +37,7 @@ for (const file of files) {
     contents = contents.replace("dailyMessages: 570000", "dailyMessages: 0");
   if (mode === "lockout" && file === "relay/limits.mjs")
     contents = contents.replace(
-      "dailyDurationMs: 16000000",
+      "dailyDurationMs: 14000000",
       "dailyDurationMs: 32000",
     );
   if (mode === "spiral" && file === "relay/route.mjs")
@@ -73,9 +79,34 @@ const mf = new Miniflare({
     },
   ],
 });
-let bridge;
+let bridge, proxy;
+const upstreams = new Set();
+let latest;
 try {
   const origin = (await mf.ready).origin;
+  let bridgeOrigin = origin;
+  if (mode === "reconnect") {
+    proxy = net.createServer((client) => {
+      const upstream = net.connect(
+        new URL(origin).port,
+        new URL(origin).hostname,
+      );
+      upstreams.add(upstream);
+      latest = client;
+      client.on("data", (b) => upstream.write(b));
+      upstream.on("data", (b) => {
+        if (!client.destroyed) client.write(b);
+      });
+      upstream.on("end", () => client.end());
+      upstream.on("error", () => client.destroy());
+      client.on("error", () => {});
+      // Deliberately do not propagate client close: model a half-open old path.
+    });
+    await new Promise((r) => proxy.listen(0, new URL(origin).hostname, r));
+    const proxied = new URL(origin);
+    proxied.port = String(proxy.address().port);
+    bridgeOrigin = proxied.origin;
+  }
   const state = join(scratch, "state");
   spawnSync(binary, ["init", state]);
   const put = async (name, data) => {
@@ -94,7 +125,7 @@ try {
   });
   const config = await put("config", {
     state_dir: state,
-    relay_url: origin.replace("http:", "ws:") + "/example",
+    relay_url: bridgeOrigin.replace("http:", "ws:") + "/example",
     route: "example",
     bridge_token_file: token,
     page_origin: new URL("/", origin.replace(/^http:/, "https:")).href,
@@ -116,7 +147,27 @@ try {
     );
   });
   // Workerd access logs expose upgrade/refusal cadence without bridge secrets.
-  if (mode === "legacy") {
+  if (mode === "reconnect") {
+    const waitUp = async (count) => {
+      const until = Date.now() + 25000;
+      while (messages.join("").split("connection up").length - 1 < count) {
+        assert.ok(Date.now() < until, "bridge failed to reconnect");
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    await waitUp(1);
+    for (let n = 0; n < 3; n++) {
+      await mf.unsafeEvictDurableObject("relay", "Relay", {
+        name: "example",
+        webSockets: "close",
+      });
+      await waitUp(n + 2);
+    }
+    latest.destroy();
+    await waitUp(5);
+    assert.ok(!messages.join("").includes("refused HTTP"));
+    console.log("three drops and held-old-socket reconnect recovered");
+  } else if (mode === "legacy") {
     await new Promise((r) => setTimeout(r, 1000));
     const result = spawnSync(binary, ["invite", config], { encoding: "utf8" });
     assert.equal(result.status, 0);
@@ -211,5 +262,7 @@ try {
   }
 } finally {
   bridge?.kill("SIGKILL");
+  for (const upstream of upstreams) upstream.destroy();
+  if (proxy) await new Promise((r) => proxy.close(r));
   await mf.dispose();
 }

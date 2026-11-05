@@ -79,12 +79,7 @@ export class UpgradeGate {
         a.second = second;
         a.count = 0;
       }
-      if (
-        a.daily >=
-        (request?.headers.get("X-Homepool-Bridge") === "1"
-          ? defaults.bridgeUpgrades
-          : defaults.dailyUpgrades)
-      )
+      if (a.daily >= defaults.dailyUpgrades)
         return new Response(null, { status: 429 });
       if (a.count >= defaults.upgradesPerSecond)
         return new Response(null, { status: 429 });
@@ -148,11 +143,11 @@ export default {
     }
     incoming.delete("Authorization");
     request = new Request(request, { headers: incoming });
-    const gate = env.UPGRADES.get(
-      env.UPGRADES.idFromName(bridge ? `bridge:${route}` : "global"),
-    );
-    const permit = await gate.fetch(request);
-    if (permit.status !== 204) return new Response(null, { status: 429 });
+    if (!bridge) {
+      const gate = env.UPGRADES.get(env.UPGRADES.idFromName("global"));
+      const permit = await gate.fetch(request);
+      if (permit.status !== 204) return new Response(null, { status: 429 });
+    }
     return env.ROUTES_DO.get(env.ROUTES_DO.idFromName(route)).fetch(request);
   },
 };

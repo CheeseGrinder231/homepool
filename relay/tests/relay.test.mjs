@@ -522,7 +522,13 @@ test("Free plan model includes independent bridge controls and auxiliary calls",
         AUXILIARY_REQUESTS <=
         50000,
     );
-    const upgrades = defaults.dailyUpgrades + count * defaults.bridgeUpgrades;
+    const upgrades =
+      defaults.dailyUpgrades +
+      count *
+        Math.min(
+          defaults.bridgeUpgradesPerRoute,
+          Math.floor(defaults.bridgeUpgrades / count),
+        );
     assert.ok(
       (((phone.dailyDurationMs + bridge.dailyDurationMs) * count) / 1000) *
         0.128 +
@@ -531,7 +537,7 @@ test("Free plan model includes independent bridge controls and auxiliary calls",
         6500,
     );
     assert.ok(
-      (phone.dailyWrites + bridge.dailyWrites) * count + upgrades + 11000 <=
+      (phone.dailyWrites + bridge.dailyWrites) * count + upgrades + 14200 <=
         50000,
     );
     assert.ok(
@@ -571,6 +577,7 @@ test("full retired receipts release slots after both guards are exhausted", asyn
 test("bad headers share unauthenticated admission and never spend bridge grants", async () => {
   const gates = new Map(),
     requests = [];
+  let forwarded;
   const env = {
     KILL_SWITCH: "false",
     ROUTES: '["example"]',
@@ -592,7 +599,12 @@ test("bad headers share unauthenticated admission and never spend bridge grants"
     },
     ROUTES_DO: {
       idFromName: (n) => n,
-      get: () => ({ fetch: async () => new Response(null, { status: 200 }) }),
+      get: () => ({
+        fetch: async (r) => {
+          forwarded = r;
+          return new Response(null, { status: 200 });
+        },
+      }),
     },
   };
   const request = (headers = {}) =>
@@ -640,13 +652,10 @@ test("bad headers share unauthenticated admission and never spend bridge grants"
     ).status,
     200,
   );
-  assert.equal(requests.at(-1).name, "bridge:example");
-  assert.equal(requests.at(-1).request.headers.get("Authorization"), null);
-  assert.equal(gates.get("bridge:example").h.values.get("rate").daily, 1);
-  assert.equal(
-    requests.at(-1).request.headers.get("X-Homepool-Auth-Failed"),
-    null,
-  );
+  assert.equal(gates.size, 1);
+  assert.equal(forwarded.headers.get("Authorization"), null);
+
+  assert.equal(forwarded.headers.get("X-Homepool-Auth-Failed"), null);
 });
 
 test("a headerless upgrade still admits a legacy bridge with binary admission", async () => {
@@ -778,4 +787,106 @@ test("invalid headers charge public failures once, even when the client closes i
   assert.equal(h.relay.ledger.used.failures, 2);
   assert.equal((await upgrade(h)).status, 429);
   assert.equal(h.relay.bridgeLedger.used, null);
+});
+
+test("authenticated replacement wins over both held and pending sockets", async () => {
+  const h = harness();
+  const headers = { "X-Homepool-Bridge": "1" };
+  await upgrade(h, headers);
+  const old = h.sockets.at(-1);
+  await h.send(old, admission("bridge", "ab".repeat(32)));
+  await upgrade(h, headers);
+  const pending = h.sockets.at(-1);
+  assert.equal(old.readyState, 3);
+  assert.equal((await upgrade(h, headers)).status, 101);
+  const current = h.sockets.at(-1);
+  assert.equal(pending.readyState, 3);
+  await h.send(current, admission("bridge", "ab".repeat(32)));
+  await h.relay.webSocketClose(old);
+  assert.equal(h.relay.bridge(), current);
+});
+
+test("refused bridge upgrades leave admitted allowance intact", async () => {
+  const h = harness();
+  h.env.KILL_SWITCH = "true";
+  for (let n = 0; n < 12; n++)
+    assert.equal((await upgrade(h, { "X-Homepool-Bridge": "1" })).status, 503);
+  assert.equal(h.values.get("bridge-admissions"), undefined);
+  h.env.KILL_SWITCH = "false";
+  h.relay.bridgeLedger.limits.dailyMessages = 0;
+  assert.equal((await upgrade(h, { "X-Homepool-Bridge": "1" })).status, 429);
+  assert.equal(h.values.get("bridge-admissions"), undefined);
+  h.relay.bridgeLedger.limits.dailyMessages = 130000;
+  assert.equal((await upgrade(h, { "X-Homepool-Bridge": "1" })).status, 101);
+  assert.equal(h.values.get("bridge-admissions").daily, 1);
+});
+
+test("a crowded deployment admits sixteen daily blips, survives reconstruction and resets", async () => {
+  const h = harness();
+  h.env.ROUTES = JSON.stringify(
+    Array.from({ length: 100 }, (_, n) => String(n)),
+  );
+  const real = Date.now;
+  let clock = 10 * 86400000;
+  Date.now = () => clock;
+  try {
+    h.restart();
+    for (let n = 0; n < 16; n++) {
+      clock += 60000;
+      assert.equal(
+        (await upgrade(h, { "X-Homepool-Bridge": "1" })).status,
+        101,
+      );
+      const b = h.sockets.at(-1);
+      await h.send(b, admission("bridge", "ab".repeat(32)));
+      assert.equal(h.relay.bridge(), b);
+      for (let token = 0; token < 8; token++) {
+        clock += 75;
+        await h.send(b, tokenSet(new Uint8Array(32).fill(token), 1, token));
+        assert.equal(b.readyState, 1);
+      }
+      h.sockets.length = 0;
+      h.restart();
+    }
+    assert.equal((await upgrade(h, { "X-Homepool-Bridge": "1" })).status, 429);
+    assert.equal(h.values.get("bridge-admissions").daily, 16);
+    clock += 86400000;
+    assert.equal((await upgrade(h, { "X-Homepool-Bridge": "1" })).status, 101);
+  } finally {
+    Date.now = real;
+  }
+});
+
+test("a single route survives a day with one hundred complete socket losses", async () => {
+  const h = harness();
+  h.env.ROUTES = JSON.stringify(Array.from({ length: 1 }, (_, n) => String(n)));
+  const real = Date.now;
+  let clock = 10 * 86400000;
+  Date.now = () => clock;
+  try {
+    h.restart();
+    for (let n = 0; n < 100; n++) {
+      clock += 60000;
+      assert.equal(
+        (await upgrade(h, { "X-Homepool-Bridge": "1" })).status,
+        101,
+      );
+      const b = h.sockets.at(-1);
+      await h.send(b, admission("bridge", "ab".repeat(32)));
+      assert.equal(h.relay.bridge(), b);
+      for (let token = 0; token < 8; token++) {
+        clock += 75;
+        await h.send(b, tokenSet(new Uint8Array(32).fill(token), 1, token));
+        assert.equal(b.readyState, 1);
+      }
+      h.sockets.length = 0;
+      h.restart();
+    }
+    assert.equal((await upgrade(h, { "X-Homepool-Bridge": "1" })).status, 101);
+    assert.equal(h.values.get("bridge-admissions").daily, 101);
+    clock += 86400000;
+    assert.equal((await upgrade(h, { "X-Homepool-Bridge": "1" })).status, 101);
+  } finally {
+    Date.now = real;
+  }
 });

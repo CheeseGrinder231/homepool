@@ -21,9 +21,11 @@ export const defaults = Object.freeze({
   dailyBytes: 3 * 1024 ** 3,
   dailyMessages: 570000,
   dailyWrites: 7000,
-  dailyDurationMs: 16000000,
+  dailyDurationMs: 14000000,
   dailyUpgrades: 1000,
-  bridgeUpgrades: 8,
+  // Total admitted bridge upgrades, divided among configured routes.
+  bridgeUpgrades: 1600,
+  bridgeUpgradesPerRoute: 128,
   dailyFailures: 100,
   upgradesPerSecond: 20,
   tokens: 128,
@@ -126,9 +128,17 @@ export function bridgeLimits(env) {
   return {
     ...defaults,
     dailyMessages: Math.floor(BRIDGE_MESSAGE_UNITS / count),
-    dailyWrites: Math.floor(30000 / count),
-    dailyDurationMs: Math.floor(2000000 / count),
+    dailyWrites: Math.floor(26000 / count),
+    dailyDurationMs: Math.floor(4000000 / count),
     dailyBytes: 1024 * 1024,
     dailyFailures: 8,
   };
+}
+
+export function bridgeAllowance(env) {
+  const count = Math.max(1, JSON.parse(env.ROUTES || "[]").length);
+  return Math.min(
+    defaults.bridgeUpgradesPerRoute,
+    Math.floor(defaults.bridgeUpgrades / count),
+  );
 }
