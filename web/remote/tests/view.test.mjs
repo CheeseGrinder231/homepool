@@ -178,3 +178,22 @@ test("ages in plain words", () => {
   assert.equal(ageText(26 * 3600), "yesterday");
   assert.equal(ageText(5 * 86400), "5 days ago");
 });
+
+test("already expired at publication stays stale regardless of either clock", () => {
+  for (const fetched_at of [undefined, "2025-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2030-01-01T00:00:00Z"]) {
+    const started = phone(0, "2024-01-01T00:00:00Z");
+    const loaded = readView(bytes({ ...base, valid_until: "2025-12-31T23:57:00Z", fetched_at }), started);
+    const initial = freshness(loaded, started);
+    assert.equal(initial.stale, true);
+    assert.ok(initial.expired >= 180, "expiry counts from valid_until, at least since publication");
+    const later = freshness(loaded, phone(60, "2024-01-01T00:01:00Z"));
+    assert.equal(later.stale, true);
+    assert.equal(later.expired, initial.expired + 60);
+    doubt(loaded);
+    assert.equal(freshness(loaded, phone(61, "2023-12-31T23:01:01Z")).stale, true);
+  }
+  // Equality keeps the existing strict past-deadline rule.
+  const equal = readView(bytes({ ...base, valid_until: base.as_of, fetched_at: base.as_of }), phone(0, base.as_of));
+  assert.equal(freshness(equal, phone(0, base.as_of)).stale, false);
+  assert.equal(freshness(equal, phone(1, base.as_of, 1)).stale, true);
+});

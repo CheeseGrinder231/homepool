@@ -809,6 +809,42 @@
       }
     },
     {
+      "name": "valid until before as of",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2025-12-31T23:59:59Z"
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2025-12-31T23:59:59Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
+      "name": "valid until after as of",
+      "input": {
+        "version": 1,
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z"
+      },
+      "output": {
+        "version": 1,
+        "title": "",
+        "as_of": "2026-01-01T00:00:00Z",
+        "valid_until": "2026-01-01T00:01:00Z",
+        "refresh_s": 60,
+        "state": "unknown",
+        "notes": [],
+        "sections": []
+      }
+    },
+    {
       "name": "valid until equals as of",
       "input": {
         "version": 1,
@@ -926,14 +962,6 @@
       "input": {
         "version": 1,
         "as_of": "2026-01-01T00:00:00Z"
-      }
-    },
-    {
-      "name": "valid until before as of",
-      "input": {
-        "version": 1,
-        "as_of": "2026-01-01T00:00:00Z",
-        "valid_until": "2025-12-31T23:59:59Z"
       }
     },
     {
