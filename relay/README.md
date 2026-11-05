@@ -17,8 +17,9 @@ still sees request URLs/IPs and connection metadata; this is not anonymity.
 
 Unknown routes are rejected before either namespace is accessed. A separate
 singleton Durable Object serializes the global upgrade rate; route objects
-serialize admission, storage budgets, token changes and forwarding. A second
-bridge claimant never replaces the admitted socket. Bridge loss closes phones;
+serialize admission, storage budgets, token changes and forwarding. An authenticated upgrade replaces any held bridge or pending authenticated
+claimant, closing its phone sessions. A headerless binary claimant cannot evict
+an admitted bridge. Bridge loss closes phones;
 reconnect starts fresh sessions with IDs starting at one. Session zero controls
 are privileged to the admitted bridge. The relay interprets no Noise content.
 The bridge remains responsible for device/invitation authorization and storage.
@@ -44,7 +45,7 @@ deadline keeps the generic close.
 ## Bounds, recovery and billing
 
 The target remains Workers Free, with SQLite-backed objects. No account or
-billing change is required. Pricing and limits checked 2026-11-04:
+billing change is required. Pricing and limits checked 2026-11-05:
 [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
 [Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
 [DO pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/),
@@ -60,7 +61,7 @@ and credits; relay ACKs are delivery claims, not authentication.
 
 Phone budgets are shared across routes (integer division): 3 GiB incoming wire
 bytes, 570,000 message-equivalent units, 7,000 budget/token row writes,
-16,000,000 active milliseconds and 100 failed admissions daily. An incoming
+14,000,000 active milliseconds and 100 failed admissions daily. An incoming
 WebSocket binary message costs one unit; an upgrade costs 20. HTTP upgrades,
 alarms and closes also have the separate auxiliary allowance below. A singleton
 gate grants at most 1,000 public upgrades daily, at most 20 each second.
@@ -77,12 +78,26 @@ A wrong or malformed header charges the public failure budget at upgrade time,
 including immediate client disconnects; a later binary refusal/timeout does not
 charge that same failure twice. Header
 values never appear in logs, errors or analytics labels. Phones cannot request
-the reserved lane. Each route has eight separately gated bridge upgrades daily;
-a connected bridge or pending authenticated claimant returns 409. Bridge
-admission bypasses phone failures, pending slots and daily guards.
+the reserved lane. The route serializes authenticated HTTP admission and its
+counter: only a returned 101 spends a grant; HTTP refusals spend none. A replacement
+closes the held bridge or pending authenticated socket and its phone sessions.
+The public gate remains separate. Bridge admission bypasses phone failures,
+pending slots and daily guards.
+
+The daily bridge allowance is `min(128, floor(1,600 / N))` per route: 128 for one or two routes,
+100 for sixteen and 16 at the maximum 100 routes. This allows
+recovery roughly every eleven minutes for a single owner, and sixteen admissions even
+in a fully populated deployment, rather than eight attempts including refusals.
+The finite cap still limits authenticated churn; it is not an unlimited service
+promise. Independent control and byte budgets still apply. The crowded-deployment
+regression covers sixteen complete socket losses with eight registrations each;
+the separate maximum-registry regression covers eight losses with 128 registrations.
+A single-route regression also covers 100 complete socket losses in a day.
+These are distinct workloads, not a claim that every grant can replay a full
+registry under every route count.
 
 Bridge session-zero controls have independent shared budgets: 130,000 units,
-30,000 writes and 2,000,000 active milliseconds, divided
+26,000 writes and 4,000,000 active milliseconds, divided
 among routes, plus 1 MiB incoming control bytes per route. Re-registering identical token metadata writes nothing. At 100
 routes this admits eight reconnects with 128 registrations each (1,192 units,
 including eight upgrades and admissions, below 1,300, allowing at most 105 additional units forfeited across seven socket losses). Actual mutations stay
@@ -100,7 +115,7 @@ Attachments retain live usage through hibernation;
 losing all sockets forfeits unused reservations rather than reopening capacity.
 There are no periodic budget alarms. Admission/expiry alarms remain bounded by
 new and carried sockets. Counters and gate grants reset at UTC midnight.
-When the bridge's own eight-upgrade allowance is exhausted it retries with
+When the bridge's own admitted-upgrade allowance is exhausted it retries with
 back-off and recovers after the UTC reset; phones cannot spend this allowance.
 
 ### Active duration and local reservation evidence
@@ -121,7 +136,9 @@ callbacks, 1,646 ms total and 29 ms maximum**, including completion checkpoints.
 A second final-candidate run under concurrent local verification measured 543
 callbacks, 3,378 ms total and a 365 ms maximum. The 2,000 ms reservation is more
 than five times the larger observed maximum. This is
-an empirical local bound, not a Cloudflare storage-latency SLA: the platform
+an empirical local bound, not a Cloudflare storage-latency SLA. The #63
+independent review also observed a 4,103 ms maximum under concurrent local work,
+exceeding both the reservation and four-second sensitivity assumption: the platform
 provides CPU limits but no general HTTP/DO wall-time limit. Runtime pauses or
 storage stalls can exceed it. The guard is an admitted-work bound under this
 stated measurement assumption; it is not an invoice hard cap. Revalidate the
@@ -138,23 +155,32 @@ no deployment or account access is part of this change.
 
 ### Free-plan arithmetic
 
-For N routes, 1 <= N <= 100, global granted upgrades U <= 1,000 + 8N <= 1,800.
-The auxiliary allowance is 14,000 request-equivalents, covering gate and route
-upgrade calls, alarms, closes and bounded retired-session receipts. At most
-1,400 sockets carry from the prior day (four phones, one bridge and up to nine
-pending per route); adding 1,800 new grants gives at most 3,200 close callbacks
-and 3,200 deadline/expiry callbacks. Two DO calls per grant plus these callbacks
-and at most 1,400 carried/full retirement receipts total 11,400, below 14,000.
-Each alarm/connection scheduling call writes at most once: 2U + 3,200 + 3,200
-<= 10,000 auxiliary row writes. Two cold reads per counted message plus twice
-the auxiliary allowance overstates actual budget/token reads.
+For N routes, 1 <= N <= 100, global granted upgrades U <= 1,000 + N min(128, floor(1,600/N)) <= 2,600.
+The auxiliary allowance is 14,000 request-equivalents. Only public upgrades
+call the separate gate: at most 1,000 calls. All 2,600 grants call a route.
+At most 1,400 sockets carry from the previous day; these plus new grants give
+at most 4,000 close callbacks and 4,000 deadline/expiry callbacks. Adding at
+most 1,400 carried/full retirement receipts gives 13,000 auxiliary calls, below
+14,000. Authenticated replacement closes the old socket once; its later close
+callback cannot close the replacement. Pending authenticated claimants replace
+one another, so they cannot accumulate beyond one per route.
+
+Scheduling writes at most twice per new grant plus one per close or alarm:
+`2U + 4,000 + 4,000 <= 13,200`. Reserve 1,000 more writes for UTC rollover.
+Admission counter rows replace the removed bridge gate rows, so total gate and
+bridge-admission counter writes remain at most U. Bridge control writes are
+rebalanced to 26,000; active duration moves from phone to bridge (14,000 and
+4,000 seconds), retaining the same 18,000-second total. This gives cold socket
+losses enough room for forfeited duration reservations without raising the total.
+Two cold reads per counted message plus twice the auxiliary allowance overstate
+actual budget/token/admission reads.
 
 | Worst modeled day, all routes | Maximum | Free allowance | Free fraction |
 | --- | ---: | ---: | ---: |
-| Worker requests, U + 1,000 page loads at 14 requests | 15,800 | 100,000/day | 15.8% |
+| Worker requests, U + 1,000 page loads at 14 requests | 16,600 | 100,000/day | 16.6% |
 | DO requests, route units/20 + 6,500 bridge + 14,000 auxiliary + 288N keepalive | 50,000 | 100,000/day | 50% |
 | DO active duration: (18,000 + 2 x 14,000 + 2 x (2N+1)) seconds x 0.128 | 5,939.456 GB-s | 13,000 GB-s/day | 45.69% |
-| SQLite row writes: 7,000 + 30,000 + U + 11,000 | 49,800 | 100,000/day | 49.8% |
+| SQLite row writes: 7,000 + 26,000 + U + 14,200 | 49,800 | 100,000/day | 49.8% |
 | SQLite row reads: 2 x 700,000 + 2 x 14,000 + 1,000 | 1,429,000 | 5,000,000/day | 28.58% |
 
 Duration includes 18,000 guarded route/bridge seconds, one measured reservation
@@ -173,7 +199,15 @@ Phone units are the smaller of 570,000 and
 `20 x (50,000 - 14,000 - 6,500 - 288N)`, divided among routes. This preserves
 room for every configured bridge's incoming keepalive; its outgoing auto-response
 and duration stay free. The request, duration and row arithmetic is checked
-for N=1,2,16,100.
+for N=1,2,16,100:
+
+| Routes | Bridge admissions per route | DO requests | DO GB-s | Row writes | Row reads | Worker requests |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 128 | 49,288 | 5,888.768 | 48,328 | 1,429,000 | 15,128 |
+| 2 | 128 | 49,576 | 5,889.280 | 48,456 | 1,429,000 | 15,256 |
+| 16 | 100 | 50,000 | 5,896.448 | 49,792 | 1,284,680 | 16,600 |
+| 100 | 16 | 50,000 | 5,939.456 | 49,800 | 317,000 | 16,600 |
+
 
 ### Tenfold measured-time sensitivity
 
@@ -253,6 +287,7 @@ node relay/tests/lockout-workerd.mjs lockout
 node relay/tests/lockout-workerd.mjs guard
 node relay/tests/lockout-workerd.mjs spiral
 node relay/tests/lockout-workerd.mjs hostile
+node relay/tests/lockout-workerd.mjs reconnect
 ```
 
 `lockout` reduces only the duration cap to 32 seconds and leaves a real idle
@@ -270,3 +305,9 @@ It starts that unmodified headerless Rust bridge against the new relay, creates
 a synthetic invitation and verifies that a phone receives its admitted session.
 The workerd transfer runner also checks that missing, wrong and garbled headers
 all upgrade on the public path and receive the same binary refusal code.
+
+`reconnect` runs the real Rust bridge through a local TCP proxy. It drops three
+connections, then severs only the bridge side while retaining the relay's old
+socket. Main returns 409; the replacement implementation returns 101 and the
+bridge reconnects. Set `RELAY_TEST_REF=origin/main` to run the same fixture with
+main's Worker modules. This fixture uses synthetic scratch credentials only.

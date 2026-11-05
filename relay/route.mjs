@@ -13,6 +13,8 @@ import {
   verifyBridgeToken,
   rate,
   RELAY_WINDOW,
+  defaults,
+  bridgeAllowance,
   BRIDGE_PING,
   BRIDGE_PONG,
 } from "./limits.mjs";
@@ -159,12 +161,22 @@ export class Relay {
         for (const s of this.sockets()) this.drop(s);
         return new Response(null, { status: 503 });
       }
-      if (
-        bridgeUpgrade &&
-        (this.bridge() ||
-          this.sockets().some((s) => s.deserializeAttachment()?.bridgeUpgrade))
-      )
-        return new Response(null, { status: 409 });
+      // The route serializes the check and commit with socket replacement.
+      // Refused HTTP attempts never debit this admitted-connection allowance.
+      let grants;
+      if (bridgeUpgrade) {
+        const day = Math.floor(Date.now() / 86400000);
+        const second = Math.floor(Date.now() / 1000);
+        grants = await this.ctx.storage.get("bridge-admissions");
+        if (grants?.day !== day) grants = { day, daily: 0, second, count: 0 };
+        if (grants.second !== second)
+          Object.assign(grants, { second, count: 0 });
+        if (
+          grants.daily >= bridgeAllowance(this.env) ||
+          grants.count >= defaults.upgradesPerSecond
+        )
+          return new Response(null, { status: 429 });
+      }
       const b = this.ledger.used;
       if (
         b?.day === Math.floor(Date.now() / 86400000) &&
@@ -196,6 +208,19 @@ export class Relay {
         headerFailure,
       });
       await this.schedule();
+      if (bridgeUpgrade) {
+        grants.daily++;
+        grants.count++;
+        await this.ctx.storage.put("bridge-admissions", grants);
+        for (const old of this.sockets()) {
+          if (
+            old !== server &&
+            (old.deserializeAttachment()?.role === "bridge" ||
+              old.deserializeAttachment()?.bridgeUpgrade)
+          )
+            this.drop(old);
+        }
+      }
       return new Response(null, { status: 101, webSocket: client });
     }, bridgeUpgrade);
   }
