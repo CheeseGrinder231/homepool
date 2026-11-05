@@ -119,6 +119,12 @@ const fixture = {
     if (this.mode === "healthy") return doc(healthy());
     if (this.mode === "attention") return doc(attention());
     if (this.mode === "hostile") return doc(hostile());
+    if (this.mode === "already-expired") {
+      const d = healthy();
+      d.valid_until = iso(Date.now() - 3 * 60000);
+      d.notes = ["One source expired before publication."];
+      return doc(d);
+    }
     if (this.mode === "expiring") {
       const d = healthy();
       d.valid_until = iso(Date.now() + 4000);
@@ -317,6 +323,22 @@ try {
   assert.equal(green, muted, "stale OK is grey, not green");
   await shot(A, "05-stale");
   log("stale past valid_until: labelled out of date, never green");
+
+  // ---- published with a source deadline that already passed -------------------------------
+  fixture.mode = "already-expired";
+  await refresh(A);
+  await settled(A);
+  assert.equal(await A.page.locator("#service-state").innerText(), "Out of date");
+  assert.equal(await A.page.locator("#service").evaluate((e) => e.classList.contains("is-stale")), true);
+  assert.match(await A.page.locator("#service-age").innerText(), /^Snapshot from .* · Expired 3 min ago$/);
+  assert.ok((await text(A)).includes("Build 412 passed"), "expired document content is retained");
+  assert.ok((await text(A)).includes("One source expired before publication."));
+  assert.equal(await A.page.locator("#service-problem").isVisible(), false);
+  assert.equal(await A.page.locator(".badge.s-ok", { hasText: /^OK$/ }).count(), 0);
+  assert.equal(await A.page.locator(".badge.s-ok").first().evaluate((e) => getComputedStyle(e).color), muted);
+  assert.equal(await A.page.locator("#tabs [role=tab]", { hasText: "Status" }).getAttribute("data-state"), "stale");
+  await shot(A, "05-already-expired");
+  log("already expired at publication: content shown grey and out of date");
 
   // ---- the service stops, then comes back ----------------------------------------------------
   fixture.mode = "healthy";
