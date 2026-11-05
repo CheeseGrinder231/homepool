@@ -168,7 +168,6 @@ export function normalize(doc) {
   }
   const asOf = time(doc.as_of, "as_of");
   const validUntil = time(doc.valid_until, "valid_until");
-  if (parseTime(validUntil) < parseTime(asOf)) invalid("valid_until");
   let total = 0;
   const sections = list(doc.sections, LIMITS.sections, "sections").map((s) => {
     if (!isObject(s)) invalid("section");
@@ -263,9 +262,15 @@ export function homeNow(loaded, now = clock()) {
 // uncertain may be shown as current.
 export function freshness(loaded, now = clock()) {
   const at = homeNow(loaded, now);
-  const age = Math.max(0, at - parseTime(loaded.view.as_of));
-  const expired = at - parseTime(loaded.view.valid_until);
-  return { age, stale: expired > 0, expired: Math.max(0, expired), uncertain: loaded.uncertain };
+  const asOf = parseTime(loaded.view.as_of);
+  const validUntil = parseTime(loaded.view.valid_until);
+  const age = Math.max(0, at - asOf);
+  const alreadyExpired = validUntil < asOf;
+  // Publication proves this deadline already passed, even if either clock
+  // is behind. Keep counting from that minimum with the existing elapsed
+  // high-water mark; the snapshot age still uses home's clock as before.
+  const expired = (alreadyExpired ? Math.max(at, asOf + loaded.elapsed) : at) - validUntil;
+  return { age, stale: alreadyExpired || expired > 0, expired: Math.max(0, expired), uncertain: loaded.uncertain };
 }
 
 export function ageText(seconds) {

@@ -246,9 +246,6 @@ pub fn normalize(doc: &Value) -> Result<Value> {
     };
     let as_of = time(o.get("as_of"))?;
     let valid_until = time(o.get("valid_until"))?;
-    if parse_time(&valid_until) < parse_time(&as_of) {
-        return Err("valid_until");
-    }
     let mut total = 0;
     let mut sections = vec![];
     for s in list(o.get("sections"), settings::VIEW_SECTIONS)? {

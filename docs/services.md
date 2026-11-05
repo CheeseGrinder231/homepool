@@ -122,8 +122,8 @@ refusals that both codecs must agree on.
 The same rules run in `crates/homepool-bridge/src/view.rs` and
 `web/remote/view.mjs`, checked against `protocol/view-vectors.json`:
 
-- `version` must be 1; `as_of` and `valid_until` are required and
-  `valid_until` is not before `as_of`.
+- `version` must be 1; `as_of` and `valid_until` are required. A
+  `valid_until` before `as_of` is accepted as already expired, not invalid.
 - Times are RFC 3339 with `T` and `Z` or a numeric offset, years 0000–9999;
   fractions are dropped and times become UTC.
 - States: `ok`, `warn`, `stuck`, `stale`, `error`, `unknown`. Any other string
@@ -176,7 +176,14 @@ it. The photo list is fetched only when Photos is shown.
 
 ### Freshness
 
-The page judges staleness by home's clock: `fetched_at` plus the time since
+A document with `valid_until` before `as_of` is out of date from arrival,
+whatever either clock says: grey, "Out of date", never current, with its content
+still shown. Its age reads "Snapshot from … · Expired …"; expiry counts from
+`valid_until`, at least the interval to `as_of` plus elapsed request time.
+Unparseable times and times outside years 0000–9999 are still refused.
+
+For other documents, the page judges staleness by home's clock: `fetched_at`
+plus the time since
 the page asked for the document. Counting starts when the request is sent, not
 when the document arrives, so a slow delivery counts against it. The count
 never goes backwards. Each reading adds the steady clock's increase to the
@@ -261,7 +268,8 @@ the relay's budget, not measured billing.
 - `web/remote/tests/services-e2e.mjs`: the explicit browser runner, with the
   same environment as `e2e.mjs` ([remote page](remote-page.md#tests)). It adds
   a loopback fixture service and covers the empty catalog, tabs, a healthy
-  document, stuck and warn items first, a document going stale by the clock
+  document, stuck and warn items first, an already-expired document accepted
+  with grey content and "Out of date", a document going stale by the clock
   ("Snapshot from … · Expired …"), kept data after hiding with a failed
   refresh ("Last known", no age, never green, current again once home
   answers),
